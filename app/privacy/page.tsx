@@ -10,7 +10,7 @@ export default function PrivacyPage() {
       <ul>
         <li><strong>Account</strong>: your email address, name and profile image from Google if you sign in with Google, passkey public keys if you add a passkey. Never a password.</li>
         <li><strong>Workspace data</strong>: agents, mandates (limits, merchants, hours), purchase requests made by your agents (amount, merchant, purpose), approvals and denials, and the ledger that records them.</li>
-        <li><strong>Notification channels</strong> you add: an email address, a Telegram chat id, or a webhook URL.</li>
+        <li><strong>Notification channels</strong> you add: an email address or a webhook URL.</li>
         <li><strong>Connected agents</strong>: the OAuth clients you authorised and the scopes you granted.</li>
         <li><strong>Provider keys</strong> you store for the API proxy, encrypted at rest with a key held outside the database.</li>
         <li><strong>Technical</strong>: request logs with timestamps, IP addresses and identifiers needed to operate rate limits and investigate abuse, kept for a limited period.</li>
@@ -18,7 +18,7 @@ export default function PrivacyPage() {
       <h2>Why</h2>
       <p>To run the service you asked for: decide requests, notify approvers, keep the record, and let you connect agents. We do not sell personal data and do not use it for advertising.</p>
       <h2>Who else sees it</h2>
-      <p>Processors we rely on to run the service: our hosting and database providers, an email delivery provider for sign-in links and alerts, Telegram if you add a Telegram channel, the webhook destinations you configure, and Stripe if you enable virtual cards. Each receives only what its function needs. Agents you connect see the mandates in your workspace and the decisions on their own requests.</p>
+      <p>Processors we rely on to run the service: our hosting and database providers, an email delivery provider for sign-in links and alerts, the webhook destinations you configure, and Stripe if you enable virtual cards. Each receives only what its function needs. Agents you connect see the mandates in your workspace and the decisions on their own requests.</p>
       <h2>Your choices</h2>
       <p>Disconnect an agent, remove a channel, revoke a mandate, leave a workspace, or delete your account at any time from Settings. You can export your ledger. Google sign-in uses only your basic profile; you can revoke Mandate's access in your Google account.</p>
       <h2>Retention and security</h2>

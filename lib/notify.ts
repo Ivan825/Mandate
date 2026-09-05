@@ -9,17 +9,16 @@ import { appUrl } from "./env";
 //
 // Recipients: every member of the workspace whose role may decide requests
 // (owner, admin, approver), through the channels they set in Settings:
-//   telegram  — needs the deployment's TELEGRAM_BOT_TOKEN; the person supplies their chat id
 //   email     — needs RESEND_API_KEY (else logged to the console)
-//   webhook   — POST JSON to any URL (Slack, n8n, Zapier, your own)
+//   webhook   — POST JSON to any URL (n8n, Zapier, Make, your own service)
 // If nobody in the workspace has a channel, the deployment-level fallback
-// (TELEGRAM_CHAT_ID / NOTIFY_WEBHOOK_URL) is used, so a single-owner self-host
-// works without any per-user setup.
+// (NOTIFY_WEBHOOK_URL) is used, so a single-owner self-host works without
+// any per-user setup.
 //
 // One-tap links are signed with NOTIFY_SECRET and expire with the request.
 
 export const LINK_TTL_MS = 24 * 3600 * 1000;
-export type ChannelType = "telegram" | "email" | "webhook";
+export type ChannelType = "email" | "webhook";
 export type Channel = { id: string; userId: string; type: ChannelType; target: string; label: string };
 
 export function notifySecret(): string | null {
@@ -64,10 +63,8 @@ export async function listChannels(userId: string): Promise<Channel[]> {
 
 export async function addChannel(userId: string, type: ChannelType, target: string, label = ""): Promise<{ ok: true; channel: Channel } | { ok: false; error: string }> {
   const t = target.trim();
-  if (type === "telegram" && !/^-?\d{4,20}$/.test(t)) return { ok: false, error: "A Telegram chat id is a number (open https://api.telegram.org/bot<token>/getUpdates after messaging the bot)." };
   if (type === "email" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(t)) return { ok: false, error: "Enter a valid email address." };
   if (type === "webhook" && !/^https?:\/\/[^\s]+$/.test(t)) return { ok: false, error: "Enter a full http(s) URL." };
-  if (type === "telegram" && !process.env.TELEGRAM_BOT_TOKEN) return { ok: false, error: "This deployment has no Telegram bot configured (TELEGRAM_BOT_TOKEN)." };
   const row = { id: randomUUID(), userId, type, target: t, label: label.trim().slice(0, 40), enabled: 1, createdAt: new Date() };
   await db.insert(schema.notificationChannels).values(row);
   return { ok: true, channel: { id: row.id, userId, type, target: t, label: row.label } };
@@ -88,7 +85,6 @@ export async function recipientsFor(workspaceId: string): Promise<Channel[]> {
 
 function fallbackChannels(): Channel[] {
   const out: Channel[] = [];
-  if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) out.push({ id: "env-telegram", userId: "", type: "telegram", target: process.env.TELEGRAM_CHAT_ID, label: "deployment" });
   if (process.env.NOTIFY_WEBHOOK_URL) out.push({ id: "env-webhook", userId: "", type: "webhook", target: process.env.NOTIFY_WEBHOOK_URL, label: "deployment" });
   return out;
 }
@@ -111,8 +107,7 @@ export type Message = { title: string; html: string; text: string; payload: Reco
 export async function deliver(channels: Channel[], msg: Message): Promise<Outcome[]> {
   return Promise.all(channels.map(async (c): Promise<Outcome> => {
     try {
-      if (c.type === "telegram") await withTimeout(sendTelegram(c.target, msg.html, msg.links));
-      else if (c.type === "webhook") await withTimeout(fetch(c.target, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(msg.payload) }).then((r) => { if (!r.ok) throw new Error(`webhook ${r.status}`); }));
+      if (c.type === "webhook") await withTimeout(fetch(c.target, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(msg.payload) }).then((r) => { if (!r.ok) throw new Error(`webhook ${r.status}`); }));
       else if (c.type === "email") await withTimeout(sendEmail(c.target, msg.title, msg.text, msg.html, msg.links), 8000);
       return { channel: c.type, target: mask(c.target), ok: true };
     } catch (e) {
@@ -122,15 +117,6 @@ export async function deliver(channels: Channel[], msg: Message): Promise<Outcom
 }
 
 function mask(t: string) { return t.length > 8 ? t.slice(0, 3) + "…" + t.slice(-3) : t; }
-
-async function sendTelegram(chatId: string, html: string, links: ReturnType<typeof decisionLinks>) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) throw new Error("TELEGRAM_BOT_TOKEN not set");
-  const body: Record<string, unknown> = { chat_id: chatId, text: html, parse_mode: "HTML", disable_web_page_preview: true };
-  if (links) body.reply_markup = { inline_keyboard: [[{ text: "Approve once", url: links.approve }, { text: "Deny", url: links.deny }], [{ text: "Open inbox", url: links.inbox }]] };
-  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`telegram ${r.status}: ${(await r.text()).slice(0, 120)}`);
-}
 
 async function sendEmail(to: string, subject: string, text: string, html: string, links: ReturnType<typeof decisionLinks>) {
   const key = process.env.RESEND_API_KEY;
@@ -180,5 +166,5 @@ export async function sendWarning(workspaceId: string, title: string, body: stri
 }
 
 export async function sendTest(channels: Channel[]): Promise<Outcome[]> {
-  return deliver(channels, { title: "Mandate is connected", html: "<b>Mandate</b> is connected. Approval requests from your agents will arrive here with Approve / Deny buttons.", text: "Mandate is connected. Approval requests from your agents will arrive here.", payload: { event: "test", message: "Mandate is connected." }, links: null });
+  return deliver(channels, { title: "Mandate is connected", html: "<b>Mandate</b> is connected. Approval requests from your agents will arrive here with Approve / Deny links.", text: "Mandate is connected. Approval requests from your agents will arrive here.", payload: { event: "test", message: "Mandate is connected." }, links: null });
 }

@@ -31,8 +31,8 @@ export function Landing({ base }: { base: string }) {
         </div>
         <div>
           <div className="eyebrow">3 · Decide</div>
-          <h3>Approve once, from your phone</h3>
-          <p>Anything above the threshold pauses the agent and reaches every approver by Telegram, email or webhook, with signed one-tap buttons. Unanswered requests expire on their own.</p>
+          <h3>Approve once, from wherever you are</h3>
+          <p>Anything above the threshold pauses the agent and reaches every approver by email or webhook, with signed one-tap approve and deny links. Unanswered requests expire on their own.</p>
         </div>
       </section>
 

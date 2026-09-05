@@ -163,7 +163,7 @@ export const proxyCalls = pgTable("proxy_calls", {
 export const notificationChannels = pgTable("notification_channels", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-  type: text("type").notNull(), // telegram | email | webhook
+  type: text("type").notNull(), // email | webhook
   target: text("target").notNull(), // chat id, email address, or URL
   label: text("label").notNull().default(""),
   enabled: integer("enabled").notNull().default(1),

@@ -141,8 +141,8 @@ export async function addChannelAction(form: FormData) {
   const ctx = await requireCtx();
   const { addChannel } = await import("@/lib/notify");
   const type = String(form.get("type") ?? "");
-  if (!["telegram", "email", "webhook"].includes(type)) return;
-  const r = await addChannel(ctx.userId, type as "telegram" | "email" | "webhook", String(form.get("target") ?? ""), String(form.get("label") ?? ""));
+  if (!["email", "webhook"].includes(type)) return;
+  const r = await addChannel(ctx.userId, type as "email" | "webhook", String(form.get("target") ?? ""), String(form.get("label") ?? ""));
   revalidatePath("/settings");
   redirect(r.ok ? "/settings?channel=added" : "/settings?error=" + encodeURIComponent(r.error));
 }

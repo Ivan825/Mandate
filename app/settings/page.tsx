@@ -12,13 +12,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const ctx = await requireCtx();
   const { test, disconnected, channel, error, cardholder } = await searchParams;
   const [connected, channels, profile] = await Promise.all([listConnectedAgents(ctx.userId), listChannels(ctx.userId), getCardholderProfile(ctx.workspaceId)]);
-  const telegramOn = Boolean(process.env.TELEGRAM_BOT_TOKEN);
   const emailOn = Boolean(process.env.RESEND_API_KEY);
   const rows: [string, boolean, string][] = [
     ["Google sign-in", Boolean(process.env.GOOGLE_CLIENT_ID), "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET"],
     ["Email delivery (sign-in links, alerts, invitations)", emailOn, "RESEND_API_KEY + EMAIL_FROM (else printed to the server console)"],
-    ["Telegram bot", telegramOn, "TELEGRAM_BOT_TOKEN"],
-    ["Deployment-wide fallback alerts", deploymentChannels().length > 0, "TELEGRAM_CHAT_ID / NOTIFY_WEBHOOK_URL (used only when no member has a channel)"],
+    ["Deployment-wide fallback webhook", deploymentChannels().length > 0, "NOTIFY_WEBHOOK_URL (used only when no member has a channel)"],
     ["One-tap links signed", Boolean(notifySecret()), "NOTIFY_SECRET"],
     ["Stripe virtual cards", stripeEnabled(), "STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET"],
   ];
@@ -29,7 +27,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <p className="muted" style={{ margin: "8px 0 20px" }}>Signed in as <strong>{ctx.email}</strong> · {ctx.role} of <strong>{ctx.workspaceName}</strong></p>
 
       <h2 style={{ marginBottom: 8 }}>How to reach you</h2>
-      <p className="muted">Requests that need a decision go to every approver in the workspace through the channels each person sets here. Yours apply in all your workspaces.</p>
+      <p className="muted">Requests that need a decision go to every approver in the workspace by email or webhook, according to the channels each person sets here. Yours apply in all your workspaces.</p>
       {channel === "added" && <div className="notice ok" style={{ marginBottom: 12 }}>Channel added. Send a test to confirm it works.</div>}
       {error && <div className="notice bad" style={{ marginBottom: 12 }}>{error}</div>}
       {test && <div className={`notice ${test === "ok" ? "ok" : "bad"}`} style={{ marginBottom: 12 }}>{test === "ok" ? "Test sent. Check your channels." : test === "none" ? "Add a channel first." : `Test failed: ${decodeURIComponent(test)}`}</div>}
@@ -49,19 +47,18 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         <form action={addChannelAction} className="card form">
           <div className="eyebrow">Add a channel</div>
           <div className="field"><label htmlFor="type">Type</label>
-            <select id="type" name="type" defaultValue={emailOn ? "email" : telegramOn ? "telegram" : "webhook"}>
+            <select id="type" name="type" defaultValue="email">
               <option value="email">Email{emailOn ? "" : " (prints to console until RESEND_API_KEY is set)"}</option>
-              <option value="telegram" disabled={!telegramOn}>Telegram{telegramOn ? "" : " (no bot configured)"}</option>
-              <option value="webhook">Webhook (Slack, n8n, Zapier, your own URL)</option>
+              <option value="webhook">Webhook (n8n, Zapier, Make, your own URL)</option>
             </select>
           </div>
-          <div className="field"><label htmlFor="target">Address, chat id, or URL</label><input id="target" name="target" required placeholder={ctx.email} /></div>
-          <div className="field"><label htmlFor="label">Label (optional)</label><input id="label" name="label" placeholder="phone, work Slack…" /></div>
+          <div className="field"><label htmlFor="target">Email address or webhook URL</label><input id="target" name="target" required placeholder={ctx.email} /></div>
+          <div className="field"><label htmlFor="label">Label (optional)</label><input id="label" name="label" placeholder="personal, ops automation…" /></div>
           <div className="actions"><button className="btn accent" type="submit">Add</button></div>
         </form>
         <div className="card">
-          <div className="eyebrow" style={{ marginBottom: 6 }}>Telegram in two minutes</div>
-          <p className="muted" style={{ fontSize: 13.5 }}>Open Telegram, start a chat with this deployment's bot and send it any message. Then open <code>https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> (the deployment owner has the token) and copy <code>chat.id</code> here. Group chats work too: add the bot to the group and use the group's id.</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>What a webhook receives</div>
+          <p className="muted" style={{ fontSize: 13.5 }}>A JSON POST for each event: <code>approval.requested</code> with the agent, mandate, amount, merchant, purpose and signed <code>links.approve</code> / <code>links.deny</code> / <code>links.inbox</code>; <code>warning</code> for utilisation and velocity alerts; <code>test</code> from the button above. Point it at an n8n, Zapier or Make trigger, or your own endpoint, and route it wherever you already look.</p>
         </div>
       </div>
 

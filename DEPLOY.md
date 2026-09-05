@@ -29,8 +29,7 @@ Keep `MANDATE_ENCRYPTION_KEY` and `RECEIPT_SIGNING_KEY` somewhere durable: losin
 
 ## 3. Notifications
 
-- **Telegram**: @BotFather → `/newbot` → `TELEGRAM_BOT_TOKEN`. Each person adds their own chat id in Settings. `TELEGRAM_CHAT_ID` is only a deployment-wide fallback.
-- **Webhook / email** need no deployment setup; people add them in Settings.
+Nothing to configure at deployment level. Each person adds an email address or a webhook URL (n8n, Zapier, Make, or your own endpoint) in Settings, and every approver in a workspace is notified through their own channels. `NOTIFY_WEBHOOK_URL` is an optional deployment-wide fallback for a single-owner self-host that hasn't set a channel yet.
 
 ## 4. Connect an agent (the real test)
 

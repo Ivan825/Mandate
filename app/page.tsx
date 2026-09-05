@@ -31,7 +31,7 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
         <ol className="steps">
           <li className={agents.length ? "done" : ""}><strong>Add an agent</strong> — anything that acts for you: a shopping agent, Claude Code, a research assistant. {canIssue && agents.length === 0 && <Link href="/agents/new">Add one</Link>}</li>
           <li><strong>Issue it a mandate</strong> — limits, merchants, hours, and the amount above which it must ask you. {canIssue && agents.length > 0 && <Link href="/mandates/new">Issue one</Link>}</li>
-          <li><strong>Tell Mandate how to reach you</strong> — Telegram, email or a webhook, so approvals come to your phone. <Link href="/settings">Settings</Link></li>
+          <li><strong>Tell Mandate how to reach you</strong> — an email address or a webhook, so approvals reach you wherever you already look. <Link href="/settings">Settings</Link></li>
           <li><strong>Connect the agent</strong> — one click from Claude, ChatGPT or Cursor, or a token for your own code. <Link href="/docs">Connect agents</Link></li>
         </ol>
         {!canIssue && <p className="faint">You're a {ctx.role} here; an owner or admin issues the mandates.</p>}
