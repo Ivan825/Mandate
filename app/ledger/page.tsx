@@ -1,20 +1,17 @@
-import { desc } from "drizzle-orm";
-import { db, schema } from "@/lib/db";
-import { verifyChain } from "@/lib/ledger";
+import { requireCtx } from "@/lib/session";
+import { verifyChain, listEvents } from "@/lib/ledger";
 import { When } from "@/app/components";
 
 export default async function LedgerPage() {
-  const [rows, v] = await Promise.all([
-    db.select().from(schema.ledger).orderBy(desc(schema.ledger.seq)).limit(100),
-    verifyChain(),
-  ]);
+  const ctx = await requireCtx();
+  const [rows, v] = await Promise.all([listEvents(ctx.workspaceId, 100), verifyChain(ctx.workspaceId)]);
   return (
     <>
       <div className="page-head">
         <div>
           <div className="eyebrow">Ledger</div>
           <h1>Everything that was granted, asked, allowed or refused</h1>
-          <p className="muted">Append-only. Each row's hash covers the previous row's hash, so an edited or deleted entry breaks verification from that point on. Export it as the receipt in a dispute.</p>
+          <p className="muted">Append-only, one chain per workspace. Each row's hash covers the previous row's hash, so an edited or deleted entry breaks verification from that point on. Export it as the receipt in a dispute.</p>
         </div>
         <div className="actions"><a className="btn secondary" href="/api/ledger/export">Export receipt (JSON)</a></div>
       </div>
@@ -27,7 +24,7 @@ export default async function LedgerPage() {
         <table>
           <thead><tr><th className="r">#</th><th>When</th><th>Event</th><th>Payload</th><th>Hash</th></tr></thead>
           <tbody>
-            {rows.length === 0 && <tr><td colSpan={5} className="empty">Empty. The first mandate you issue becomes event #1.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={5} className="empty">Empty. The first agent you add becomes event #1.</td></tr>}
             {rows.map((r) => (
               <tr key={r.id}>
                 <td className="r num mono">{r.seq}</td>

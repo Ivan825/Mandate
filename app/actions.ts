@@ -2,13 +2,16 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError } from "@/lib/service";
 import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
-import { requireOwner } from "@/lib/auth";
+import { requireCtx } from "@/lib/session";
+import { auth } from "@/lib/auth";
+import { revokeConnectedAgent } from "@/lib/connections";
 
-// Every mutating action re-checks the owner session itself; the middleware
-// is a convenience, not the boundary.
+// Every mutating action resolves the caller's workspace from the session
+// first; ids from forms are only ever used inside that workspace.
 
 function num(v: FormDataEntryValue | null, fallback = 0): number {
   const n = parseFloat(String(v ?? ""));
@@ -21,10 +24,10 @@ function lines(v: FormDataEntryValue | null): string[] {
 function isUuid(s: string): boolean { return /^[0-9a-f-]{36}$/i.test(s); }
 
 export async function createAgentAction(form: FormData) {
-  await requireOwner();
+  const ctx = await requireCtx();
   const name = String(form.get("name") ?? "").trim();
   if (!name) return;
-  const a = await createAgent({ name, description: String(form.get("description") ?? "") });
+  const a = await createAgent(ctx.workspaceId, { name, description: String(form.get("description") ?? "") });
   revalidatePath("/");
   redirect(`/mandates/new?agent=${a.id}`);
 }
@@ -32,7 +35,7 @@ export async function createAgentAction(form: FormData) {
 export type MandateFormState = { errors?: { field: string; message: string }[]; values?: Record<string, string> } | undefined;
 
 export async function createMandateAction(_prev: MandateFormState, form: FormData): Promise<MandateFormState> {
-  await requireOwner();
+  const ctx = await requireCtx();
   // React resets the form after an action returns, so echo the entered values
   // back and let the form re-seed its defaults from them.
   const values: Record<string, string> = {};
@@ -42,7 +45,7 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
   const timezone = String(form.get("timezone") ?? "Asia/Kolkata");
   const approvalRaw = String(form.get("approvalAbove") ?? "").trim();
   const expiresRaw = String(form.get("expiresAt") ?? "").trim();
-  const res = await createMandate({
+  const res = await createMandate(ctx.workspaceId, {
     agentId,
     name: String(form.get("name") ?? ""),
     currency: String(form.get("currency") ?? "USD"),
@@ -61,10 +64,10 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
   const m = res.mandate;
   if (form.get("issueCard") === "on" && stripeEnabled()) {
     try {
-      const card = await issueCardForMandate(m, { name: m.name, email: process.env.CARDHOLDER_EMAIL ?? "agent@example.com" });
-      await attachCard(m.id, card);
+      const card = await issueCardForMandate(m, { name: m.name, email: ctx.email });
+      await attachCard(ctx.workspaceId, m.id, card);
     } catch (e) {
-      await recordCardError(m.id, (e as Error).message);
+      await recordCardError(ctx.workspaceId, m.id, (e as Error).message);
     }
   }
   revalidatePath("/");
@@ -72,10 +75,10 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
 }
 
 export async function simulatePurchaseAction(form: FormData) {
-  await requireOwner();
+  const ctx = await requireCtx();
   const id = String(form.get("mandateId") ?? "");
   if (!isUuid(id)) return;
-  const m = await getMandate(id);
+  const m = await getMandate(ctx.workspaceId, id);
   if (!m) return;
   const amount = toMinor(num(form.get("amount")));
   const merchant = String(form.get("merchant") ?? "").trim() || "unknown merchant";
@@ -83,10 +86,9 @@ export async function simulatePurchaseAction(form: FormData) {
   const category = String(form.get("category") ?? "").trim();
   const viaStripe = form.get("viaStripe") === "on" && stripeEnabled() && m.stripeCardId;
   if (viaStripe) {
-    // Stripe fires issuing_authorization.request at our webhook; the decision is recorded there.
     try { await simulateStripeAuthorization(m.stripeCardId!, amount, merchant); } catch (e) { console.error((e as Error).message); }
   } else {
-    await authorize(m, { amount, merchant, purpose, category }, "simulation");
+    await authorize(m, { amount, merchant, purpose, category }, "simulation", { actor: ctx.email });
   }
   revalidatePath(`/mandates/${id}`);
   revalidatePath("/");
@@ -96,24 +98,24 @@ export async function simulatePurchaseAction(form: FormData) {
 }
 
 export async function revokeMandateAction(form: FormData) {
-  await requireOwner();
+  const ctx = await requireCtx();
   const id = String(form.get("mandateId") ?? "");
   if (!isUuid(id)) return;
-  const m = await getMandate(id);
+  const m = await getMandate(ctx.workspaceId, id);
   if (!m) return;
   if (m.stripeCardId && stripeEnabled()) { try { await deactivateCard(m.stripeCardId); } catch (e) { console.error((e as Error).message); } }
-  await revokeMandate(id);
+  await revokeMandate(ctx.workspaceId, id, ctx.email);
   revalidatePath("/");
   revalidatePath(`/mandates/${id}`);
   redirect(`/mandates/${id}`);
 }
 
 export async function decideApprovalAction(form: FormData) {
-  await requireOwner();
+  const ctx = await requireCtx();
   const id = String(form.get("approvalId") ?? "");
   if (!isUuid(id)) return;
   const decision = form.get("decision") === "approve" ? "approved" : "denied";
-  await decideApproval(id, decision);
+  await decideApproval(ctx.workspaceId, id, decision, ctx.email);
   revalidatePath("/approvals");
   revalidatePath("/");
   revalidatePath("/ledger");
@@ -121,10 +123,24 @@ export async function decideApprovalAction(form: FormData) {
 }
 
 export async function sendTestNotificationAction() {
-  await requireOwner();
+  await requireCtx();
   const { sendTest, configuredChannels } = await import("@/lib/notify");
   if (configuredChannels().length === 0) redirect("/settings?test=none");
   const outcomes = await sendTest();
   const failed = outcomes.filter((o) => !o.ok);
   redirect(failed.length ? `/settings?test=${encodeURIComponent(failed.map((f) => `${f.channel}: ${f.error}`).join("; "))}` : "/settings?test=ok");
+}
+
+export async function signOutAction() {
+  await auth.api.signOut({ headers: await headers() });
+  redirect("/sign-in");
+}
+
+export async function revokeOAuthClientAction(form: FormData) {
+  const ctx = await requireCtx();
+  const clientId = String(form.get("clientId") ?? "");
+  if (!clientId) return;
+  await revokeConnectedAgent(ctx.userId, clientId);
+  revalidatePath("/settings");
+  redirect("/settings?disconnected=1");
 }

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getMandate, factsFor, recentTransactions, listApprovals, takeTokenReveal } from "@/lib/service";
+import { requireCtx } from "@/lib/session";
+import { getMandate, factsFor, recentTransactions, listApprovals, revealToken } from "@/lib/service";
 import { db, schema } from "@/lib/db";
 import { eq } from "drizzle-orm";
 import { fmt, parseList } from "@/lib/policy";
@@ -9,14 +10,15 @@ import { Pill, Util, When } from "@/app/components";
 import { simulatePurchaseAction, revokeMandateAction } from "@/app/actions";
 
 export default async function MandatePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ new?: string }> }) {
+  const ctx = await requireCtx();
   const { id } = await params;
   const { new: isNew } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
-  const m = await getMandate(id);
+  const m = await getMandate(ctx.workspaceId, id);
   if (!m) notFound();
-  const revealed = isNew ? await takeTokenReveal(m.id) : null;
+  const revealed = isNew ? await revealToken(ctx.workspaceId, m.id) : null;
   const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
-  const [facts, txns, approvals] = await Promise.all([factsFor(m), recentTransactions(50, m.id), listApprovals()]);
+  const [facts, txns, approvals] = await Promise.all([factsFor(m), recentTransactions(ctx.workspaceId, 50, m.id), listApprovals(ctx.workspaceId)]);
   const mine = approvals.filter((a) => a.a.mandateId === m.id);
   const allowed = parseList(m.allowedMerchants);
   const blocked = parseList(m.blockedCategories);
@@ -45,14 +47,14 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         <div className="notice" style={{ marginBottom: 20 }}>
           <strong>Mandate issued. Copy the agent token now — it is shown only this once.</strong>
           <div className="token" style={{ margin: "10px 0 6px" }}>{revealed}</div>
-          It is the only credential the agent holds; the card and your accounts stay with you. Revoking the mandate kills it instantly. If you lose it, revoke and issue a new mandate.
+          Use it for agents you run yourself (REST API or the local MCP server). Agents connected through OAuth (Claude, ChatGPT, Cursor) don't need it — they see this mandate automatically. Revoking the mandate cuts both off instantly.
         </div>
       )}
       {isNew && !revealed && (
         <div className="notice" style={{ marginBottom: 20 }}>The token for this mandate was already shown once and is not stored. If you didn't copy it, revoke this mandate and issue a new one.</div>
       )}
       {m.cardError && (
-        <div className="notice bad" style={{ marginBottom: 20 }}><strong>Card not issued.</strong> Stripe said: {m.cardError}. The mandate works through the agent API; fix the Stripe setup and issue a new mandate for a card.</div>
+        <div className="notice bad" style={{ marginBottom: 20 }}><strong>Card not issued.</strong> Stripe said: {m.cardError}. The mandate works through the API and MCP; fix the Stripe setup and issue a new mandate for a card.</div>
       )}
 
       <div className="grid-3" style={{ marginBottom: 20 }}>
@@ -75,10 +77,10 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
             <dt>Merchants</dt><dd>{allowed.length ? allowed.join(", ") : <span className="faint">any</span>}</dd>
             <dt>Blocked</dt><dd>{blocked.length ? blocked.join(", ") : <span className="faint">none</span>}</dd>
             <dt>Active hours</dt><dd className="num">{m.activeHoursStart === 0 && m.activeHoursEnd === 24 ? "all day" : `${String(m.activeHoursStart).padStart(2, "0")}:00–${String(m.activeHoursEnd).padStart(2, "0")}:00`} {m.timezone}</dd>
-            <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}</span> : <span className="faint">none (API only)</span>}</dd>
+            <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}</span> : <span className="faint">none (API and MCP only)</span>}</dd>
             <dt>Token</dt><dd><span className="mono">{m.tokenPrefix}…</span> <span className="faint">(stored hashed; shown once at issue)</span></dd>
           </dl>
-          <div className="faint" style={{ fontSize: 12.5 }}>Agents call <code>POST {base}/api/agent/authorize</code> with the token as a Bearer token. <Link href="/docs">See the API</Link>.</div>
+          <div className="faint" style={{ fontSize: 12.5 }}>Own agents call <code>POST {base}/api/agent/authorize</code> with the token; connected agents use the <code>request_purchase</code> tool. <Link href="/docs">Connect agents</Link>.</div>
         </div>
 
         <div className="card">
@@ -135,7 +137,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
                 <td className="r num">{fmt(t.amount, t.currency)}</td>
                 <td><Pill v={t.decision} /></td>
                 <td className="muted">{t.reason}</td>
-                <td className="mono faint">{t.source}</td>
+                <td className="mono faint">{t.source}{t.actor && <div style={{ fontSize: 11 }}>{t.actor.slice(0, 22)}</div>}</td>
               </tr>
             ))}
           </tbody>

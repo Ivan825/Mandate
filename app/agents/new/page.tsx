@@ -1,6 +1,8 @@
+import { requireCtx } from "@/lib/session";
 import { createAgentAction } from "@/app/actions";
 
-export default function NewAgentPage() {
+export default async function NewAgentPage() {
+  await requireCtx();
   return (
     <div style={{ maxWidth: 560 }}>
       <div className="eyebrow">New agent</div>

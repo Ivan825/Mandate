@@ -1,27 +1,27 @@
-import { drizzle } from "drizzle-orm/libsql";
-import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import * as schema from "./schema";
 
-const url = process.env.DATABASE_URL ?? "file:./data/mandate.db";
-const authToken = process.env.DATABASE_AUTH_TOKEN;
+// One driver everywhere: local Postgres in development and tests, Neon (or
+// any Postgres) in production. DATABASE_URL is the only setting.
 
-// Misconfiguration is reported at request time (see configProblems), not
-// at import time: `next build` also runs with NODE_ENV=production.
+const url = process.env.DATABASE_URL ?? "postgres://mandate:mandate@localhost:5432/mandate";
+
 export function configProblems(): string[] {
-  if (!process.env.VERCEL) return []; // only meaningful on Vercel; local `next start` may use a file DB
+  if (!process.env.VERCEL) return [];
   const out: string[] = [];
-  if (url.startsWith("file:")) out.push("DATABASE_URL must point at a hosted libSQL/Turso database in production; a file: path is not writable on Vercel.");
-  if (!process.env.ADMIN_PASSWORD) out.push("ADMIN_PASSWORD is not set; the dashboard refuses to serve without it.");
+  if (!process.env.DATABASE_URL) out.push("DATABASE_URL is not set.");
+  if (!process.env.BETTER_AUTH_SECRET) out.push("BETTER_AUTH_SECRET is not set; sessions cannot be signed.");
+  if (!process.env.NEXT_PUBLIC_BASE_URL) out.push("NEXT_PUBLIC_BASE_URL is not set; sign-in links and MCP discovery need the public URL.");
   return out;
 }
 
-const globalForDb = globalThis as unknown as { __mandateDb?: ReturnType<typeof drizzle<typeof schema>> };
+const globalForDb = globalThis as unknown as { __mandatePool?: Pool; __mandateDb?: ReturnType<typeof drizzle<typeof schema>> };
 
-export const db =
-  globalForDb.__mandateDb ??
-  drizzle(createClient({ url, authToken }), { schema });
+export const pool = globalForDb.__mandatePool ?? new Pool({ connectionString: url, max: 10, ssl: /localhost|127\.0\.0\.1/.test(url) ? undefined : { rejectUnauthorized: false } });
+export const db = globalForDb.__mandateDb ?? drizzle(pool, { schema });
 
-if (process.env.NODE_ENV !== "production") globalForDb.__mandateDb = db;
+if (process.env.NODE_ENV !== "production") { globalForDb.__mandatePool = pool; globalForDb.__mandateDb = db; }
 
 export type DB = typeof db;
 export type Tx = Parameters<Parameters<DB["transaction"]>[0]>[0];

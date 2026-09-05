@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { requireCtx } from "@/lib/session";
 import { exposureBook, recentTransactions, listAgents } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { Pill, Util, When } from "./components";
 
 export default async function ExposurePage() {
-  const [book, recent, agents] = await Promise.all([exposureBook(), recentTransactions(12), listAgents()]);
+  const ctx = await requireCtx();
+  const [book, recent, agents] = await Promise.all([exposureBook(ctx.workspaceId), recentTransactions(ctx.workspaceId, 12), listAgents(ctx.workspaceId)]);
   const active = book.filter((b) => b.effectiveStatus === "active");
   const byCcy = new Map<string, { limit: number; used: number }>();
   for (const b of active) {
@@ -14,6 +16,20 @@ export default async function ExposurePage() {
   }
   const pending = book.reduce((n, b) => n + b.pendingApprovals, 0);
   const declinedToday = book.reduce((n, b) => n + b.declinedToday, 0);
+
+  if (book.length === 0 && agents.length === 0) {
+    return (
+      <div style={{ maxWidth: 640 }}>
+        <div className="eyebrow">Welcome</div>
+        <h1>Give your agents a sanction, not a card</h1>
+        <p className="muted" style={{ margin: "10px 0 18px" }}>Three steps. Add an agent (anything that acts for you). Issue it a mandate: how much, where, when, and the point above which it must ask you. Then connect the agent — through Claude, ChatGPT or Cursor with one click, or with the token in your own code.</p>
+        <div className="actions">
+          <Link href="/agents/new" className="btn accent">Add your first agent</Link>
+          <Link href="/docs" className="btn secondary">How agents connect</Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -45,7 +61,7 @@ export default async function ExposurePage() {
           <thead><tr><th>Agent · mandate</th><th>Status</th><th>Today</th><th>Lifetime</th><th className="r">Per txn</th><th className="r">Ask above</th><th>Last activity</th></tr></thead>
           <tbody>
             {book.length === 0 && (
-              <tr><td colSpan={7} className="empty">No mandates yet. <Link href="/agents/new">Add an agent</Link>, then issue it a mandate.</td></tr>
+              <tr><td colSpan={7} className="empty">No mandates yet. <Link href="/mandates/new">Issue one</Link> to an agent.</td></tr>
             )}
             {book.map((b) => (
               <tr key={b.mandate.id}>
@@ -71,7 +87,7 @@ export default async function ExposurePage() {
         <table>
           <thead><tr><th>When</th><th>Agent</th><th>Merchant</th><th className="r">Amount</th><th>Decision</th><th>Reason</th><th>Via</th></tr></thead>
           <tbody>
-            {recent.length === 0 && <tr><td colSpan={7} className="empty">No activity yet. Open a mandate and simulate a purchase, or call the agent API.</td></tr>}
+            {recent.length === 0 && <tr><td colSpan={7} className="empty">No activity yet. Open a mandate and try a purchase, or connect an agent.</td></tr>}
             {recent.map(({ t, agentName, mandateName }) => (
               <tr key={t.id}>
                 <td><When d={t.createdAt} /></td>
@@ -80,7 +96,7 @@ export default async function ExposurePage() {
                 <td className="r num">{fmt(t.amount, t.currency)}</td>
                 <td><Pill v={t.decision} /></td>
                 <td className="muted" style={{ maxWidth: 320 }}>{t.reason}</td>
-                <td className="mono faint">{t.source}</td>
+                <td className="mono faint">{t.source}{t.actor && <div title={t.actor} style={{ fontSize: 11 }}>{t.actor.slice(0, 22)}</div>}</td>
               </tr>
             ))}
           </tbody>

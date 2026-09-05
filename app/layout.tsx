@@ -3,8 +3,8 @@ import Link from "next/link";
 import "./globals.css";
 import { countPending } from "@/lib/service";
 import { configProblems } from "@/lib/db";
-import { protectedMode, isOwner } from "@/lib/auth";
-import { logoutAction } from "./auth-actions";
+import { getCtx } from "@/lib/session";
+import { signOutAction } from "./actions";
 
 export const metadata: Metadata = {
   title: "Mandate",
@@ -14,9 +14,9 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const ctx = await getCtx();
   let pending = 0;
-  try { pending = await countPending(); } catch { /* db not ready yet */ }
-  const showSignOut = protectedMode() && (await isOwner());
+  if (ctx) { try { pending = await countPending(ctx.workspaceId); } catch { /* db not ready yet */ } }
   const problems = configProblems();
   return (
     <html lang="en">
@@ -27,17 +27,23 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <div className="topbar">
           <div className="topbar-in">
             <Link href="/" className="brand">Mandate</Link>
-            <nav className="nav">
-              <Link href="/">Exposure</Link>
-              <Link href="/approvals">Approvals{pending > 0 && <span className="badge">{pending}</span>}</Link>
-              <Link href="/ledger">Ledger</Link>
-              <Link href="/docs">Agent API</Link>
-              <Link href="/settings">Settings</Link>
-            </nav>
+            {ctx && (
+              <nav className="nav">
+                <Link href="/">Exposure</Link>
+                <Link href="/approvals">Approvals{pending > 0 && <span className="badge">{pending}</span>}</Link>
+                <Link href="/ledger">Ledger</Link>
+                <Link href="/docs">Connect agents</Link>
+                <Link href="/settings">Settings</Link>
+              </nav>
+            )}
             <div className="spacer" />
-            <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>
-            {showSignOut && (
-              <form action={logoutAction}><button className="btn secondary sm" type="submit">Sign out</button></form>
+            {ctx ? (
+              <>
+                <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>
+                <form action={signOutAction}><button className="btn secondary sm" type="submit" title={ctx.email}>Sign out</button></form>
+              </>
+            ) : (
+              <Link href="/sign-in" className="btn secondary sm">Sign in</Link>
             )}
           </div>
         </div>

@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { getMandateByToken, authorize, factsFor, getIdempotent, putIdempotent } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 
-// The agent-facing endpoint. The agent holds a mandate token, never the
-// real card or key. It asks before spending; we answer approved / declined /
-// pending. On "pending" the human sees it in their inbox, and the agent
-// retries after approval.
+// The token-based agent endpoint, for agents you run yourself. The agent
+// holds a mandate token, never the real card or key. It asks before
+// spending; we answer approved / declined / pending.
 //
 //   POST /api/agent/authorize
 //   Authorization: Bearer mnd_...
+//   Idempotency-Key: <any unique string per purchase attempt>   (recommended)
 //   { "amount": 1299, "merchant": "OpenAI", "purpose": "API credits", "category": "computer_software_stores" }
 
 type Body = { amount?: unknown; merchant?: unknown; category?: unknown; purpose?: unknown; currency?: unknown };
@@ -39,7 +39,6 @@ export async function POST(req: NextRequest) {
   if (purpose === null || category === null || currency === null) return NextResponse.json({ error: "purpose, category and currency must be strings when given." }, { status: 400 });
   if (currency && currency.toUpperCase() !== m.currency) return NextResponse.json({ error: `This mandate is denominated in ${m.currency}.` }, { status: 400 });
 
-  // Idempotency-Key: a retry of the same request gets the same answer, never a second decision.
   const idem = (req.headers.get("idempotency-key") ?? "").trim().slice(0, 128);
   if (idem) {
     const prior = await getIdempotent(m.id, idem);
@@ -47,27 +46,17 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const r = await authorize(m, { amount, merchant, category, purpose }, "agent_api");
+    const r = await authorize(m, { amount, merchant, category, purpose }, "agent_api", { actor: `token ${m.tokenPrefix}…` });
     const f = await factsFor(m);
     const status = r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200;
-    const body = {
-      decision: r.decision,
-      reason: r.reason,
-      rule: r.rule,
-      transactionId: r.transactionId,
-      approvalId: r.approvalId ?? null,
-      remaining: {
-        today: Math.max(0, m.dailyLimit - f.spentToday),
-        total: Math.max(0, m.totalLimit - f.spentTotal),
-        perTransaction: m.perTxnLimit,
-        currency: m.currency,
-        todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency),
-      },
+    const responseBody = {
+      decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
+      remaining: { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), perTransaction: m.perTxnLimit, currency: m.currency, todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency) },
       notified: r.notified ?? false,
       next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request." : undefined,
     };
-    if (idem) await putIdempotent(m.id, idem, status, body);
-    return NextResponse.json(body, { status });
+    if (idem) await putIdempotent(m.id, idem, status, responseBody);
+    return NextResponse.json(responseBody, { status });
   } catch (e) {
     console.error("authorize failed:", (e as Error).message);
     return NextResponse.json({ error: "Authorisation could not be decided; nothing was approved. Retry shortly." }, { status: 503 });

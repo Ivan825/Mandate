@@ -1,32 +1,21 @@
-import { notFound } from "next/navigation";
-import { eq } from "drizzle-orm";
-import { db, schema } from "@/lib/db";
+import { notFound, redirect } from "next/navigation";
 import { verifyLink } from "@/lib/notify";
-import { decideApproval } from "@/lib/service";
+import { decideApproval, getApproval } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 
 // One-tap decision from a notification. The link is signed and expires with
 // the approval. GET shows a confirmation (messengers and mail clients prefetch
 // links, so a GET must never decide anything); the button POSTs the decision.
+// No sign-in is needed: the signature is the proof the link came from us.
 
 type Params = { params: Promise<{ id: string }>; searchParams: Promise<{ d?: string; t?: string; done?: string }> };
-
-async function load(id: string) {
-  const [row] = await db
-    .select({ a: schema.approvals, mandateName: schema.mandates.name, agentName: schema.agents.name })
-    .from(schema.approvals)
-    .innerJoin(schema.mandates, eq(schema.mandates.id, schema.approvals.mandateId))
-    .innerJoin(schema.agents, eq(schema.agents.id, schema.mandates.agentId))
-    .where(eq(schema.approvals.id, id)).limit(1);
-  return row ?? null;
-}
 
 export default async function OneTapPage({ params, searchParams }: Params) {
   const { id } = await params;
   const { d, t, done } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const decision = d === "approve" ? "approve" : d === "deny" ? "deny" : null;
-  const row = await load(id);
+  const row = await getApproval(id);
   if (!row) notFound();
   const valid = decision && t ? verifyLink(id, decision, t) : false;
   const a = row.a;
@@ -36,8 +25,7 @@ export default async function OneTapPage({ params, searchParams }: Params) {
     const dec = String(form.get("d")) === "approve" ? "approve" : "deny";
     const tok = String(form.get("t") ?? "");
     if (!verifyLink(id, dec, tok)) return;
-    await decideApproval(id, dec === "approve" ? "approved" : "denied", "one-tap link");
-    const { redirect } = await import("next/navigation");
+    await decideApproval(null, id, dec === "approve" ? "approved" : "denied", "one-tap link");
     redirect(`/a/${id}?done=${dec}`);
   }
 

@@ -1,11 +1,13 @@
 import Link from "next/link";
+import { requireCtx } from "@/lib/session";
 import { listAgents } from "@/lib/service";
 import { stripeEnabled } from "@/lib/stripe";
 import { MandateForm } from "./form";
 
 export default async function NewMandatePage({ searchParams }: { searchParams: Promise<{ agent?: string }> }) {
+  const ctx = await requireCtx();
   const { agent } = await searchParams;
-  const agents = await listAgents();
+  const agents = await listAgents(ctx.workspaceId);
   if (agents.length === 0) {
     return (
       <div style={{ maxWidth: 560 }}>

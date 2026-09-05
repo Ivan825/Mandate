@@ -6,20 +6,30 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "db:push": "drizzle-kit push",
-    "db:seed": "curl -s http://localhost:3000/api/dev/seed",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node scripts/migrate.mjs",
+    "auth:generate": "AUTH_GEN=1 auth generate --config lib/auth.ts --output lib/auth-schema.ts --adapter drizzle --dialect postgresql -y"
   },
   "dependencies": {
-    "@libsql/client": "^0.15.0",
-    "drizzle-orm": "^0.44.0",
+    "@better-auth/cimd": "1.7",
+    "@better-auth/drizzle-adapter": "1.7",
+    "@better-auth/mcp": "1.7",
+    "@better-auth/passkey": "1.7",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "better-auth": "1.7",
+    "drizzle-orm": "^0.45.2",
     "next": "^15.5.25",
+    "pg": "^8.23.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "stripe": "^17.7.0"
+    "resend": "^6.26.0",
+    "stripe": "^17.7.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "drizzle-kit": "^0.31.0",

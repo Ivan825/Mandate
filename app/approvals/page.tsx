@@ -1,11 +1,13 @@
 import Link from "next/link";
+import { requireCtx } from "@/lib/session";
 import { listApprovals } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { Pill, When } from "@/app/components";
 import { decideApprovalAction } from "@/app/actions";
 
 export default async function ApprovalsPage() {
-  const all = await listApprovals();
+  const ctx = await requireCtx();
+  const all = await listApprovals(ctx.workspaceId);
   const pending = all.filter((r) => r.a.status === "pending");
   const history = all.filter((r) => r.a.status !== "pending").slice(0, 30);
 
@@ -15,7 +17,7 @@ export default async function ApprovalsPage() {
         <div>
           <div className="eyebrow">Approval inbox</div>
           <h1>{pending.length === 0 ? "Nothing waiting on you" : `${pending.length} request${pending.length === 1 ? "" : "s"} waiting on you`}</h1>
-          <p className="muted">An agent asked to spend above its threshold. Approving grants a one-time allowance for that amount at that merchant; the agent retries and the purchase goes through. Denying keeps the mandate intact.</p>
+          <p className="muted">An agent asked to spend above its threshold. Approving grants a one-time allowance for that exact amount at that merchant, valid 24 hours; the agent retries and the purchase goes through. Denying blocks the same ask for 6 hours.</p>
         </div>
       </div>
 
@@ -39,11 +41,11 @@ export default async function ApprovalsPage() {
       <h2 style={{ marginBottom: 10 }}>Decided</h2>
       <div className="tbl">
         <table>
-          <thead><tr><th>Requested</th><th>Agent</th><th>Merchant</th><th className="r">Amount</th><th>Outcome</th><th>Decided</th></tr></thead>
+          <thead><tr><th>Requested</th><th>Agent</th><th>Merchant</th><th className="r">Amount</th><th>Outcome</th><th>Decided</th><th>By</th></tr></thead>
           <tbody>
-            {history.length === 0 && <tr><td colSpan={6} className="empty">No decisions yet.</td></tr>}
+            {history.length === 0 && <tr><td colSpan={7} className="empty">No decisions yet.</td></tr>}
             {history.map(({ a, agentName }) => (
-              <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{agentName}</td><td>{a.merchant}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td></tr>
+              <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{agentName}</td><td>{a.merchant}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td><td className="faint" style={{ fontSize: 12.5 }}>{a.decidedBy ?? ""}</td></tr>
             ))}
           </tbody>
         </table>
