@@ -8,6 +8,20 @@
       "when": 1788630388565,
       "tag": "0000_heavy_sebastian_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788634182840,
+      "tag": "0001_puzzling_living_mummy",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788635197723,
+      "tag": "0002_cloudy_tag",
+      "breakpoints": true
     }
   ]
 }

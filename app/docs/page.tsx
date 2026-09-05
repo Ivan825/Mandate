@@ -1,9 +1,10 @@
 import { requireCtx } from "@/lib/session";
 import { MCP_RESOURCE } from "@/lib/auth";
+import { appUrl } from "@/lib/env";
 
 export default async function DocsPage() {
   await requireCtx();
-  const base = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
+  const base = appUrl();
   return (
     <div style={{ maxWidth: 780 }}>
       <div className="eyebrow">Connect agents</div>

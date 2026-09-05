@@ -20,3 +20,19 @@ export async function sendMagicLinkEmail(to: string, url: string) {
   });
   if (error) throw new Error(`Resend: ${error.message}`);
 }
+
+export async function sendInvitationEmail(i: { to: string; inviter: string; workspace: string; role: string; url: string }) {
+  const key = process.env.RESEND_API_KEY;
+  const text = `${i.inviter} invited you to the "${i.workspace}" workspace on Mandate as ${i.role}.\n\nAccept here (valid 7 days):\n${i.url}\n\nMandate gives AI agents scoped, revocable spending authority. If you weren't expecting this, ignore it.`;
+  if (!key) { console.log(`\n[mandate] Invitation for ${i.to}:\n${i.url}\n`); return; }
+  const { Resend } = await import("resend");
+  const resend = new Resend(key);
+  const { error } = await resend.emails.send({
+    from: process.env.EMAIL_FROM ?? "Mandate <sign-in@mandate.local>",
+    to: i.to,
+    subject: `${i.inviter} invited you to ${i.workspace} on Mandate`,
+    text,
+    html: `<p><strong>${i.inviter}</strong> invited you to the <strong>${i.workspace}</strong> workspace on Mandate as <strong>${i.role}</strong>.</p><p><a href="${i.url}">Accept the invitation</a> (valid 7 days)</p><p>Mandate gives AI agents scoped, revocable spending authority. If you weren't expecting this, ignore it.</p>`,
+  });
+  if (error) throw new Error(`Resend: ${error.message}`);
+}

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { eq } from "drizzle-orm";
 import { stripe, stripeEnabled, STRIPE_RESPONSE_VERSION } from "@/lib/stripe";
-import { getMandateByCard, authorize } from "@/lib/service";
+import { getMandateByCard, authorize, reconcileCard } from "@/lib/service";
 import { recordEvent } from "@/lib/ledger";
 import { db, schema } from "@/lib/db";
 
@@ -58,11 +58,20 @@ export async function POST(req: NextRequest) {
 
   try {
     if (await seenBefore(event)) return NextResponse.json({ received: true, duplicate: true });
-    if (event.type === "issuing_authorization.created" || event.type === "issuing_authorization.updated" || event.type === "issuing_transaction.created") {
-      const obj = event.data.object as { id: string; card?: string | { id: string }; amount?: number; approved?: boolean; request_history?: { reason?: string }[] };
+    if (event.type === "issuing_authorization.updated") {
+      const a = event.data.object as Stripe.Issuing.Authorization;
+      if (a.status === "reversed") await reconcileCard(a.id, "reversal", 0, event.id);
+      else if (a.status === "closed" && a.amount >= 0) await reconcileCard(a.id, "capture", a.amount, event.id);
+    } else if (event.type === "issuing_transaction.created") {
+      const t = event.data.object as Stripe.Issuing.Transaction;
+      const authId = typeof t.authorization === "string" ? t.authorization : t.authorization?.id;
+      if (authId && t.type === "capture") await reconcileCard(authId, "capture", Math.abs(t.amount), event.id);
+      else if (authId && t.type === "refund") await reconcileCard(authId, "refund", Math.abs(t.amount), event.id);
+    } else if (event.type === "issuing_authorization.created") {
+      const obj = event.data.object as Stripe.Issuing.Authorization;
       const cardId = typeof obj.card === "string" ? obj.card : obj.card?.id;
       const m = cardId ? await getMandateByCard(cardId) : null;
-      if (m) await recordEvent(m.workspaceId, `stripe.${event.type}`, { id: obj.id, mandateId: m.id, amount: obj.amount ?? null, approved: obj.approved ?? null, lastReason: obj.request_history?.at(-1)?.reason ?? null });
+      if (m) await recordEvent(m.workspaceId, "stripe.authorization.created", { id: obj.id, mandateId: m.id, amount: obj.amount, approved: obj.approved, lastReason: obj.request_history?.at(-1)?.reason ?? null });
     }
   } catch (e) {
     console.error("webhook record failed:", (e as Error).message);

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMandateByToken, authorize, factsFor, getIdempotent, putIdempotent } from "@/lib/service";
 import { fmt } from "@/lib/policy";
+import { rateLimit, clientIp } from "@/lib/ratelimit";
+import { logger } from "@/lib/log";
 
 // The token-based agent endpoint, for agents you run yourself. The agent
 // holds a mandate token, never the real card or key. It asks before
@@ -20,10 +22,15 @@ function str(v: unknown, max: number): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  const log = logger(req, "agent_api");
+  const ip = await rateLimit(`ip:${clientIp(req)}:agent`, 600);
+  if (!ip.ok) return NextResponse.json({ error: "Too many requests from this address." }, { status: 429, headers: { "retry-after": String(ip.resetSec) } });
   const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
   if (!token.startsWith("mnd_")) return NextResponse.json({ error: "Missing mandate token. Send it as Authorization: Bearer mnd_..." }, { status: 401 });
   const m = await getMandateByToken(token);
-  if (!m) return NextResponse.json({ error: "Unknown mandate token." }, { status: 401 });
+  if (!m) { log.warn("auth.unknown_token"); return NextResponse.json({ error: "Unknown mandate token." }, { status: 401 }); }
+  const rl = await rateLimit(`mandate:${m.id}:agent`, 120);
+  if (!rl.ok) return NextResponse.json({ error: "This mandate is being called too fast; slow down." }, { status: 429, headers: { "retry-after": String(rl.resetSec) } });
 
   let body: Body;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Body must be JSON." }, { status: 400 }); }
@@ -56,9 +63,10 @@ export async function POST(req: NextRequest) {
       next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request." : undefined,
     };
     if (idem) await putIdempotent(m.id, idem, status, responseBody);
-    return NextResponse.json(responseBody, { status });
+    log.info("decision", { mandateId: m.id, decision: r.decision, rule: r.rule, amount, merchant });
+    return NextResponse.json(responseBody, { status, headers: { "x-request-id": log.id } });
   } catch (e) {
-    console.error("authorize failed:", (e as Error).message);
+    log.error("authorize.failed", { message: (e as Error).message });
     return NextResponse.json({ error: "Authorisation could not be decided; nothing was approved. Retry shortly." }, { status: 503 });
   }
 }

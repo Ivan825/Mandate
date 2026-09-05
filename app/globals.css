@@ -117,3 +117,24 @@ legend{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transfor
 .approval .amt{font-family:var(--serif);font-size:24px;font-weight:600}
 .approval .meta{font-size:13px;color:var(--ink-2);margin-top:2px}
 @media (max-width:640px){.approval{grid-template-columns:1fr}}
+
+/* landing */
+.landing{max-width:980px;margin:0 auto}
+.landing .hero{padding:48px 0 40px;max-width:720px}
+.landing .hero h1{font-size:clamp(34px,5vw,52px);line-height:1.05;margin:10px 0 16px;letter-spacing:-.01em}
+.landing .lede{font-family:var(--serif);font-size:20px;line-height:1.45;max-width:60ch;margin-bottom:22px;color:var(--ink-2)}
+.landing .three{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;padding:28px 0;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+.landing .three h3{margin:6px 0 8px}
+.landing .three p{font-size:14.5px;color:var(--ink-2);max-width:none}
+.landing .proof{display:grid;grid-template-columns:1.2fr 1fr;gap:20px;padding:36px 0;align-items:start}
+.landing .proof pre{font-size:12.5px;margin-top:8px}
+.landing .proof p{font-size:14.5px;color:var(--ink-2);max-width:none}
+.landing .why{padding:12px 0 40px;max-width:66ch}
+.landing .why h2{margin-bottom:10px}
+.landing .foot{display:flex;gap:22px;padding:18px 0 8px;border-top:1px solid var(--rule);font-size:13px;color:var(--ink-3)}
+@media (max-width:820px){.landing .three,.landing .proof{grid-template-columns:1fr}}
+.legal{max-width:70ch}
+.legal h2{font-size:18px;margin:22px 0 6px}
+.legal p,.legal li{font-size:15px;color:var(--ink-2)}
+.steps{padding-left:22px;margin:0;display:grid;gap:12px;font-size:15px}
+.steps li.done{color:var(--ink-3);text-decoration:line-through}

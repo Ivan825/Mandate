@@ -2,9 +2,10 @@ import { requireCtx } from "@/lib/session";
 import { verifyChain, listEvents } from "@/lib/ledger";
 import { When } from "@/app/components";
 
-export default async function LedgerPage() {
+export default async function LedgerPage({ searchParams }: { searchParams: Promise<{ full?: string }> }) {
   const ctx = await requireCtx();
-  const [rows, v] = await Promise.all([listEvents(ctx.workspaceId, 100), verifyChain(ctx.workspaceId)]);
+  const { full } = await searchParams;
+  const [rows, v] = await Promise.all([listEvents(ctx.workspaceId, 100), verifyChain(ctx.workspaceId, full === "1")]);
   return (
     <>
       <div className="page-head">
@@ -13,11 +14,11 @@ export default async function LedgerPage() {
           <h1>Everything that was granted, asked, allowed or refused</h1>
           <p className="muted">Append-only, one chain per workspace. Each row's hash covers the previous row's hash, so an edited or deleted entry breaks verification from that point on. Export it as the receipt in a dispute.</p>
         </div>
-        <div className="actions"><a className="btn secondary" href="/api/ledger/export">Export receipt (JSON)</a></div>
+        <div className="actions"><a className="btn secondary" href="/ledger?full=1">Re-verify from genesis</a><a className="btn secondary" href="/api/ledger/export">Export signed receipt (JSON)</a></div>
       </div>
 
       <div className={`notice ${v.ok ? "ok" : "bad"}`} style={{ marginBottom: 20 }}>
-        {v.ok ? <><strong>Chain intact.</strong> {v.checked} event{v.checked === 1 ? "" : "s"} verified end to end.</> : <><strong>Chain broken at #{v.brokenAt}.</strong> {v.detail}. {v.checked} events before it verify.</>}
+        {v.ok ? <><strong>Chain intact.</strong> {v.checked} event{v.checked === 1 ? "" : "s"} verified{full === "1" ? " from genesis" : " (incrementally from the last verified head)"}.</> : <><strong>Chain broken at #{v.brokenAt}.</strong> {v.detail}. {v.checked} events before it verify.</>}
       </div>
 
       <div className="tbl">

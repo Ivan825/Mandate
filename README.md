@@ -17,7 +17,7 @@ Think of it as a sanction letter for an agent, with the loan-book view to match.
 - **MCP server** (`mcp/server.mjs`): gives Claude Code, Cursor or any MCP client `check_mandate` and `request_purchase` tools.
 - **Notifications** (`/settings`): Telegram (Approve / Deny buttons) and a generic webhook; one-tap links are signed, expire with the request, and always confirm before deciding so link previews can't approve anything.
 - **Approval lifecycle**: unanswered requests expire after `APPROVAL_TTL_HOURS` (24 by default); granted allowances lapse unused after 24 h; a denial blocks the same request for 6 h.
-- **Idempotency**: send `Idempotency-Key` on `POST /api/agent/authorize` and a retry returns the stored answer (`Idempotent-Replayed: true`) instead of a second decision...
+- **Idempotency**: send `Idempotency-Key` on `POST /api/agent/authorize` and a retry returns the stored answer (`Idempotent-Replayed: true`) instead of a second decision.
 
 ## Run it locally
 

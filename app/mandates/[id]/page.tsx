@@ -8,21 +8,24 @@ import { fmt, parseList } from "@/lib/policy";
 import { stripeEnabled } from "@/lib/stripe";
 import { Pill, Util, When } from "@/app/components";
 import { simulatePurchaseAction, revokeMandateAction } from "@/app/actions";
+import { grantValid, sweepReveals } from "@/lib/reveal";
+import { appUrl } from "@/lib/env";
 
-export default async function MandatePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ new?: string }> }) {
+export default async function MandatePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ new?: string; g?: string }> }) {
   const ctx = await requireCtx();
   const { id } = await params;
-  const { new: isNew } = await searchParams;
+  const { new: isNew, g } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const m = await getMandate(ctx.workspaceId, id);
   if (!m) notFound();
-  const revealed = isNew ? await revealToken(ctx.workspaceId, m.id) : null;
+  await sweepReveals();
+  const revealed = isNew && grantValid(m.id, g) ? await revealToken(ctx.workspaceId, m.id) : null;
   const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
   const [facts, txns, approvals] = await Promise.all([factsFor(m), recentTransactions(ctx.workspaceId, 50, m.id), listApprovals(ctx.workspaceId)]);
   const mine = approvals.filter((a) => a.a.mandateId === m.id);
   const allowed = parseList(m.allowedMerchants);
   const blocked = parseList(m.blockedCategories);
-  const base = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
+  const base = appUrl();
   const expired = m.status === "active" && m.expiresAt && new Date() > new Date(m.expiresAt);
   const status = expired ? "expired" : m.status;
   const liveAllowances = facts.approvedAllowances.filter((a) => !a.expiresAt || new Date() <= new Date(a.expiresAt)).length;
@@ -36,7 +39,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
           <p className="muted">{m.currency} · issued <When d={m.createdAt} />{m.expiresAt && <> · valid to end of {new Date(m.expiresAt).toLocaleDateString("en-GB", { timeZone: m.timezone, day: "2-digit", month: "short", year: "numeric" })} ({m.timezone})</>}{m.revokedAt && <> · revoked <When d={m.revokedAt} /></>}</p>
         </div>
         <div className="actions">
-          <a className="btn secondary" href={`/api/ledger/export?mandate=${m.id}`}>Download receipt</a>
+          <Link className="btn secondary" href={`/mandates/${m.id}/receipt`}>Receipt</Link>
           {m.status === "active" && (
             <form action={revokeMandateAction}><input type="hidden" name="mandateId" value={m.id} /><button className="btn danger" type="submit">Revoke now</button></form>
           )}

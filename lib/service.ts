@@ -4,6 +4,7 @@ import { db, schema, type Tx } from "./db";
 import { appendEvent, recordEvent } from "./ledger";
 import { evaluate, localDayStart, validateTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type TermsError } from "./policy";
 import { sendApprovalRequested } from "./notify";
+import { checkWarnings } from "./warnings";
 import type { Mandate, Approval, Transaction } from "./schema";
 
 const { agents, mandates, transactions, approvals, idempotencyKeys } = schema;
@@ -90,14 +91,10 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
   return { ok: true, mandate: row, token };
 }
 
-// Returns the plaintext token once, then forgets it.
+// The plaintext token, available only inside the reveal window (lib/reveal.ts).
 export async function revealToken(workspaceId: string, mandateId: string): Promise<string | null> {
-  return db.transaction(async (tx) => {
-    const [m] = await tx.select({ t: mandates.tokenReveal }).from(mandates).where(and(eq(mandates.id, mandateId), eq(mandates.workspaceId, workspaceId))).for("update").limit(1);
-    if (!m?.t) return null;
-    await tx.update(mandates).set({ tokenReveal: null }).where(eq(mandates.id, mandateId));
-    return m.t;
-  });
+  const [m] = await db.select({ t: mandates.tokenReveal }).from(mandates).where(and(eq(mandates.id, mandateId), eq(mandates.workspaceId, workspaceId))).limit(1);
+  return m?.t ?? null;
 }
 
 export async function attachCard(workspaceId: string, mandateId: string, card: { cardholderId: string; cardId: string; last4: string }) {
@@ -174,14 +171,25 @@ export type Exposure = {
 export async function exposureBook(workspaceId: string): Promise<Exposure[]> {
   const rows = await listMandates(workspaceId);
   const now = new Date();
+  // Two grouped queries for the whole workspace instead of five per mandate.
+  const totals = await db.select({ mandateId: transactions.mandateId, decision: transactions.decision, sum: sql<number>`coalesce(sum(${transactions.amount}),0)::int`, count: sql<number>`count(*)::int`, last: sql<Date>`max(${transactions.createdAt})` })
+    .from(transactions).where(eq(transactions.workspaceId, workspaceId)).groupBy(transactions.mandateId, transactions.decision);
+  const pendings = await db.select({ mandateId: approvals.mandateId, c: sql<number>`count(*)::int` }).from(approvals)
+    .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "pending"))).groupBy(approvals.mandateId);
+  const pendingBy = new Map(pendings.map((p) => [p.mandateId, Number(p.c)]));
   const out: Exposure[] = [];
   for (const { m, agentName } of rows) {
-    const f = await factsFor(m, now);
     const dayStart = localDayStart(now, m.timezone);
-    const [decl] = await db.select({ c: sql<number>`count(*)::int` }).from(transactions).where(and(eq(transactions.mandateId, m.id), eq(transactions.decision, "declined"), gte(transactions.createdAt, dayStart)));
-    const [last] = await db.select({ t: transactions.createdAt }).from(transactions).where(eq(transactions.mandateId, m.id)).orderBy(desc(transactions.createdAt)).limit(1);
+    // "Today" needs the mandate's own timezone, so it stays a small per-mandate query.
+    const [today] = await db.select({ s: sql<number>`coalesce(sum(${transactions.amount}),0)::int` }).from(transactions)
+      .where(and(eq(transactions.mandateId, m.id), eq(transactions.decision, "approved"), gte(transactions.createdAt, dayStart)));
+    const [declToday] = await db.select({ c: sql<number>`count(*)::int` }).from(transactions)
+      .where(and(eq(transactions.mandateId, m.id), eq(transactions.decision, "declined"), gte(transactions.createdAt, dayStart)));
+    const mine = totals.filter((t) => t.mandateId === m.id);
+    const spentTotal = Number(mine.find((t) => t.decision === "approved")?.sum ?? 0);
+    const last = mine.reduce<Date | null>((acc, t) => (t.last && (!acc || new Date(t.last) > acc) ? new Date(t.last) : acc), null);
     const effectiveStatus = m.status === "active" && m.expiresAt && now > new Date(m.expiresAt) ? "expired" : m.status;
-    out.push({ mandate: m, agentName, effectiveStatus, spentToday: f.spentToday, spentTotal: f.spentTotal, pendingApprovals: f.openPending, declinedToday: Number(decl?.c ?? 0), lastActivity: last?.t ?? null });
+    out.push({ mandate: m, agentName, effectiveStatus, spentToday: Number(today?.s ?? 0), spentTotal, pendingApprovals: pendingBy.get(m.id) ?? 0, declinedToday: Number(declToday?.c ?? 0), lastActivity: last });
   }
   return out;
 }
@@ -194,7 +202,7 @@ export async function countPending(workspaceId: string): Promise<number> {
 
 // ---------- Authorisation ----------
 
-export type Source = "simulation" | "agent_api" | "mcp" | "stripe";
+export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy";
 export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean };
 
 // The single path every purchase attempt goes through, regardless of source.
@@ -265,6 +273,11 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
     for (const o of outcomes) if (!o.ok) console.error(`notify ${o.channel} failed: ${o.error}`);
     if (outcomes.length) await recordEvent(result.mandate.workspaceId, "approval.notified", { approvalId: a.id, channels: outcomes });
   }
+  if (result.decision === "approved") {
+    const [ag] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, result.mandate.agentId)).limit(1);
+    const f = await factsFor(result.mandate, now);
+    await checkWarnings(result.mandate, ag?.name ?? "Agent", f);
+  }
   const { mandate: _m, ...rest } = result;
   void _m;
   return { ...rest, notified };
@@ -319,4 +332,38 @@ export async function recentTransactions(workspaceId: string, limit = 25, mandat
     .innerJoin(mandates, eq(mandates.id, transactions.mandateId)).innerJoin(agents, eq(agents.id, mandates.agentId))
     .where(mandateId ? and(eq(transactions.workspaceId, workspaceId), eq(transactions.mandateId, mandateId)) : eq(transactions.workspaceId, workspaceId))
     .orderBy(desc(transactions.createdAt)).limit(limit);
+}
+
+// ---------- Cardholder profile (Stripe Issuing) ----------
+
+export async function getCardholderProfile(workspaceId: string) {
+  const [p] = await db.select().from(schema.cardholderProfiles).where(eq(schema.cardholderProfiles.workspaceId, workspaceId)).limit(1);
+  return p ?? null;
+}
+
+export async function saveCardholderProfile(workspaceId: string, p: Omit<typeof schema.cardholderProfiles.$inferInsert, "workspaceId" | "updatedAt">) {
+  const row = { ...p, workspaceId, updatedAt: new Date() };
+  await db.insert(schema.cardholderProfiles).values(row).onConflictDoUpdate({ target: schema.cardholderProfiles.workspaceId, set: row });
+}
+
+// ---------- Card reconciliation ----------
+
+// Stripe tells us later what actually happened to an authorisation: it was
+// captured (possibly for less), reversed, or refunded. The approved
+// transaction is adjusted so the mandate's sums reflect money that moved.
+export async function reconcileCard(stripeAuthorizationId: string, kind: "capture" | "reversal" | "refund", amount: number, ref: string) {
+  const [t] = await db.select().from(transactions).where(eq(transactions.stripeAuthorizationId, stripeAuthorizationId)).limit(1);
+  if (!t) return false;
+  await db.transaction(async (tx) => {
+    if (kind === "capture") {
+      await tx.update(transactions).set({ amount, reason: `Captured ${amount} of ${t.amount} authorised.` }).where(eq(transactions.id, t.id));
+    } else if (kind === "reversal") {
+      await tx.update(transactions).set({ amount: 0, reason: "Authorisation reversed by the network; nothing charged." }).where(eq(transactions.id, t.id));
+    } else {
+      // A refund is a negative approved transaction so daily/total sums net down.
+      await tx.insert(transactions).values({ id: randomUUID(), workspaceId: t.workspaceId, mandateId: t.mandateId, amount: -Math.abs(amount), currency: t.currency, merchant: t.merchant, category: t.category, purpose: `Refund of ${t.purpose || "card purchase"}`, decision: "approved", reason: "Refund from merchant.", source: "stripe", actor: t.actor, stripeAuthorizationId: null, approvalId: null, createdAt: new Date() });
+    }
+    await appendEvent(tx, t.workspaceId, `stripe.${kind}`, { transactionId: t.id, mandateId: t.mandateId, stripeAuthorizationId, amount, ref });
+  });
+  return true;
 }

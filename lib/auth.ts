@@ -8,7 +8,9 @@ import { cimd } from "@better-auth/cimd";
 import { fetchClientMetadataResource } from "@better-auth/cimd/node";
 import { db, pool } from "./db";
 import * as schema from "./schema";
-import { sendMagicLinkEmail } from "./email";
+import { sendMagicLinkEmail, sendInvitationEmail } from "./email";
+import { ac, roles } from "./roles";
+import { appUrl } from "./env";
 
 // Who may sign in, how, and what an "account" is.
 //
@@ -19,7 +21,7 @@ import { sendMagicLinkEmail } from "./email";
 //   Claude, ChatGPT or Cursor can "Connect Mandate" and receive scoped tokens
 //   without anyone copying secrets into config files.
 
-const baseURL = process.env.NEXT_PUBLIC_BASE_URL ?? process.env.BETTER_AUTH_URL ?? "http://localhost:3000";
+const baseURL = appUrl();
 const rpID = (() => { try { return new URL(baseURL).hostname; } catch { return "localhost"; } })();
 
 export const MCP_RESOURCE = `${baseURL.replace(/\/$/, "")}/api/mcp`;
@@ -27,6 +29,7 @@ export const MCP_RESOURCE = `${baseURL.replace(/\/$/, "")}/api/mcp`;
 export const auth = betterAuth({
   appName: "Mandate",
   baseURL,
+  trustedOrigins: [baseURL],
   secret: process.env.BETTER_AUTH_SECRET ?? (process.env.NODE_ENV === "production" ? undefined : "dev-only-secret-change-me-please-32chars"),
   // AUTH_GEN=1 is used only by `npm run auth:generate`, before the drizzle
   // schema for these tables exists.
@@ -52,8 +55,14 @@ export const auth = betterAuth({
   },
   plugins: [
     organization({
+      ac,
+      roles,
       allowUserToCreateOrganization: true,
       creatorRole: "owner",
+      invitationExpiresIn: 60 * 60 * 24 * 7,
+      sendInvitationEmail: async (data) => {
+        await sendInvitationEmail({ to: data.email, inviter: data.inviter.user.name || data.inviter.user.email, workspace: data.organization.name, role: data.role, url: `${baseURL.replace(/\/$/, "")}/invite/${data.id}` });
+      },
     }),
     magicLink({
       expiresIn: 60 * 15,

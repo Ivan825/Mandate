@@ -17,7 +17,9 @@ services:
     environment:
       DATABASE_URL: postgres://mandate:mandate@db:5432/mandate
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-change-me-to-32-plus-random-characters}
-      NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:-http://localhost:3000}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      MANDATE_ENCRYPTION_KEY: ${MANDATE_ENCRYPTION_KEY:-}
+      RECEIPT_SIGNING_KEY: ${RECEIPT_SIGNING_KEY:-}
       NOTIFY_SECRET: ${NOTIFY_SECRET:-change-me-too}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}

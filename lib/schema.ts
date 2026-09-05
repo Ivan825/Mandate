@@ -1,5 +1,5 @@
 import { pgTable, text, integer, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
-import { organization } from "./auth-schema";
+import { organization, user } from "./auth-schema";
 
 export * from "./auth-schema";
 
@@ -105,6 +105,100 @@ export const idempotencyKeys = pgTable("idempotency_keys", {
   status: integer("status").notNull(),
   response: text("response").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+});
+
+// ---------- API-key proxy ----------
+// A workspace stores its real provider keys encrypted; an agent receives a
+// proxy key bound to one mandate and one provider key. Every call through
+// the proxy is pre-authorised from a price table and settled on actual usage.
+
+export const providerKeys = pgTable("provider_keys", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(), // openai | anthropic | gemini
+  label: text("label").notNull().default(""),
+  ciphertext: text("ciphertext").notNull(),
+  hint: text("hint").notNull(), // last 4 characters
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("provider_keys_ws_idx").on(t.workspaceId)]);
+
+export const proxyKeys = pgTable("proxy_keys", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  mandateId: text("mandate_id").notNull().references(() => mandates.id),
+  providerKeyId: text("provider_key_id").notNull().references(() => providerKeys.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  status: text("status").notNull().default("active"), // active | revoked
+  tokenHash: text("token_hash").notNull(),
+  tokenPrefix: text("token_prefix").notNull(),
+  tokenReveal: text("token_reveal"),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+}, (t) => [uniqueIndex("proxy_keys_token_hash_idx").on(t.tokenHash), index("proxy_keys_ws_idx").on(t.workspaceId)]);
+
+export const proxyCalls = pgTable("proxy_calls", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  mandateId: text("mandate_id").notNull(),
+  proxyKeyId: text("proxy_key_id").notNull(),
+  provider: text("provider").notNull(),
+  model: text("model").notNull(),
+  path: text("path").notNull(),
+  transactionId: text("transaction_id"),
+  decision: text("decision").notNull(), // approved | declined | pending | error
+  estimatedAmount: integer("estimated_amount").notNull(),
+  actualAmount: integer("actual_amount"),
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  upstreamStatus: integer("upstream_status"),
+  streamed: integer("streamed").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  settledAt: timestamp("settled_at", { withTimezone: true }),
+}, (t) => [index("proxy_calls_ws_idx").on(t.workspaceId, t.createdAt), index("proxy_calls_mandate_idx").on(t.mandateId)]);
+
+// Where each person wants to be reached. A person's channels apply in every
+// workspace they belong to; a request goes to every member who may decide it.
+export const notificationChannels = pgTable("notification_channels", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  type: text("type").notNull(), // telegram | email | webhook
+  target: text("target").notNull(), // chat id, email address, or URL
+  label: text("label").notNull().default(""),
+  enabled: integer("enabled").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("notif_user_idx").on(t.userId)]);
+
+export const rateLimits = pgTable("rate_limits", {
+  id: text("id").primaryKey(), // `${key}:${windowStart}`
+  windowStart: integer("window_start").notNull(),
+  count: integer("count").notNull().default(0),
+});
+
+// Verified chain heads, so verification is incremental: only rows after the
+// last verified head are re-hashed on each check.
+export const ledgerHeads = pgTable("ledger_heads", {
+  workspaceId: text("workspace_id").primaryKey(),
+  seq: integer("seq").notNull(),
+  hash: text("hash").notNull(),
+  verifiedAt: timestamp("verified_at", { withTimezone: true }).notNull(),
+});
+
+// Cardholder details Stripe Issuing requires for a real (non-test) card.
+export const cardholderProfiles = pgTable("cardholder_profiles", {
+  workspaceId: text("workspace_id").primaryKey().references(() => organization.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone").notNull().default(""),
+  dob: text("dob").notNull().default(""), // YYYY-MM-DD
+  line1: text("line1").notNull(),
+  line2: text("line2").notNull().default(""),
+  city: text("city").notNull(),
+  state: text("state").notNull().default(""),
+  postalCode: text("postal_code").notNull(),
+  country: text("country").notNull(), // ISO 3166-1 alpha-2
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 
 // Stripe delivers webhooks at least once; remember what we've handled.

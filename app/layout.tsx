@@ -4,7 +4,10 @@ import "./globals.css";
 import { countPending } from "@/lib/service";
 import { configProblems } from "@/lib/db";
 import { getCtx } from "@/lib/session";
-import { signOutAction } from "./actions";
+import { headers } from "next/headers";
+import { auth } from "@/lib/auth";
+import { signOutAction, switchWorkspaceAction } from "./actions";
+import { WorkspaceSwitcher } from "./switcher";
 
 export const metadata: Metadata = {
   title: "Mandate",
@@ -16,7 +19,11 @@ export const dynamic = "force-dynamic";
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const ctx = await getCtx();
   let pending = 0;
-  if (ctx) { try { pending = await countPending(ctx.workspaceId); } catch { /* db not ready yet */ } }
+  let orgs: { id: string; name: string }[] = [];
+  if (ctx) {
+    try { pending = await countPending(ctx.workspaceId); } catch { /* db not ready yet */ }
+    try { orgs = (await auth.api.listOrganizations({ headers: await headers() })).map((o) => ({ id: o.id, name: o.name })); } catch { /* ignore */ }
+  }
   const problems = configProblems();
   return (
     <html lang="en">
@@ -32,6 +39,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <Link href="/">Exposure</Link>
                 <Link href="/approvals">Approvals{pending > 0 && <span className="badge">{pending}</span>}</Link>
                 <Link href="/ledger">Ledger</Link>
+                <Link href="/proxy">API proxy</Link>
+                <Link href="/members">Members</Link>
                 <Link href="/docs">Connect agents</Link>
                 <Link href="/settings">Settings</Link>
               </nav>
@@ -39,7 +48,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <div className="spacer" />
             {ctx ? (
               <>
-                <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>
+                <WorkspaceSwitcher current={ctx.workspaceId} orgs={orgs} action={switchWorkspaceAction} />
+                {(ctx.role === "owner" || ctx.role === "admin") && <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>}
                 <form action={signOutAction}><button className="btn secondary sm" type="submit" title={ctx.email}>Sign out</button></form>
               </>
             ) : (

@@ -12,7 +12,7 @@ export function configProblems(): string[] {
   const out: string[] = [];
   if (!process.env.DATABASE_URL) out.push("DATABASE_URL is not set.");
   if (!process.env.BETTER_AUTH_SECRET) out.push("BETTER_AUTH_SECRET is not set; sessions cannot be signed.");
-  if (!process.env.NEXT_PUBLIC_BASE_URL) out.push("NEXT_PUBLIC_BASE_URL is not set; sign-in links and MCP discovery need the public URL.");
+  if (!process.env.APP_URL && !process.env.NEXT_PUBLIC_BASE_URL) out.push("APP_URL is not set; sign-in links, OAuth and MCP discovery need the public URL.");
   return out;
 }
 

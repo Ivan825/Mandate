@@ -16,7 +16,7 @@ jobs:
     env:
       DATABASE_URL: postgres://mandate:mandate@localhost:5432/mandate
       BETTER_AUTH_SECRET: ci-only-secret-change-me-please-32chars
-      NEXT_PUBLIC_BASE_URL: http://localhost:3000
+      APP_URL: http://localhost:3000
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -26,3 +26,6 @@ jobs:
       - run: npm run db:migrate
       - run: npx tsc --noEmit
       - run: npm run build
+      - run: npm run test:integration
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

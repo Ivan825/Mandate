@@ -1,11 +1,15 @@
 import Link from "next/link";
-import { requireCtx } from "@/lib/session";
+import { getCtx } from "@/lib/session";
+import { Landing } from "./landing";
 import { exposureBook, recentTransactions, listAgents } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { Pill, Util, When } from "./components";
+import { appUrl } from "@/lib/env";
 
-export default async function ExposurePage() {
-  const ctx = await requireCtx();
+export default async function ExposurePage({ searchParams }: { searchParams: Promise<{ joined?: string }> }) {
+  const ctx = await getCtx();
+  if (!ctx) return <Landing base={appUrl()} />;
+  const { joined } = await searchParams;
   const [book, recent, agents] = await Promise.all([exposureBook(ctx.workspaceId), recentTransactions(ctx.workspaceId, 12), listAgents(ctx.workspaceId)]);
   const active = book.filter((b) => b.effectiveStatus === "active");
   const byCcy = new Map<string, { limit: number; used: number }>();
@@ -17,32 +21,39 @@ export default async function ExposurePage() {
   const pending = book.reduce((n, b) => n + b.pendingApprovals, 0);
   const declinedToday = book.reduce((n, b) => n + b.declinedToday, 0);
 
-  if (book.length === 0 && agents.length === 0) {
+  if (book.length === 0) {
+    const canIssue = ctx.role === "owner" || ctx.role === "admin";
     return (
-      <div style={{ maxWidth: 640 }}>
-        <div className="eyebrow">Welcome</div>
+      <div style={{ maxWidth: 680 }}>
+        <div className="eyebrow">Welcome to {ctx.workspaceName}</div>
         <h1>Give your agents a sanction, not a card</h1>
-        <p className="muted" style={{ margin: "10px 0 18px" }}>Three steps. Add an agent (anything that acts for you). Issue it a mandate: how much, where, when, and the point above which it must ask you. Then connect the agent — through Claude, ChatGPT or Cursor with one click, or with the token in your own code.</p>
-        <div className="actions">
-          <Link href="/agents/new" className="btn accent">Add your first agent</Link>
-          <Link href="/docs" className="btn secondary">How agents connect</Link>
-        </div>
+        <p className="muted" style={{ margin: "10px 0 20px" }}>Four short steps and your first agent is spending under terms you set.</p>
+        <ol className="steps">
+          <li className={agents.length ? "done" : ""}><strong>Add an agent</strong> — anything that acts for you: a shopping agent, Claude Code, a research assistant. {canIssue && agents.length === 0 && <Link href="/agents/new">Add one</Link>}</li>
+          <li><strong>Issue it a mandate</strong> — limits, merchants, hours, and the amount above which it must ask you. {canIssue && agents.length > 0 && <Link href="/mandates/new">Issue one</Link>}</li>
+          <li><strong>Tell Mandate how to reach you</strong> — Telegram, email or a webhook, so approvals come to your phone. <Link href="/settings">Settings</Link></li>
+          <li><strong>Connect the agent</strong> — one click from Claude, ChatGPT or Cursor, or a token for your own code. <Link href="/docs">Connect agents</Link></li>
+        </ol>
+        {!canIssue && <p className="faint">You're a {ctx.role} here; an owner or admin issues the mandates.</p>}
       </div>
     );
   }
 
   return (
     <>
+      {joined && <div className="notice ok" style={{ marginBottom: 16 }}>You've joined <strong>{ctx.workspaceName}</strong>. Requests that need a decision will reach you through the channels in Settings.</div>}
       <div className="page-head">
         <div>
           <div className="eyebrow">Exposure book</div>
           <h1>What your agents may spend, and what they have</h1>
           <p className="muted">Every agent holds a mandate, not a card. Limits, scope and escalation are enforced on each attempt; everything is written to the ledger.</p>
         </div>
-        <div className="actions">
-          <Link href="/agents/new" className="btn secondary">Add agent</Link>
-          <Link href="/mandates/new" className="btn accent">Issue mandate</Link>
-        </div>
+        {(ctx.role === "owner" || ctx.role === "admin") && (
+          <div className="actions">
+            <Link href="/agents/new" className="btn secondary">Add agent</Link>
+            <Link href="/mandates/new" className="btn accent">Issue mandate</Link>
+          </div>
+        )}
       </div>
 
       <div className="kpis">

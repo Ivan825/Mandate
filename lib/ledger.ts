@@ -38,10 +38,20 @@ export async function recordEvent(workspaceId: string, type: string, payload: Re
   return db.transaction((tx) => appendEvent(tx, workspaceId, type, payload));
 }
 
-export async function verifyChain(workspaceId: string): Promise<{ ok: boolean; checked: number; brokenAt?: number; detail?: string }> {
-  const rows = await db.select().from(schema.ledger).where(eq(schema.ledger.workspaceId, workspaceId)).orderBy(asc(schema.ledger.seq));
-  let prev = GENESIS;
-  let expectedSeq = 1;
+// Incremental: rows up to the last verified head are trusted (their hashes
+// were checked when the head was recorded); only newer rows are re-hashed.
+// Pass full=true to re-verify everything from genesis.
+export async function verifyChain(workspaceId: string, full = false): Promise<{ ok: boolean; checked: number; brokenAt?: number; detail?: string }> {
+  const [head] = full ? [] : await db.select().from(schema.ledgerHeads).where(eq(schema.ledgerHeads.workspaceId, workspaceId)).limit(1);
+  let prev = head?.hash ?? GENESIS;
+  let expectedSeq = (head?.seq ?? 0) + 1;
+  if (head) {
+    // The head row itself must still be there and unchanged.
+    const [h] = await db.select({ hash: schema.ledger.hash }).from(schema.ledger).where(and(eq(schema.ledger.workspaceId, workspaceId), eq(schema.ledger.seq, head.seq))).limit(1);
+    if (!h || h.hash !== head.hash) return { ok: false, checked: 0, brokenAt: head.seq, detail: "A previously verified row was altered or removed" };
+  }
+  const rows = await db.select().from(schema.ledger).where(and(eq(schema.ledger.workspaceId, workspaceId), sql`${schema.ledger.seq} >= ${expectedSeq}`)).orderBy(asc(schema.ledger.seq));
+  const before = expectedSeq - 1;
   for (const r of rows) {
     if (r.seq !== expectedSeq) return { ok: false, checked: expectedSeq - 1, brokenAt: r.seq, detail: `Sequence gap: expected ${expectedSeq}, found ${r.seq}` };
     if (r.prevHash !== prev) return { ok: false, checked: r.seq - 1, brokenAt: r.seq, detail: "Previous-hash link does not match" };
@@ -50,7 +60,12 @@ export async function verifyChain(workspaceId: string): Promise<{ ok: boolean; c
     prev = r.hash;
     expectedSeq++;
   }
-  return { ok: true, checked: rows.length };
+  const last = rows[rows.length - 1];
+  if (last) {
+    await db.insert(schema.ledgerHeads).values({ workspaceId, seq: last.seq, hash: last.hash, verifiedAt: new Date() })
+      .onConflictDoUpdate({ target: schema.ledgerHeads.workspaceId, set: { seq: last.seq, hash: last.hash, verifiedAt: new Date() } });
+  }
+  return { ok: true, checked: before + rows.length };
 }
 
 export async function listEvents(workspaceId: string, limit = 100) {
