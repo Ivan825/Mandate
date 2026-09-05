@@ -11,32 +11,54 @@ import { fmt } from "@/lib/policy";
 //   Authorization: Bearer mnd_...
 //   { "amount": 1299, "merchant": "OpenAI", "purpose": "API credits", "category": "computer_software_stores" }
 
+type Body = { amount?: unknown; merchant?: unknown; category?: unknown; purpose?: unknown; currency?: unknown };
+
+function str(v: unknown, max: number): string | null {
+  if (v === undefined || v === null) return "";
+  if (typeof v !== "string") return null;
+  return v.trim().slice(0, max);
+}
+
 export async function POST(req: NextRequest) {
   const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
   if (!token.startsWith("mnd_")) return NextResponse.json({ error: "Missing mandate token. Send it as Authorization: Bearer mnd_..." }, { status: 401 });
   const m = await getMandateByToken(token);
   if (!m) return NextResponse.json({ error: "Unknown mandate token." }, { status: 401 });
 
-  let body: { amount?: number; merchant?: string; category?: string; purpose?: string; currency?: string };
+  let body: Body;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Body must be JSON." }, { status: 400 }); }
-  if (typeof body.amount !== "number" || !body.merchant) return NextResponse.json({ error: "amount (minor units, integer) and merchant are required." }, { status: 400 });
-  if (body.currency && body.currency.toUpperCase() !== m.currency) return NextResponse.json({ error: `This mandate is denominated in ${m.currency}.` }, { status: 400 });
+  const amount = body.amount;
+  if (typeof amount !== "number" || !Number.isInteger(amount) || amount <= 0 || amount > 1e12) {
+    return NextResponse.json({ error: "amount must be a positive integer in minor units (e.g. 1299 for $12.99)." }, { status: 400 });
+  }
+  const merchant = str(body.merchant, 120);
+  const purpose = str(body.purpose, 300);
+  const category = str(body.category, 64);
+  const currency = str(body.currency, 3);
+  if (!merchant) return NextResponse.json({ error: "merchant is required and must be a string." }, { status: 400 });
+  if (purpose === null || category === null || currency === null) return NextResponse.json({ error: "purpose, category and currency must be strings when given." }, { status: 400 });
+  if (currency && currency.toUpperCase() !== m.currency) return NextResponse.json({ error: `This mandate is denominated in ${m.currency}.` }, { status: 400 });
 
-  const r = await authorize(m, { amount: body.amount, merchant: body.merchant, category: body.category, purpose: body.purpose }, "agent_api");
-  const f = await factsFor(m);
-  return NextResponse.json({
-    decision: r.decision,
-    reason: r.reason,
-    rule: r.rule,
-    transactionId: r.transactionId,
-    approvalId: r.approvalId ?? null,
-    remaining: {
-      today: Math.max(0, m.dailyLimit - f.spentToday),
-      total: Math.max(0, m.totalLimit - f.spentTotal),
-      perTransaction: m.perTxnLimit,
-      currency: m.currency,
-      todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency),
-    },
-    next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request." : undefined,
-  }, { status: r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200 });
+  try {
+    const r = await authorize(m, { amount, merchant, category, purpose }, "agent_api");
+    const f = await factsFor(m);
+    return NextResponse.json({
+      decision: r.decision,
+      reason: r.reason,
+      rule: r.rule,
+      transactionId: r.transactionId,
+      approvalId: r.approvalId ?? null,
+      remaining: {
+        today: Math.max(0, m.dailyLimit - f.spentToday),
+        total: Math.max(0, m.totalLimit - f.spentTotal),
+        perTransaction: m.perTxnLimit,
+        currency: m.currency,
+        todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency),
+      },
+      next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request." : undefined,
+    }, { status: r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200 });
+  } catch (e) {
+    console.error("authorize failed:", (e as Error).message);
+    return NextResponse.json({ error: "Authorisation could not be decided; nothing was approved. Retry shortly." }, { status: 503 });
+  }
 }

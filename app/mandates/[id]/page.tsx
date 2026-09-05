@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getMandate, factsFor, recentTransactions, listApprovals } from "@/lib/service";
+import { getMandate, factsFor, recentTransactions, listApprovals, takeTokenReveal } from "@/lib/service";
 import { db, schema } from "@/lib/db";
 import { eq } from "drizzle-orm";
 import { fmt, parseList } from "@/lib/policy";
@@ -11,22 +11,27 @@ import { simulatePurchaseAction, revokeMandateAction } from "@/app/actions";
 export default async function MandatePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ new?: string }> }) {
   const { id } = await params;
   const { new: isNew } = await searchParams;
+  if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const m = await getMandate(id);
   if (!m) notFound();
+  const revealed = isNew ? await takeTokenReveal(m.id) : null;
   const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
   const [facts, txns, approvals] = await Promise.all([factsFor(m), recentTransactions(50, m.id), listApprovals()]);
   const mine = approvals.filter((a) => a.a.mandateId === m.id);
   const allowed = parseList(m.allowedMerchants);
   const blocked = parseList(m.blockedCategories);
   const base = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
+  const expired = m.status === "active" && m.expiresAt && new Date() > new Date(m.expiresAt);
+  const status = expired ? "expired" : m.status;
+  const liveAllowances = facts.approvedAllowances.filter((a) => !a.expiresAt || new Date() <= new Date(a.expiresAt)).length;
 
   return (
     <>
       <div className="page-head">
         <div>
           <div className="eyebrow">{agent?.name ?? "Agent"} · mandate</div>
-          <h1>{m.name} <Pill v={m.status} /></h1>
-          <p className="muted">{m.currency} · issued <When d={m.createdAt} />{m.expiresAt && <> · expires {new Date(m.expiresAt).toISOString().slice(0, 10)}</>}{m.revokedAt && <> · revoked <When d={m.revokedAt} /></>}</p>
+          <h1>{m.name} <Pill v={status} /></h1>
+          <p className="muted">{m.currency} · issued <When d={m.createdAt} />{m.expiresAt && <> · valid to end of {new Date(m.expiresAt).toLocaleDateString("en-GB", { timeZone: m.timezone, day: "2-digit", month: "short", year: "numeric" })} ({m.timezone})</>}{m.revokedAt && <> · revoked <When d={m.revokedAt} /></>}</p>
         </div>
         <div className="actions">
           <a className="btn secondary" href={`/api/ledger/export?mandate=${m.id}`}>Download receipt</a>
@@ -36,10 +41,18 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         </div>
       </div>
 
-      {isNew && (
+      {revealed && (
         <div className="notice" style={{ marginBottom: 20 }}>
-          <strong>Mandate issued.</strong> Give the agent the token below. It is the only credential the agent holds; the card and your accounts stay with you. Revoking the mandate kills the token instantly.
+          <strong>Mandate issued. Copy the agent token now — it is shown only this once.</strong>
+          <div className="token" style={{ margin: "10px 0 6px" }}>{revealed}</div>
+          It is the only credential the agent holds; the card and your accounts stay with you. Revoking the mandate kills it instantly. If you lose it, revoke and issue a new mandate.
         </div>
+      )}
+      {isNew && !revealed && (
+        <div className="notice" style={{ marginBottom: 20 }}>The token for this mandate was already shown once and is not stored. If you didn't copy it, revoke this mandate and issue a new one.</div>
+      )}
+      {m.cardError && (
+        <div className="notice bad" style={{ marginBottom: 20 }}><strong>Card not issued.</strong> Stripe said: {m.cardError}. The mandate works through the agent API; fix the Stripe setup and issue a new mandate for a card.</div>
       )}
 
       <div className="grid-3" style={{ marginBottom: 20 }}>
@@ -48,7 +61,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         <div className="card">
           <div className="eyebrow">Escalation</div>
           <div style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 600 }} className="num">{m.approvalAbove == null ? "never asks" : `asks above ${fmt(m.approvalAbove, m.currency)}`}</div>
-          <div className="faint" style={{ fontSize: 12.5 }}>{facts.approvedAllowances.length} approval{facts.approvedAllowances.length === 1 ? "" : "s"} granted and unused</div>
+          <div className="faint" style={{ fontSize: 12.5 }}>{facts.openPending} waiting on you · {liveAllowances} approval{liveAllowances === 1 ? "" : "s"} granted and unused</div>
         </div>
       </div>
 
@@ -62,25 +75,23 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
             <dt>Merchants</dt><dd>{allowed.length ? allowed.join(", ") : <span className="faint">any</span>}</dd>
             <dt>Blocked</dt><dd>{blocked.length ? blocked.join(", ") : <span className="faint">none</span>}</dd>
             <dt>Active hours</dt><dd className="num">{m.activeHoursStart === 0 && m.activeHoursEnd === 24 ? "all day" : `${String(m.activeHoursStart).padStart(2, "0")}:00–${String(m.activeHoursEnd).padStart(2, "0")}:00`} {m.timezone}</dd>
-            <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}</span> : <span className="faint">none (API + simulation only)</span>}</dd>
+            <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}</span> : <span className="faint">none (API only)</span>}</dd>
+            <dt>Token</dt><dd><span className="mono">{m.tokenPrefix}…</span> <span className="faint">(stored hashed; shown once at issue)</span></dd>
           </dl>
-          <div>
-            <div className="eyebrow" style={{ marginBottom: 6 }}>Agent token</div>
-            <div className="token">{m.token}</div>
-            <div className="faint" style={{ fontSize: 12.5, marginTop: 6 }}>Agents call <code>POST {base}/api/agent/authorize</code> with this as a Bearer token. <Link href="/docs">See the API</Link>.</div>
-          </div>
+          <div className="faint" style={{ fontSize: 12.5 }}>Agents call <code>POST {base}/api/agent/authorize</code> with the token as a Bearer token. <Link href="/docs">See the API</Link>.</div>
         </div>
 
         <div className="card">
-          <div className="eyebrow" style={{ marginBottom: 10 }}>Simulate a purchase attempt</div>
-          {m.status !== "active" ? (
-            <p className="muted">This mandate is {m.status}; attempts will be declined.</p>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Try it as the agent</div>
+          <p className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>This goes through the same decision path as a real request and counts against the mandate — use it to see how the terms behave.</p>
+          {status !== "active" ? (
+            <p className="muted">This mandate is {status}; attempts will be declined.</p>
           ) : (
             <form action={simulatePurchaseAction} className="form">
               <input type="hidden" name="mandateId" value={m.id} />
               <div className="row">
                 <div className="field"><label htmlFor="amount">Amount ({m.currency})</label><input id="amount" name="amount" type="number" step="0.01" min="0.01" required defaultValue="12.99" /></div>
-                <div className="field"><label htmlFor="merchant">Merchant</label><input id="merchant" name="merchant" required defaultValue="OpenAI" /></div>
+                <div className="field"><label htmlFor="merchant">Merchant</label><input id="merchant" name="merchant" required defaultValue={allowed[0]?.replace(/\*$/, "") || "OpenAI"} /></div>
               </div>
               <div className="row">
                 <div className="field"><label htmlFor="purpose">Purpose (what the agent says)</label><input id="purpose" name="purpose" defaultValue="API credits for the scraper" /></div>
@@ -100,10 +111,10 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
           <h2 style={{ marginBottom: 10 }}>Approvals on this mandate</h2>
           <div className="tbl" style={{ marginBottom: 28 }}>
             <table>
-              <thead><tr><th>Requested</th><th>Merchant</th><th className="r">Amount</th><th>Status</th><th>Decided</th></tr></thead>
+              <thead><tr><th>Requested</th><th>Merchant</th><th className="r">Amount</th><th>Status</th><th>Decided</th><th>Valid until</th></tr></thead>
               <tbody>
                 {mine.map(({ a }) => (
-                  <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{a.merchant}{a.purpose && <div className="faint" style={{ fontSize: 12 }}>{a.purpose}</div>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td></tr>
+                  <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{a.merchant}{a.purpose && <div className="faint" style={{ fontSize: 12 }}>{a.purpose}</div>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td><td><When d={a.status === "approved" ? a.expiresAt : null} /></td></tr>
                 ))}
               </tbody>
             </table>

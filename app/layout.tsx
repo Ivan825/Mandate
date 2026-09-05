@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
-import { listApprovals } from "@/lib/service";
-import { logoutAction } from "./actions";
+import { countPending } from "@/lib/service";
+import { configProblems } from "@/lib/db";
+import { protectedMode, isOwner } from "@/lib/auth";
+import { logoutAction } from "./auth-actions";
 
 export const metadata: Metadata = {
   title: "Mandate",
@@ -13,8 +15,9 @@ export const dynamic = "force-dynamic";
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   let pending = 0;
-  try { pending = (await listApprovals("pending")).length; } catch { /* db not ready yet */ }
-  const protectedMode = Boolean(process.env.ADMIN_PASSWORD);
+  try { pending = await countPending(); } catch { /* db not ready yet */ }
+  const showSignOut = protectedMode() && (await isOwner());
+  const problems = configProblems();
   return (
     <html lang="en">
       <head>
@@ -32,12 +35,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             </nav>
             <div className="spacer" />
             <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>
-            {protectedMode && (
+            {showSignOut && (
               <form action={logoutAction}><button className="btn secondary sm" type="submit">Sign out</button></form>
             )}
           </div>
         </div>
-        <main className="main">{children}</main>
+        <main className="main">
+          {problems.length > 0 && <div className="notice bad" style={{ marginBottom: 20 }}><strong>Configuration problem.</strong> {problems.join(" ")}</div>}
+          {children}
+        </main>
       </body>
     </html>
   );

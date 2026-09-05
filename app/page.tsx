@@ -5,7 +5,7 @@ import { Pill, Util, When } from "./components";
 
 export default async function ExposurePage() {
   const [book, recent, agents] = await Promise.all([exposureBook(), recentTransactions(12), listAgents()]);
-  const active = book.filter((b) => b.mandate.status === "active");
+  const active = book.filter((b) => b.effectiveStatus === "active");
   const byCcy = new Map<string, { limit: number; used: number }>();
   for (const b of active) {
     const c = byCcy.get(b.mandate.currency) ?? { limit: 0, used: 0 };
@@ -30,7 +30,7 @@ export default async function ExposurePage() {
       </div>
 
       <div className="kpis">
-        <div className="kpi"><div className="eyebrow">Active mandates</div><div className="v num">{active.length}</div><div className="s">{agents.length} agent{agents.length === 1 ? "" : "s"} · {book.length - active.length} revoked</div></div>
+        <div className="kpi"><div className="eyebrow">Active mandates</div><div className="v num">{active.length}</div><div className="s">{agents.length} agent{agents.length === 1 ? "" : "s"} · {book.length - active.length} revoked or expired</div></div>
         <div className="kpi"><div className="eyebrow">Sanctioned limit</div>
           <div className="v num">{[...byCcy].map(([c, v]) => fmt(v.limit, c)).join(" + ") || "—"}</div>
           <div className="s">total across active mandates</div></div>
@@ -54,7 +54,7 @@ export default async function ExposurePage() {
                   <Link href={`/mandates/${b.mandate.id}`}>{b.mandate.name}</Link>
                   {b.mandate.cardLast4 && <span className="faint mono"> · card ···{b.mandate.cardLast4}</span>}
                 </td>
-                <td><Pill v={b.mandate.status} />{b.pendingApprovals > 0 && <div style={{ marginTop: 4 }}><Pill v="pending" /> <span className="faint num">{b.pendingApprovals}</span></div>}</td>
+                <td><Pill v={b.effectiveStatus} />{b.pendingApprovals > 0 && <div style={{ marginTop: 4 }}><Pill v="pending" /> <span className="faint num">{b.pendingApprovals}</span></div>}</td>
                 <td><Util used={b.spentToday} limit={b.mandate.dailyLimit} currency={b.mandate.currency} label="daily" /></td>
                 <td><Util used={b.spentTotal} limit={b.mandate.totalLimit} currency={b.mandate.currency} label="total" /></td>
                 <td className="r num">{fmt(b.mandate.perTxnLimit, b.mandate.currency)}</td>

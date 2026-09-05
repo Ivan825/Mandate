@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { asc, desc } from "drizzle-orm";
-import { db, schema } from "./db";
+import { db, schema, type Conn } from "./db";
 
 export const GENESIS = "0".repeat(64);
 
@@ -17,14 +17,18 @@ export function hashEvent(seq: number, type: string, payload: string, prevHash: 
   return createHash("sha256").update(`${seq}|${type}|${createdAtMs}|${prevHash}|${payload}`).digest("hex");
 }
 
-export async function appendEvent(type: string, payload: Record<string, unknown>) {
-  const last = await db.select().from(schema.ledger).orderBy(desc(schema.ledger.seq)).limit(1);
+// Append inside the caller's transaction whenever there is one, so the
+// business write and its ledger entry commit together or not at all. Under
+// an IMMEDIATE transaction the max(seq) read is serialised with other
+// writers, so seq cannot collide.
+export async function appendEvent(type: string, payload: Record<string, unknown>, conn: Conn = db) {
+  const last = await conn.select().from(schema.ledger).orderBy(desc(schema.ledger.seq)).limit(1);
   const seq = (last[0]?.seq ?? 0) + 1;
   const prevHash = last[0]?.hash ?? GENESIS;
   const createdAt = new Date();
   const body = canonical(payload);
   const hash = hashEvent(seq, type, body, prevHash, createdAt.getTime());
-  await db.insert(schema.ledger).values({ id: randomUUID(), seq, type, payload: body, prevHash, hash, createdAt });
+  await conn.insert(schema.ledger).values({ id: randomUUID(), seq, type, payload: body, prevHash, hash, createdAt });
   return { seq, hash };
 }
 

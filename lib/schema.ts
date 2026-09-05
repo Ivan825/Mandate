@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
 
 // Amounts are stored in minor units (paise, cents). Currency is an ISO code.
 
@@ -25,13 +25,19 @@ export const mandates = sqliteTable("mandates", {
   activeHoursEnd: integer("active_hours_end").notNull().default(24),
   timezone: text("timezone").notNull().default("Asia/Kolkata"),
   expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
-  token: text("token").notNull().unique(), // mnd_... the only credential the agent holds
+  // The agent's credential is never stored in clear. tokenHash is what we
+  // look up by; tokenPrefix is shown so the owner can recognise it;
+  // tokenReveal holds the plaintext until it has been shown exactly once.
+  tokenHash: text("token_hash").notNull().unique(),
+  tokenPrefix: text("token_prefix").notNull(),
+  tokenReveal: text("token_reveal"),
   stripeCardholderId: text("stripe_cardholder_id"),
   stripeCardId: text("stripe_card_id"),
   cardLast4: text("card_last4"),
+  cardError: text("card_error"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   revokedAt: integer("revoked_at", { mode: "timestamp_ms" }),
-});
+}, (t) => [index("mandates_card_idx").on(t.stripeCardId)]);
 
 export const transactions = sqliteTable("transactions", {
   id: text("id").primaryKey(),
@@ -47,7 +53,7 @@ export const transactions = sqliteTable("transactions", {
   stripeAuthorizationId: text("stripe_authorization_id"),
   approvalId: text("approval_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-});
+}, (t) => [index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt)]);
 
 export const approvals = sqliteTable("approvals", {
   id: text("id").primaryKey(),
@@ -59,8 +65,9 @@ export const approvals = sqliteTable("approvals", {
   status: text("status").notNull().default("pending"), // pending | approved | denied | used | expired
   requestedAt: integer("requested_at", { mode: "timestamp_ms" }).notNull(),
   decidedAt: integer("decided_at", { mode: "timestamp_ms" }),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }), // an approved allowance lapses after this
   usedAt: integer("used_at", { mode: "timestamp_ms" }),
-});
+}, (t) => [index("approvals_mandate_status_idx").on(t.mandateId, t.status)]);
 
 // Append-only, hash-chained log. Each hash covers the previous hash, so any
 // edit or deletion breaks verification from that row onward.
@@ -72,6 +79,13 @@ export const ledger = sqliteTable("ledger", {
   prevHash: text("prev_hash").notNull(),
   hash: text("hash").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// Stripe delivers webhooks at least once; remember what we've handled.
+export const stripeEvents = sqliteTable("stripe_events", {
+  id: text("id").primaryKey(),
+  type: text("type").notNull(),
+  receivedAt: integer("received_at", { mode: "timestamp_ms" }).notNull(),
 });
 
 export type Agent = typeof agents.$inferSelect;

@@ -7,7 +7,8 @@ import { verifyChain } from "@/lib/ledger";
 // the verification result at export time. Hand this to a merchant, issuer or
 // auditor; anyone can re-run the hashes.
 export async function GET(req: NextRequest) {
-  const mandateId = req.nextUrl.searchParams.get("mandate");
+  const raw = req.nextUrl.searchParams.get("mandate");
+  const mandateId = raw && /^[0-9a-f-]{36}$/i.test(raw) ? raw : null;
   const rows = await db.select().from(schema.ledger).orderBy(asc(schema.ledger.seq));
   const filtered = mandateId ? rows.filter((r) => r.payload.includes(`"mandateId":"${mandateId}"`)) : rows;
   const verification = await verifyChain();
