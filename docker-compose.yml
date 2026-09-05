@@ -1,0 +1,31 @@
+# One-command self-host: docker compose up
+# Then open http://localhost:3000 — sign-in links print in the `app` logs
+# until you add RESEND_API_KEY.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mandate
+      POSTGRES_PASSWORD: mandate
+      POSTGRES_DB: mandate
+    volumes: ["mandate-db:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U mandate"], interval: 5s, timeout: 3s, retries: 20 }
+  app:
+    build: .
+    depends_on: { db: { condition: service_healthy } }
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgres://mandate:mandate@db:5432/mandate
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-change-me-to-32-plus-random-characters}
+      NEXT_PUBLIC_BASE_URL: ${NEXT_PUBLIC_BASE_URL:-http://localhost:3000}
+      NOTIFY_SECRET: ${NOTIFY_SECRET:-change-me-too}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+volumes:
+  mandate-db: {}

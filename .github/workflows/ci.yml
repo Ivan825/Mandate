@@ -6,17 +6,23 @@ on:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: mandate, POSTGRES_PASSWORD: mandate, POSTGRES_DB: mandate }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mandate" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://mandate:mandate@localhost:5432/mandate
+      BETTER_AUTH_SECRET: ci-only-secret-change-me-please-32chars
+      NEXT_PUBLIC_BASE_URL: http://localhost:3000
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 24, cache: npm }
       - run: npm ci
       - run: npm test
-      - run: npm run db:push
-        env:
-          DATABASE_URL: file:./data/ci.db
+      - run: npm run db:migrate
+      - run: npx tsc --noEmit
       - run: npm run build
-        env:
-          DATABASE_URL: file:./data/ci.db
