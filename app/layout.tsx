@@ -32,6 +32,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <Link href="/approvals">Approvals{pending > 0 && <span className="badge">{pending}</span>}</Link>
               <Link href="/ledger">Ledger</Link>
               <Link href="/docs">Agent API</Link>
+              <Link href="/settings">Settings</Link>
             </nav>
             <div className="spacer" />
             <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>

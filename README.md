@@ -15,6 +15,9 @@ Think of it as a sanction letter for an agent, with the loan-book view to match.
 - **Agent API**: `POST /api/agent/authorize` and `GET /api/agent/mandate`, authenticated by the mandate token.
 - **Stripe Issuing**: real-time authorisation webhook decides each card swipe with the same policy engine.
 - **MCP server** (`mcp/server.mjs`): gives Claude Code, Cursor or any MCP client `check_mandate` and `request_purchase` tools.
+- **Notifications** (`/settings`): Telegram (Approve / Deny buttons) and a generic webhook; one-tap links are signed, expire with the request, and always confirm before deciding so link previews can't approve anything.
+- **Approval lifecycle**: unanswered requests expire after `APPROVAL_TTL_HOURS` (24 by default); granted allowances lapse unused after 24 h; a denial blocks the same request for 6 h.
+- **Idempotency**: send `Idempotency-Key` on `POST /api/agent/authorize` and a retry returns the stored answer (`Idempotent-Replayed: true`) instead of a second decision.
 
 ## Run it locally
 
@@ -44,6 +47,8 @@ Responses: `200` approved, `403` declined (with the rule and reason), `202` pend
 - Concurrency: 12 parallel requests against a daily limit approve exactly as many as fit and decline the rest; three parallel retries of one approved request consume the allowance exactly once. Authorisation runs in an IMMEDIATE transaction with the ledger write.
 - Ledger: editing one row breaks verification at that row; restoring it repairs the chain.
 - Browser flow: sign-in gate, wrong password, approve from the inbox, form validation with values preserved, agent token shown once and never again.
+- Notifications: webhook fires after the request commits with signed approve/deny links; a tampered link is rejected; the one-tap confirm page decides once and reports "already approved" afterwards; an unanswered request expires after the TTL with an `approval.expired` ledger event.
+- Idempotency: the same `Idempotency-Key` twice returns one stored answer and creates one transaction.
 
 ## Policy engine
 
@@ -95,10 +100,8 @@ mcp/server.mjs       zero-dependency stdio MCP server
 This is a working single-owner MVP, not a finished SaaS. In order of importance:
 
 1. **Tenancy and real auth.** One owner today. Every table needs an `owner_id`, every query a `WHERE owner_id = ?`, per-user sessions (Auth.js or similar), and a per-tenant ledger chain. Until then, do not put two people's agents on one deployment.
-2. **Notifications.** Pending approvals sit until someone opens the inbox. Push/Telegram/WhatsApp with signed one-tap approve links, and an approval TTL that auto-denies after N hours.
-3. **Binding enforcement beyond cards.** An API-key proxy (agent gets a proxied key; spend is metered by us) and an MCP gateway (tool calls carry the mandate).
-4. **Stripe production readiness.** Real cardholder KYC data, issuing-currency constraints, reconciliation of captures/reversals/refunds (today an approved authorisation counts as spent in full), latency budget for the 2-second window near your Turso region.
-5. **Idempotency keys** on `POST /api/agent/authorize` so an agent's retry after a network error cannot double-spend.
-6. **Operational**: structured logging with request ids, error reporting, per-token rate limits, incremental ledger verification (today it re-hashes the whole chain per view), grouped exposure queries, committed migrations (`drizzle-kit generate` + `migrate`) instead of `db:push`.
-7. **Receipts as signed documents**: sign the chain head with a key kept outside the database so the operator cannot rewrite history unnoticed; PDF dispute packets.
-8. **Mandate templates from lending practice**: sanction matrices, early-warning triggers, cooling-off periods, delegated approvers with their own limits.
+2. **Binding enforcement beyond cards.** An API-key proxy (agent gets a proxied key; spend is metered by us) and an MCP gateway (tool calls carry the mandate).
+3. **Stripe production readiness.** Real cardholder KYC data, issuing-currency constraints, reconciliation of captures/reversals/refunds (today an approved authorisation counts as spent in full), latency budget for the 2-second window near your Turso region.
+4. **Operational**: structured logging with request ids, error reporting, per-token rate limits, incremental ledger verification (today it re-hashes the whole chain per view), grouped exposure queries, committed migrations (`drizzle-kit generate` + `migrate`) instead of `db:push`.
+5. **Receipts as signed documents**: sign the chain head with a key kept outside the database so the operator cannot rewrite history unnoticed; PDF dispute packets.
+6. **Mandate templates from lending practice**: sanction matrices, early-warning triggers, cooling-off periods, delegated approvers with their own limits.

@@ -81,6 +81,16 @@ export const ledger = sqliteTable("ledger", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// An agent's retry after a network error must not become a second purchase:
+// the same Idempotency-Key on the same mandate returns the stored answer.
+export const idempotencyKeys = sqliteTable("idempotency_keys", {
+  id: text("id").primaryKey(), // `${mandateId}:${key}`
+  mandateId: text("mandate_id").notNull(),
+  status: integer("status").notNull(),
+  response: text("response").notNull(), // JSON body as first returned
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 // Stripe delivers webhooks at least once; remember what we've handled.
 export const stripeEvents = sqliteTable("stripe_events", {
   id: text("id").primaryKey(),

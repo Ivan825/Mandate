@@ -119,3 +119,12 @@ export async function decideApprovalAction(form: FormData) {
   revalidatePath("/ledger");
   redirect("/approvals");
 }
+
+export async function sendTestNotificationAction() {
+  await requireOwner();
+  const { sendTest, configuredChannels } = await import("@/lib/notify");
+  if (configuredChannels().length === 0) redirect("/settings?test=none");
+  const outcomes = await sendTest();
+  const failed = outcomes.filter((o) => !o.ok);
+  redirect(failed.length ? `/settings?test=${encodeURIComponent(failed.map((f) => `${f.channel}: ${f.error}`).join("; "))}` : "/settings?test=ok");
+}

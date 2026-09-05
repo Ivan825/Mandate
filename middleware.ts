@@ -14,7 +14,7 @@ async function hmacHex(key: string, msg: string): Promise<string> {
 export async function middleware(req: NextRequest) {
   const expected = process.env.ADMIN_PASSWORD;
   const { pathname } = req.nextUrl;
-  if (pathname.startsWith("/api/agent") || pathname.startsWith("/api/webhooks")) return NextResponse.next();
+  if (pathname.startsWith("/api/agent") || pathname.startsWith("/api/webhooks") || pathname.startsWith("/a/")) return NextResponse.next();
   if (!expected) {
     // In production the dashboard never serves unprotected: it holds every agent's exposure and the approve buttons.
     if (process.env.NODE_ENV === "production") return new NextResponse("Mandate is not configured: set ADMIN_PASSWORD.", { status: 503 });

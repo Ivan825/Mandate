@@ -3,9 +3,28 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db, schema, type Conn } from "./db";
 import { appendEvent } from "./ledger";
 import { evaluate, localDayStart, validateTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type TermsError } from "./policy";
+import { sendApprovalRequested } from "./notify";
 import type { Mandate, Approval, Transaction } from "./schema";
 
-const { agents, mandates, transactions, approvals } = schema;
+const { agents, mandates, transactions, approvals, idempotencyKeys } = schema;
+
+// A pending request the owner never answers should not wait forever; an
+// approved allowance lapses on its own expiry. Both are swept lazily.
+export const PENDING_TTL_MS = Number(process.env.APPROVAL_TTL_HOURS ?? 24) * 3600 * 1000;
+
+export async function expireStale(conn: Conn = db, now = new Date()) {
+  const cutoff = new Date(now.getTime() - PENDING_TTL_MS);
+  const stalePending = await conn.select().from(approvals).where(and(eq(approvals.status, "pending"), sql`${approvals.requestedAt} < ${cutoff.getTime()}`));
+  for (const a of stalePending) {
+    const r = await conn.update(approvals).set({ status: "expired", decidedAt: now }).where(and(eq(approvals.id, a.id), eq(approvals.status, "pending")));
+    if (r.rowsAffected) await appendEvent("approval.expired", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, reason: "unanswered" }, conn);
+  }
+  const lapsed = await conn.select().from(approvals).where(and(eq(approvals.status, "approved"), sql`${approvals.expiresAt} is not null and ${approvals.expiresAt} < ${now.getTime()}`));
+  for (const a of lapsed) {
+    const r = await conn.update(approvals).set({ status: "expired" }).where(and(eq(approvals.id, a.id), eq(approvals.status, "approved")));
+    if (r.rowsAffected) await appendEvent("approval.expired", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, reason: "allowance lapsed unused" }, conn);
+  }
+}
 
 export function newToken(): string {
   return "mnd_" + randomBytes(24).toString("base64url");
@@ -194,13 +213,14 @@ export async function exposureBook(): Promise<Exposure[]> {
 }
 
 export async function countPending(): Promise<number> {
+  await expireStale();
   const [r] = await db.select({ c: sql<number>`count(*)` }).from(approvals).where(eq(approvals.status, "pending"));
   return Number(r?.c ?? 0);
 }
 
 // ---------- Authorisation ----------
 
-export type AuthResult = Decision & { transactionId: string; approvalId?: string };
+export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean };
 
 // The single path every purchase attempt goes through, regardless of source.
 // Runs inside an IMMEDIATE transaction: the spend sums are read under the
@@ -214,10 +234,12 @@ export async function authorize(m: Mandate, req: AuthRequest, source: "simulatio
   const purpose = (req.purpose ?? "").trim().slice(0, 300);
   const category = (req.category ?? "").trim().slice(0, 64);
 
-  return db.transaction(async (tx) => {
+  let newApproval: Approval | null = null;
+  const result = await db.transaction(async (tx) => {
     // Re-read the mandate under the lock so a revoke that just committed is seen.
     const [fresh] = await tx.select().from(mandates).where(eq(mandates.id, m.id)).limit(1);
     const mandate = fresh ?? m;
+    await expireStale(tx, now);
     const facts = await factsFor(mandate, now, tx, { amount, merchant });
     let d = evaluate(mandate, { amount, merchant, category, purpose, now }, facts);
 
@@ -238,6 +260,7 @@ export async function authorize(m: Mandate, req: AuthRequest, source: "simulatio
         const a: Approval = { id: randomUUID(), mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, expiresAt: null, usedAt: null };
         await tx.insert(approvals).values(a);
         approvalId = a.id;
+        newApproval = a;
         await appendEvent("approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source }, tx);
       }
     }
@@ -254,13 +277,41 @@ export async function authorize(m: Mandate, req: AuthRequest, source: "simulatio
       merchant, purpose, category, rule: d.rule, reason: d.reason, source,
       approvalId: approvalId ?? null, stripeAuthorizationId: t.stripeAuthorizationId,
     }, tx);
-    return { ...d, transactionId: t.id, approvalId };
+    return { ...d, transactionId: t.id, approvalId, mandate };
   }, { behavior: "immediate" });
+
+  // Notify only once the request is durably recorded, and never let a slow
+  // channel hold up the agent's answer.
+  let notified = false;
+  if (newApproval) {
+    const [ag] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, result.mandate.agentId)).limit(1);
+    const outcomes = await sendApprovalRequested({ approval: newApproval, mandate: result.mandate, agentName: ag?.name ?? "Agent" });
+    notified = outcomes.some((o) => o.ok);
+    for (const o of outcomes) if (!o.ok) console.error(`notify ${o.channel} failed: ${o.error}`);
+    if (outcomes.length) await appendEvent("approval.notified", { approvalId: (newApproval as Approval).id, channels: outcomes });
+  }
+  const { mandate: _m, ...rest } = result;
+  void _m;
+  return { ...rest, notified };
+}
+
+// ---------- Idempotency ----------
+
+export async function getIdempotent(mandateId: string, key: string) {
+  const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.id, `${mandateId}:${key}`)).limit(1);
+  return row ?? null;
+}
+
+export async function putIdempotent(mandateId: string, key: string, status: number, response: unknown) {
+  try {
+    await db.insert(idempotencyKeys).values({ id: `${mandateId}:${key}`, mandateId, status, response: JSON.stringify(response), createdAt: new Date() });
+  } catch { /* a concurrent request stored it first; both got the same decision path */ }
 }
 
 // ---------- Approvals ----------
 
 export async function listApprovals(status?: string) {
+  await expireStale();
   const rows = await db
     .select({ a: approvals, mandateName: mandates.name, agentName: agents.name })
     .from(approvals)
