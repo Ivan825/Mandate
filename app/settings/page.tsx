@@ -8,12 +8,14 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { soleOwnedWorkspaces } from "@/lib/service";
 import { getCardholderProfile } from "@/lib/service";
+import { cardholderProblem, issuingRegion, termsAcceptanceRequired } from "@/lib/stripe";
 import { When } from "@/app/components";
 import { PasskeyPanel } from "./passkeys";
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ test?: string; disconnected?: string; channel?: string; error?: string; cardholder?: string; sessions?: string }> }) {
   const ctx = await requireCtx();
   const { test, disconnected, channel, error, cardholder, sessions: sessionsMsg } = await searchParams;
+  const region = issuingRegion();
   const h = await headers();
   const [connected, channels, profile, sessions, current, sole] = await Promise.all([
     listConnectedAgents(ctx.userId), listChannels(ctx.userId), getCardholderProfile(ctx.workspaceId),
@@ -25,7 +27,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     ["Email delivery (sign-in links, alerts, invitations)", emailOn, "RESEND_API_KEY + EMAIL_FROM (else printed to the server console)"],
     ["Deployment-wide fallback webhook", deploymentChannels().length > 0, "NOTIFY_WEBHOOK_URL (used only when no member has a channel)"],
     ["One-tap links signed", Boolean(notifySecret()), "NOTIFY_SECRET"],
-    ["Stripe virtual cards", stripeEnabled(), "STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET"],
+    ["Stripe virtual cards + top-ups", stripeEnabled(), "STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET + STRIPE_PUBLISHABLE_KEY"],
   ];
   return (
     <div style={{ maxWidth: 780 }}>
@@ -95,8 +97,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <PasskeyPanel />
 
       <h2 style={{ margin: "28px 0 8px" }}>Cardholder details (for virtual cards)</h2>
-      <p className="muted">Stripe Issuing needs a real name and billing address on the card. Saved per workspace; used when a mandate is issued with a card.</p>
+      <p className="muted">Stripe Issuing needs the real name, date of birth, mobile number and billing address of the person the cards belong to. Saved per workspace; used when a mandate is issued with a card. This deployment issues <strong>{region.currency}</strong> cards to addresses in <strong>{region.code === "EU" ? "the EEA" : region.code}</strong>.</p>
       {cardholder && <div className="notice ok" style={{ marginBottom: 12 }}>Cardholder details saved.</div>}
+      {profile && cardholderProblem(profile) && <div className="notice" style={{ marginBottom: 12 }}>Not ready for cards yet: {cardholderProblem(profile)}</div>}
+      {profile?.cardholderStatus && profile.cardholderStatus !== "active" && <div className="notice bad" style={{ marginBottom: 12 }}>Stripe has this cardholder as <strong>{profile.cardholderStatus}</strong>{JSON.parse(profile.cardholderRequirements || "[]").length ? <>; it still needs: {JSON.parse(profile.cardholderRequirements).join(", ")}</> : ""}. Cards will decline until that is resolved.</div>}
       {(ctx.role === "owner" || ctx.role === "admin") ? (
         <form action={saveCardholderProfileAction} className="card form" style={{ marginBottom: 8 }}>
           <div className="row">
@@ -104,8 +108,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <div className="field"><label htmlFor="ch-email">Email</label><input id="ch-email" name="email" type="email" defaultValue={profile?.email ?? ctx.email} /></div>
           </div>
           <div className="row">
-            <div className="field"><label htmlFor="ch-phone">Phone (E.164, optional)</label><input id="ch-phone" name="phone" defaultValue={profile?.phone ?? ""} placeholder="+14155550123" /></div>
-            <div className="field"><label htmlFor="ch-dob">Date of birth (YYYY-MM-DD, optional)</label><input id="ch-dob" name="dob" defaultValue={profile?.dob ?? ""} placeholder="1985-04-02" /></div>
+            <div className="field"><label htmlFor="ch-phone">Mobile (E.164)</label><input id="ch-phone" name="phone" required defaultValue={profile?.phone ?? ""} placeholder="+14155550123" /><span className="hint">Used by Stripe for 3-D Secure checks at online checkouts.</span></div>
+            <div className="field"><label htmlFor="ch-dob">Date of birth (YYYY-MM-DD)</label><input id="ch-dob" name="dob" required defaultValue={profile?.dob ?? ""} placeholder="1985-04-02" /></div>
           </div>
           <div className="field"><label htmlFor="ch-line1">Address line 1</label><input id="ch-line1" name="line1" required defaultValue={profile?.line1 ?? ""} /></div>
           <div className="field"><label htmlFor="ch-line2">Address line 2</label><input id="ch-line2" name="line2" defaultValue={profile?.line2 ?? ""} /></div>
@@ -114,7 +118,12 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <div className="field"><label htmlFor="ch-state">State / region</label><input id="ch-state" name="state" defaultValue={profile?.state ?? ""} /></div>
             <div className="field"><label htmlFor="ch-postal">Postal code</label><input id="ch-postal" name="postalCode" required defaultValue={profile?.postalCode ?? ""} /></div>
           </div>
-          <div className="field" style={{ maxWidth: 200 }}><label htmlFor="ch-country">Country (2 letters)</label><input id="ch-country" name="country" required maxLength={2} defaultValue={profile?.country ?? "US"} /></div>
+          <div className="field" style={{ maxWidth: 200 }}><label htmlFor="ch-country">Country (2 letters)</label><input id="ch-country" name="country" required maxLength={2} defaultValue={profile?.country ?? region.countries[0]} /></div>
+          {profile?.termsAcceptedAt ? (
+            <p className="faint" style={{ fontSize: 12.5, margin: 0 }}>Stripe's cardholder terms accepted on <When d={profile.termsAcceptedAt} />.</p>
+          ) : (
+            <label className="check"><input type="checkbox" name="acceptTerms" required={termsAcceptanceRequired()} /> I accept the <a href="https://stripe.com/legal/issuing/celtic-authorized-user-terms" target="_blank" rel="noreferrer">Stripe Issuing cardholder terms</a> and the card issuer's terms for my region{termsAcceptanceRequired() ? " (required)" : ""}.</label>
+          )}
           <div className="actions"><button className="btn secondary" type="submit">Save cardholder details</button></div>
         </form>
       ) : <p className="faint">Owners and admins set this.</p>}

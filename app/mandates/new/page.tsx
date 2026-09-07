@@ -2,7 +2,8 @@ import Link from "next/link";
 import { requireCtx, can } from "@/lib/session";
 import { redirect } from "next/navigation";
 import { listAgents } from "@/lib/service";
-import { stripeEnabled } from "@/lib/stripe";
+import { stripeEnabled, cardholderProblem, issuingRegion } from "@/lib/stripe";
+import { getCardholderProfile } from "@/lib/service";
 import { MandateForm } from "./form";
 
 export default async function NewMandatePage({ searchParams }: { searchParams: Promise<{ agent?: string }> }) {
@@ -24,7 +25,7 @@ export default async function NewMandatePage({ searchParams }: { searchParams: P
       <div className="eyebrow">Issue mandate</div>
       <h1>Sanction terms for this agent</h1>
       <p className="muted" style={{ margin: "8px 0 20px" }}>Think of it as a sanction letter: how much, per transaction and per day, where it may be spent, when, and the point above which you want to be asked. The agent receives a token that only works within these terms.</p>
-      <MandateForm agents={agents.map((a) => ({ id: a.id, name: a.name }))} defaultAgent={defaultAgent} stripeOn={stripeEnabled()} />
+      <MandateForm agents={agents.map((a) => ({ id: a.id, name: a.name }))} defaultAgent={defaultAgent} stripeOn={stripeEnabled()} cardProblem={stripeEnabled() ? cardholderProblem(await getCardholderProfile(ctx.workspaceId)) : null} cardCurrency={issuingRegion().currency} />
     </div>
   );
 }

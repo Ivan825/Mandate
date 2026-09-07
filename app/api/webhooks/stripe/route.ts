@@ -2,7 +2,8 @@ import { NextRequest, NextResponse, after } from "next/server";
 import Stripe from "stripe";
 import { eq } from "drizzle-orm";
 import { stripe, stripeEnabled, STRIPE_RESPONSE_VERSION } from "@/lib/stripe";
-import { getMandateByCard, authorize, reconcileCard, voidTransactionByStripeAuthorization } from "@/lib/service";
+import { getMandateByCard, authorize, reconcileCard, voidTransactionByStripeAuthorization, syncCardStatus, syncCardholderStatus } from "@/lib/service";
+import { creditTopup } from "@/lib/balance";
 import { recordEvent } from "@/lib/ledger";
 import { db, schema } from "@/lib/db";
 
@@ -41,6 +42,7 @@ export async function POST(req: NextRequest) {
       const cardId = typeof auth.card === "string" ? auth.card : auth.card.id;
       const m = await getMandateByCard(cardId);
       if (!m) return decision(false, { reason: "unknown_card" });
+      if (m.cardStatus && m.cardStatus !== "active") return decision(false, { reason: "card_" + m.cardStatus });
       // Stripe may re-send a request (retry, or an incremental authorisation
       // on the same id). Answer as before rather than decide twice.
       const [prior] = await db.select({ decision: schema.transactions.decision }).from(schema.transactions).where(eq(schema.transactions.stripeAuthorizationId, auth.id)).limit(1);
@@ -77,6 +79,18 @@ export async function POST(req: NextRequest) {
       const at = new Date(t.created * 1000);
       if (authId && t.type === "capture") await reconcileCard(authId, "capture", Math.abs(t.amount), event.id, at);
       else if (authId && t.type === "refund") await reconcileCard(authId, "refund", Math.abs(t.amount), event.id, at);
+    } else if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
+      // Money in: credit the workspace once per session, whoever gets there
+      // first (this webhook or the success page).
+      const cs = event.data.object as Stripe.Checkout.Session;
+      const ws = cs.metadata?.workspaceId ?? cs.client_reference_id;
+      if (cs.payment_status === "paid" && ws && cs.amount_total && cs.currency) await creditTopup(ws, cs.currency.toUpperCase(), cs.amount_total, "checkout", cs.id, cs.metadata?.by ?? "");
+    } else if (event.type === "issuing_card.updated") {
+      const c = event.data.object as Stripe.Issuing.Card;
+      await syncCardStatus(c.id, c.status);
+    } else if (event.type === "issuing_cardholder.updated") {
+      const ch = event.data.object as Stripe.Issuing.Cardholder;
+      await syncCardholderStatus(ch.id, ch.status, [...(ch.requirements?.past_due ?? [])]);
     } else if (event.type === "issuing_authorization.created") {
       const obj = event.data.object as Stripe.Issuing.Authorization;
       const cardId = typeof obj.card === "string" ? obj.card : obj.card?.id;

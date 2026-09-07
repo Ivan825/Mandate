@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import crypto from "node:crypto";
 import { chromium } from "playwright";
+import Stripe from "stripe";
 
 const PORT = Number(process.env.E2E_PORT ?? 3100);
 const BASE = `http://localhost:${PORT}`;
@@ -45,6 +46,9 @@ const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: {
   // (BETTER_AUTH_SECRET and NOTIFY_SECRET come from .env or the CI env).
   MANDATE_ENCRYPTION_KEY: process.env.MANDATE_ENCRYPTION_KEY ?? Buffer.alloc(32, 7).toString("base64"),
   RECEIPT_SIGNING_KEY: process.env.RECEIPT_SIGNING_KEY ?? Buffer.alloc(32, 9).toString("base64"),
+  // Fake Stripe keys: the webhook is exercised with locally signed events;
+  // nothing calls Stripe's API.
+  STRIPE_SECRET_KEY: "sk_test_e2e_fake", STRIPE_WEBHOOK_SECRET: "whsec_e2e_fake", STRIPE_PUBLISHABLE_KEY: "pk_test_e2e_fake", STRIPE_ISSUING_REGION: "US",
 }, stdio: ["ignore", "pipe", "pipe"] });
 app.stdout.on("data", (d) => { out += d.toString(); });
 app.stderr.on("data", (d) => { out += d.toString(); });
@@ -134,6 +138,53 @@ try {
   check("proxy refuses non-generation endpoints", files.status === 404 && dots.status === 404, `${files.status} ${dots.status}`);
   const bad = await fetch(BASE + "/api/proxy/openai/chat/completions", { method: "POST", headers: { authorization: "Bearer mpx_nope", "content-type": "application/json" }, body: "{}" });
   check("proxy rejects unknown key", bad.status === 401);
+
+  // 4b. Cards: a signed Stripe webhook drives the real-time authorisation and
+  // the prepaid balance, without ever calling Stripe.
+  {
+    const run = Date.now().toString(36);
+    const { Client } = await import("pg");
+    const c = new Client({ connectionString: process.env.DATABASE_URL ?? "postgres://mandate:mandate@localhost:5432/mandate" });
+    await c.connect();
+    const { rows: [home] } = await c.query("select id, workspace_id from mandates where currency = 'INR' and workspace_id = $1 limit 1", [seed.workspace]);
+    await c.query("update mandates set stripe_card_id = $2, stripe_cardholder_id = 'ich_e2e', card_last4 = '4242', card_status = 'active' where id = $1", [home.id, "ic_e2e_" + run]);
+    await c.end();
+    const stripe = new Stripe("sk_test_e2e_fake");
+    const send = async (type, object, id = "evt_" + crypto.randomUUID()) => {
+      const payload = JSON.stringify({ id, object: "event", type, data: { object } });
+      const sig = stripe.webhooks.generateTestHeaderString({ payload, secret: "whsec_e2e_fake" });
+      const r = await fetch(BASE + "/api/webhooks/stripe", { method: "POST", headers: { "content-type": "application/json", "stripe-signature": sig }, body: payload });
+      return { status: r.status, body: await r.json(), version: r.headers.get("stripe-version") };
+    };
+    const authReq = (id, amount, merchant) => send("issuing_authorization.request", { id, object: "issuing.authorization", card: "ic_e2e_" + run, amount, currency: "inr", pending_request: { amount, currency: "inr" }, merchant_data: { name: merchant, category: "grocery_stores_supermarkets" } });
+    const first = await authReq("iauth_e2e_1_" + run, 100000, "Zepto");
+    check("card declines with no prepaid balance", first.status === 200 && first.body.approved === false && first.version, JSON.stringify(first.body));
+    const bad = await fetch(BASE + "/api/webhooks/stripe", { method: "POST", headers: { "content-type": "application/json", "stripe-signature": "t=1,v1=deadbeef" }, body: "{}" });
+    check("unsigned webhook rejected", bad.status === 400);
+    const topup = await send("checkout.session.completed", { id: "cs_e2e_1_" + run, object: "checkout.session", payment_status: "paid", amount_total: 150000, currency: "inr", client_reference_id: seed.workspace, metadata: { workspaceId: seed.workspace, by: "e2e" } });
+    check("top-up credited from checkout webhook", topup.status === 200);
+    const dup = await send("checkout.session.completed", { id: "cs_e2e_1_" + run, object: "checkout.session", payment_status: "paid", amount_total: 150000, currency: "inr", client_reference_id: seed.workspace, metadata: { workspaceId: seed.workspace } }, "evt_dup_" + Date.now());
+    const second = await authReq("iauth_e2e_2_" + run, 100000, "Zepto");
+    const third = await authReq("iauth_e2e_3_" + run, 100000, "Zepto");
+    check("card approved once funded, then declined at the balance", dup.status === 200 && second.body.approved === true && third.body.approved === false, `${JSON.stringify(second.body)} ${JSON.stringify(third.body)}`);
+    const replay = await authReq("iauth_e2e_2_" + run, 100000, "Zepto");
+    check("re-sent authorisation request answers the same", replay.body.approved === true && replay.body.metadata?.replayed === "true");
+    await send("issuing_authorization.created", { id: "iauth_e2e_2_" + run, object: "issuing.authorization", card: "ic_e2e_" + run, amount: 100000, approved: false, request_history: [{ reason: "insufficient_funds" }] });
+    const fourth = await authReq("iauth_e2e_4_" + run, 100000, "Zepto");
+    check("a Stripe-side decline voids the hold and frees the balance", fourth.body.approved === true, JSON.stringify(fourth.body));
+    await send("issuing_transaction.created", { id: "ipi_e2e_1_" + run, object: "issuing.transaction", type: "capture", amount: -60000, created: Math.floor(Date.now() / 1000), authorization: "iauth_e2e_4_" + run });
+    const fifth = await authReq("iauth_e2e_5_" + run, 60000, "Zepto");
+    check("partial capture releases the rest of the hold", fifth.body.approved === true, JSON.stringify(fifth.body));
+    await p.goto(BASE + "/mandates/" + home.id, { waitUntil: "networkidle" });
+    check("mandate page shows the card and a reveal button", (await p.locator("button", { hasText: "Show card details" }).count()) === 1);
+    await p.goto(BASE + "/balance", { waitUntil: "networkidle" });
+    check("balance page renders", (await p.locator("h1").textContent())?.includes("available for cards"));
+    await p.goto(BASE + "/stats", { waitUntil: "networkidle" });
+    await p.click(".seg button:has-text('by merchant')"); await p.click(".seg button:has-text('week')");
+    const bars = await p.locator("svg[aria-label='Spend per period'] rect[rx]").count();
+    await p.locator("svg[aria-label='Spend per period'] g").last().hover();
+    check("stats page charts, switches grain and shows a tooltip", bars > 0 && (await p.locator(".tip").count()) === 1 && (await p.locator(".reading p").count()) >= 3, `bars=${bars}`);
+  }
 
   // 5. MCP OAuth: register, authorise via consent, call a tool
   const reg = await fetch(BASE + "/api/auth/oauth2/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "E2E Agent", application_type: "native", redirect_uris: ["http://127.0.0.1:9/cb"], grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none", scope: "mandate:read mandate:spend" }) }).then((r) => r.json());

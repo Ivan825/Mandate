@@ -37,9 +37,19 @@ Nothing to configure at deployment level. Each person adds an email address or a
 - Claude Desktop / ChatGPT / Cursor: add a remote MCP server with the same URL. You'll be sent to the consent page once.
 - Own code: use the REST token from a mandate, or the API proxy (`/proxy` page) with the SDK base URL.
 
-## 5. Stripe Issuing (optional; US/UK/EU entities only)
+## 5. Stripe Issuing: virtual cards and the prepaid balance
 
-`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`. Webhook endpoint `APP_URL/api/webhooks/stripe` subscribed to `issuing_authorization.request` (synchronous), `issuing_authorization.created`, `issuing_authorization.updated`, `issuing_transaction.created`. Fill in cardholder details in Settings before issuing a mandate with a card.
+The card rail is the one part that needs something other than an account signup, so read this before promising cards to testers.
+
+**What Stripe requires of the operator (you).** Stripe Issuing is available to businesses in the US, the UK and the EEA; the Stripe account that issues the cards must be in one of those, and *that* account's country sets the card currency and which cardholders you may serve (`STRIPE_ISSUING_REGION=US|GB|EU`). An Indian Stripe account cannot enable Issuing. The usual route for a founder outside those regions is a US entity: Stripe Atlas forms a Delaware C-corp or LLC with a US bank account and a Stripe account in a few days; after that you apply for Issuing from the dashboard (Issuing → Get started), describe the use case ("spend controls for AI agents: prepaid virtual cards with per-transaction, daily and lifetime limits, merchant allow-lists and real-time authorisation"), and wait for approval, typically one to three weeks. In test mode everything works immediately without approval, which is how you rehearse.
+
+**Money flow.** Cards spend the *operator's* Issuing balance, so every user prepays: the Balance page sends them to Stripe Checkout, the `checkout.session.completed` webhook credits their workspace, and a card authorisation is declined the moment it would take that workspace below zero. Top-ups arrive in your Stripe payments balance (minus Stripe's fee, which you absorb); you move funds into the Issuing balance from the dashboard or by enabling auto-funding, and you must keep the Issuing balance ahead of the sum of user balances — Mandate declines against the user's balance, but Stripe declines against yours. Refunds of unspent balance are manual: revoke the mandates, refund the Checkout payment(s) from the dashboard, then record it so the balance and ledger match: `npx tsx scripts/credit.ts <workspaceId> -2500 USD "refund of cs_…"`. The same script with a positive amount grants beta credits without a payment.
+
+**Configuration.** `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` (card details are rendered in the browser through Stripe's Issuing Elements, never through our server), `STRIPE_WEBHOOK_SECRET`, `STRIPE_ISSUING_REGION`. Webhook endpoint `APP_URL/api/webhooks/stripe`, subscribed to: `issuing_authorization.request` (synchronous, answered within Stripe's two-second window before anyone is notified), `issuing_authorization.created`, `issuing_authorization.updated`, `issuing_transaction.created`, `issuing_card.updated`, `issuing_cardholder.updated`, `checkout.session.completed`, `checkout.session.async_payment_succeeded`. Every event is deduplicated by id.
+
+**Per user.** Settings → cardholder details (legal name, date of birth, mobile for 3-D Secure, billing address in the deployment's region, and acceptance of Stripe's cardholder terms, which UK/EU cardholders must give explicitly). Then a mandate issued with "virtual card" ticked gets a card bound to it, with Stripe's own spending controls mirroring the mandate as a second line of defence. The mandate page shows the number, expiry and CVC to owners and admins on request; each reveal is written to the ledger. Freeze pauses the card without revoking the mandate; revoking cancels it.
+
+**Rehearsal in test mode.** With test keys, tick "Send through Stripe test authorisation" on a mandate page: Stripe fires a real `issuing_authorization.request` at your webhook and the decision comes back through the same code path. The e2e suite also drives the webhook with locally signed events (no Stripe calls).
 
 ## 6. Self-hosted: Docker Compose
 

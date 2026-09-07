@@ -6,7 +6,7 @@ import { createMandateAction, type MandateFormState } from "@/app/actions";
 
 type AgentOpt = { id: string; name: string };
 
-export function MandateForm({ agents, defaultAgent, stripeOn }: { agents: AgentOpt[]; defaultAgent: string; stripeOn: boolean }) {
+export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardCurrency }: { agents: AgentOpt[]; defaultAgent: string; stripeOn: boolean; cardProblem: string | null; cardCurrency: string }) {
   const [state, action, pending] = useActionState<MandateFormState, FormData>(createMandateAction, undefined);
   const err = (field: string) => state?.errors?.find((e) => e.field === field)?.message;
   const v = (field: string, fallback = "") => state?.values?.[field] ?? fallback;
@@ -119,8 +119,13 @@ export function MandateForm({ agents, defaultAgent, stripeOn }: { agents: AgentO
 
       <fieldset>
         <legend>Card</legend>
-        {stripeOn ? (
-          <label className="check"><input type="checkbox" name="issueCard" defaultChecked={state?.values ? v("issueCard") === "on" : true} /> Issue a Stripe virtual card bound to this mandate (real-time authorisation)</label>
+        {stripeOn && cardProblem ? (
+          <p className="muted" style={{ margin: 0 }}>A card can't be issued yet: {cardProblem} The mandate still works through the API, MCP and proxy.</p>
+        ) : stripeOn ? (
+          <>
+            <label className="check"><input type="checkbox" name="issueCard" defaultChecked={state?.values ? v("issueCard") === "on" : true} /> Issue a Stripe virtual card bound to this mandate (real-time authorisation)</label>
+            <span className="hint">Cards are issued in {cardCurrency} and paid from the workspace's prepaid balance; pick {cardCurrency} above.</span>
+          </>
         ) : (
           <p className="muted" style={{ margin: 0 }}>Stripe Issuing is not configured, so no card will be issued. The mandate still works through the agent API. Add <code>STRIPE_SECRET_KEY</code> to enable virtual cards.</p>
         )}

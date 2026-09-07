@@ -41,6 +41,8 @@ export const mandates = pgTable("mandates", {
   stripeCardholderId: text("stripe_cardholder_id"),
   stripeCardId: text("stripe_card_id"),
   cardLast4: text("card_last4"),
+  cardExp: text("card_exp"), // MM/YY
+  cardStatus: text("card_status"), // active | inactive (frozen) | canceled, mirrored from Stripe
   cardError: text("card_error"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -198,6 +200,15 @@ export const cardholderProfiles = pgTable("cardholder_profiles", {
   state: text("state").notNull().default(""),
   postalCode: text("postal_code").notNull(),
   country: text("country").notNull(), // ISO 3166-1 alpha-2
+  // Stripe's cardholder terms, accepted by the person in Settings (required
+  // for UK/EU cardholders; recorded for everyone with time and address).
+  termsAcceptedAt: timestamp("terms_accepted_at", { withTimezone: true }),
+  termsIp: text("terms_ip").notNull().default(""),
+  termsUserAgent: text("terms_user_agent").notNull().default(""),
+  // One Stripe cardholder per workspace, reused for every card.
+  stripeCardholderId: text("stripe_cardholder_id"),
+  cardholderStatus: text("cardholder_status").notNull().default(""), // active | blocked | inactive, from Stripe
+  cardholderRequirements: text("cardholder_requirements").notNull().default("[]"), // JSON: what Stripe still needs
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 
@@ -207,6 +218,22 @@ export const stripeEvents = pgTable("stripe_events", {
   type: text("type").notNull(),
   receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
 });
+
+// Money in. Card spend is drawn from a prepaid balance per workspace and
+// currency: top-ups arrive through Stripe Checkout (one row per session,
+// idempotent on the session id) or as operator credits; the balance is
+// top-ups plus refunds minus every approved card transaction, so holds,
+// captures and reversals net out through the transactions table.
+export const topups = pgTable("topups", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  currency: text("currency").notNull(),
+  amount: integer("amount").notNull(), // minor units, positive
+  source: text("source").notNull(), // checkout | credit
+  reference: text("reference").notNull(), // checkout session id, or a note for credits
+  by: text("by").notNull().default(""),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [uniqueIndex("topups_reference_idx").on(t.reference), index("topups_ws_idx").on(t.workspaceId, t.currency)]);
 
 // Which workspace an OAuth (MCP) client was connected to. Written on the
 // consent page, read on every MCP call, so an agent only ever sees the

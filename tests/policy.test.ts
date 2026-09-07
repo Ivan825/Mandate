@@ -8,7 +8,7 @@ const base: Mandate = {
   perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
   allowedMerchants: JSON.stringify(["OpenAI", "Vercel*"]), blockedCategories: JSON.stringify(["gambling"]),
   activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null,
-  workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardError: null,
+  workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null,
   createdAt: new Date(), revokedAt: null,
 };
 const facts = (o: Partial<Facts> = {}): Facts => ({ spentToday: 0, spentTotal: 0, approvedAllowances: [], openPending: 0, recentlyDenied: false, ...o });
@@ -77,4 +77,16 @@ test("term validation catches contradictory sanction terms", () => {
   assert.ok(validateTerms({ ...ok, activeHoursStart: 9, activeHoursEnd: 9 }).some((e) => e.field === "activeHoursEnd"));
   assert.ok(validateTerms({ ...ok, timezone: "Asia/Kolkatta" }).some((e) => e.field === "timezone"));
   assert.ok(validateTerms({ ...ok, perTxnLimit: 0 }).length > 0);
+});
+
+test("prepaid balance caps card spend after the mandate's own limits", () => {
+  // Limits pass, balance fails.
+  const r = evaluate(base, { amount: 1500, merchant: "OpenAI", now: new Date("2026-09-06T10:00:00Z") }, facts({ availableBalance: 1000 }));
+  assert.equal(r.decision, "declined"); assert.equal(r.rule, "balance");
+  // Exactly the balance is fine.
+  assert.equal(evaluate(base, { amount: 1000, merchant: "OpenAI", now: new Date("2026-09-06T10:00:00Z") }, facts({ availableBalance: 1000 })).decision, "approved");
+  // Rails without a balance (null) never see the rule.
+  assert.equal(evaluate(base, { amount: 1500, merchant: "OpenAI", now: new Date("2026-09-06T10:00:00Z") }, facts({ availableBalance: null })).decision, "approved");
+  // Limits are checked first so the reason names the mandate, not the balance.
+  assert.equal(evaluate(base, { amount: 999999, merchant: "OpenAI", now: new Date("2026-09-06T10:00:00Z") }, facts({ availableBalance: 0 })).rule, "per_txn");
 });

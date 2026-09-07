@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile } from "@/lib/service";
-import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization } from "@/lib/stripe";
+import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization, cardholderProblem, ensureCardholder, issuingRegion, createTopupSession, freezeCard } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
 import { requireCtx, requirePermission, can } from "@/lib/session";
 import { auth } from "@/lib/auth";
@@ -65,10 +65,15 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
   const m = res.mandate;
   if (form.get("issueCard") === "on" && stripeEnabled()) {
     const profile = await getCardholderProfile(ctx.workspaceId);
-    if (!profile) await recordCardError(ctx.workspaceId, m.id, "No cardholder profile yet. Add your name and billing address in Settings, then issue a new mandate.");
+    const problem = cardholderProblem(profile);
+    const region = issuingRegion();
+    if (problem) await recordCardError(ctx.workspaceId, m.id, problem);
+    else if (m.currency !== region.currency) await recordCardError(ctx.workspaceId, m.id, `Cards are issued in ${region.currency}; this mandate is in ${m.currency}. Issue a ${region.currency} mandate for a card.`);
     else {
       try {
-        const card = await issueCardForMandate(m, { name: profile.name, email: profile.email, phone: profile.phone, dob: profile.dob, line1: profile.line1, line2: profile.line2, city: profile.city, state: profile.state, postalCode: profile.postalCode, country: profile.country });
+        const cardholderId = await ensureCardholder(profile!, ctx.workspaceId);
+        if (cardholderId !== profile!.stripeCardholderId) await saveCardholderProfile(ctx.workspaceId, { ...profile!, stripeCardholderId: cardholderId });
+        const card = await issueCardForMandate(m, cardholderId);
         await attachCard(ctx.workspaceId, m.id, card);
       } catch (e) {
         await recordCardError(ctx.workspaceId, m.id, (e as Error).message);
@@ -347,9 +352,57 @@ export async function saveCardholderProfileAction(form: FormData) {
   const country = f("country").toUpperCase();
   if (!f("name") || !f("line1") || !f("city") || !f("postalCode") || !/^[A-Z]{2}$/.test(country)) redirect("/settings?error=" + encodeURIComponent("Name, address line, city, postal code and a 2-letter country are required."));
   if (f("dob") && !/^\d{4}-\d{2}-\d{2}$/.test(f("dob"))) redirect("/settings?error=" + encodeURIComponent("Date of birth must be YYYY-MM-DD."));
-  await saveCardholderProfile(ctx.workspaceId, { name: f("name").slice(0, 60), email: f("email") || ctx.email, phone: f("phone").slice(0, 20), dob: f("dob"), line1: f("line1").slice(0, 100), line2: f("line2").slice(0, 100), city: f("city").slice(0, 60), state: f("state").slice(0, 40), postalCode: f("postalCode").slice(0, 16), country });
+  const existing = await getCardholderProfile(ctx.workspaceId);
+  // Terms acceptance is recorded once, with the time, address and browser
+  // Stripe asks for; unticking later does not un-accept.
+  const h = await headers();
+  const accepting = form.get("acceptTerms") === "on" && !existing?.termsAcceptedAt;
+  const { clientIp } = await import("@/lib/ratelimit");
+  await saveCardholderProfile(ctx.workspaceId, {
+    name: f("name").slice(0, 60), email: f("email") || ctx.email, phone: f("phone").slice(0, 20), dob: f("dob"), line1: f("line1").slice(0, 100), line2: f("line2").slice(0, 100), city: f("city").slice(0, 60), state: f("state").slice(0, 40), postalCode: f("postalCode").slice(0, 16), country,
+    termsAcceptedAt: accepting ? new Date() : existing?.termsAcceptedAt ?? null,
+    termsIp: accepting ? clientIp(new Request("http://x", { headers: h })) : existing?.termsIp ?? "",
+    termsUserAgent: accepting ? (h.get("user-agent") ?? "").slice(0, 200) : existing?.termsUserAgent ?? "",
+    // The Stripe cardholder carries the old details; a changed address or
+    // name means a new cardholder next time a card is issued.
+    stripeCardholderId: existing && existing.name === f("name").slice(0, 60) && existing.line1 === f("line1").slice(0, 100) && existing.postalCode === f("postalCode").slice(0, 16) && existing.country === country ? existing.stripeCardholderId : null,
+    cardholderStatus: existing?.cardholderStatus ?? "", cardholderRequirements: existing?.cardholderRequirements ?? "[]",
+  });
   revalidatePath("/settings");
   redirect("/settings?cardholder=saved");
+}
+
+export async function freezeCardAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["revoke"] }, "freezing cards");
+  const id = String(form.get("mandateId") ?? "");
+  const frozen = form.get("frozen") === "1";
+  if (!isUuid(id)) return;
+  const m = await getMandate(ctx.workspaceId, id);
+  if (!m?.stripeCardId || !stripeEnabled()) return;
+  try {
+    await freezeCard(m.stripeCardId, frozen);
+    const { setCardFrozen } = await import("@/lib/service");
+    await setCardFrozen(ctx.workspaceId, id, frozen, ctx.email);
+  } catch (e) { redirect(`/mandates/${id}?error=` + encodeURIComponent((e as Error).message)); }
+  revalidatePath(`/mandates/${id}`);
+  redirect(`/mandates/${id}`);
+}
+
+// Money in. Owners and admins top up through Stripe Checkout; the credit
+// lands when Stripe confirms payment (webhook or the success page).
+export async function topupAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "adding funds");
+  if (!stripeEnabled()) redirect("/balance?error=" + encodeURIComponent("Stripe is not configured on this deployment."));
+  const { MIN_TOPUP, MAX_TOPUP } = await import("@/lib/balance");
+  const region = issuingRegion();
+  const amount = toMinor(num(form.get("amount")));
+  if (!Number.isInteger(amount) || amount < MIN_TOPUP || amount > MAX_TOPUP) redirect("/balance?error=" + encodeURIComponent(`Top-ups are between ${(MIN_TOPUP / 100).toFixed(2)} and ${(MAX_TOPUP / 100).toFixed(2)} ${region.currency}.`));
+  const { rateLimit } = await import("@/lib/ratelimit");
+  if (!(await rateLimit(`user:${ctx.userId}:topup`, 10, 3600)).ok) redirect("/balance?error=" + encodeURIComponent("Too many top-up attempts this hour."));
+  let url = "";
+  try { url = await createTopupSession({ workspaceId: ctx.workspaceId, currency: region.currency, amount, email: ctx.email, by: ctx.email }); }
+  catch (e) { redirect("/balance?error=" + encodeURIComponent((e as Error).message)); }
+  redirect(url);
 }
 
 // ---------- Account and workspace lifecycle ----------

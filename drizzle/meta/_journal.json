@@ -29,6 +29,13 @@
       "when": 1788717965258,
       "tag": "0003_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788771989132,
+      "tag": "0004_cards_and_balance",
+      "breakpoints": true
     }
   ]
 }

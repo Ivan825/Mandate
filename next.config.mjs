@@ -2,17 +2,19 @@
 
 // Security headers. The CSP allows inline scripts because Next's app router
 // injects them without nonces; everything else is locked to self plus the
-// one font host. Frames are denied everywhere except the print button's own
-// page, and cross-origin agents talk to the JSON endpoints, not the pages.
+// one font host, plus Stripe.js (card details are rendered inside Stripe's
+// own iframes; the top-up form redirects to Stripe Checkout). Nothing may
+// frame us, and cross-origin agents talk to the JSON endpoints, not the pages.
 const csp = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline' https://js.stripe.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: https:",
-  "connect-src 'self'",
+  "connect-src 'self' https://api.stripe.com",
+  "frame-src https://js.stripe.com",
   "frame-ancestors 'none'",
-  "form-action 'self'",
+  "form-action 'self' https://checkout.stripe.com",
   "base-uri 'self'",
   "object-src 'none'",
 ].join("; ");

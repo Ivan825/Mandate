@@ -20,6 +20,10 @@ export type Facts = {
   approvedAllowances: Approval[]; // status = approved, not yet used
   openPending: number; // pending approvals currently waiting on the owner
   recentlyDenied?: boolean; // owner denied this same (amount, merchant) recently
+  // Prepaid funds the purchase would draw on (card rail only); null when the
+  // rail has no balance to check (API, MCP, proxy — the person pays the
+  // provider directly).
+  availableBalance?: number | null;
 };
 
 export type Decision =
@@ -148,6 +152,11 @@ export function evaluate(mandate: Mandate, req: AuthRequest, facts: Facts): Deci
   }
   if (facts.spentTotal + amt > mandate.totalLimit) {
     return { decision: "declined", reason: `Would exceed the mandate's total limit: ${fmt(facts.spentTotal, mandate.currency)} used of ${fmt(mandate.totalLimit, mandate.currency)}.`, rule: "total" };
+  }
+  // A card spends the workspace's prepaid balance; it can never go negative,
+  // whatever the mandate's own limits say.
+  if (facts.availableBalance != null && amt > facts.availableBalance) {
+    return { decision: "declined", reason: `Prepaid balance too low: ${fmt(Math.max(0, facts.availableBalance), mandate.currency)} available. Add funds to the workspace.`, rule: "balance" };
   }
 
   // Escalation. A human pre-approval (an "allowance") is for one specific

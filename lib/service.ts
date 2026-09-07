@@ -2,10 +2,11 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
 import { appendEvent, recordEvent } from "./ledger";
-import { evaluate, localDayStart, validateTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type TermsError } from "./policy";
+import { evaluate, localDayStart, validateTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError } from "./policy";
 import { sendApprovalRequested } from "./notify";
 import { checkWarnings } from "./warnings";
 import { sweepReveals } from "./reveal";
+import { availableBalance, lockBalance } from "./balance";
 import type { Mandate, Approval, Transaction } from "./schema";
 
 const { agents, mandates, transactions, approvals, idempotencyKeys } = schema;
@@ -77,7 +78,7 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
     blockedCategories: JSON.stringify(input.blockedCategories.map((s) => s.trim().slice(0, 64)).filter(Boolean).slice(0, 50)),
     activeHoursStart: input.activeHoursStart, activeHoursEnd: input.activeHoursEnd, timezone: input.timezone, expiresAt: input.expiresAt,
     tokenHash: hashToken(token), tokenPrefix: token.slice(0, 10), tokenReveal: token,
-    stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardError: null, createdAt: new Date(), revokedAt: null,
+    stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null, createdAt: new Date(), revokedAt: null,
   };
   await db.transaction(async (tx) => {
     await tx.insert(mandates).values(row);
@@ -102,11 +103,34 @@ export async function revealToken(workspaceId: string, mandateId: string): Promi
   return m?.t ?? null;
 }
 
-export async function attachCard(workspaceId: string, mandateId: string, card: { cardholderId: string; cardId: string; last4: string }) {
+export async function attachCard(workspaceId: string, mandateId: string, card: { cardholderId: string; cardId: string; last4: string; expMonth?: number; expYear?: number }) {
   await db.transaction(async (tx) => {
-    await tx.update(mandates).set({ stripeCardholderId: card.cardholderId, stripeCardId: card.cardId, cardLast4: card.last4, cardError: null }).where(and(eq(mandates.id, mandateId), eq(mandates.workspaceId, workspaceId)));
+    await tx.update(mandates).set({ stripeCardholderId: card.cardholderId, stripeCardId: card.cardId, cardLast4: card.last4, cardStatus: "active", cardExp: card.expMonth && card.expYear ? `${String(card.expMonth).padStart(2, "0")}/${String(card.expYear).slice(-2)}` : null, cardError: null }).where(and(eq(mandates.id, mandateId), eq(mandates.workspaceId, workspaceId)));
     await appendEvent(tx, workspaceId, "mandate.card_issued", { mandateId, cardId: card.cardId, last4: card.last4 });
   });
+}
+
+export async function setCardFrozen(workspaceId: string, mandateId: string, frozen: boolean, by: string) {
+  await db.transaction(async (tx) => {
+    await tx.update(mandates).set({ cardStatus: frozen ? "inactive" : "active" }).where(and(eq(mandates.id, mandateId), eq(mandates.workspaceId, workspaceId)));
+    await appendEvent(tx, workspaceId, frozen ? "mandate.card_frozen" : "mandate.card_unfrozen", { mandateId, by });
+  });
+}
+
+// Stripe tells us when a card or cardholder changes state (fraud block,
+// expiry, a cardholder missing a document); mirror it so the pages and the
+// decision engine see it.
+export async function syncCardStatus(cardId: string, status: string) {
+  const [m] = await db.select({ id: mandates.id, workspaceId: mandates.workspaceId, cardStatus: mandates.cardStatus }).from(mandates).where(eq(mandates.stripeCardId, cardId)).limit(1);
+  if (!m || m.cardStatus === status) return;
+  await db.transaction(async (tx) => {
+    await tx.update(mandates).set({ cardStatus: status }).where(eq(mandates.id, m.id));
+    await appendEvent(tx, m.workspaceId, "stripe.card_status", { mandateId: m.id, cardId, status });
+  });
+}
+
+export async function syncCardholderStatus(cardholderId: string, status: string, requirements: string[]) {
+  await db.update(schema.cardholderProfiles).set({ cardholderStatus: status, cardholderRequirements: JSON.stringify(requirements) }).where(eq(schema.cardholderProfiles.stripeCardholderId, cardholderId));
 }
 
 export async function recordCardError(workspaceId: string, mandateId: string, message: string) {
@@ -165,7 +189,8 @@ export async function factsFor(m: Mandate, now = new Date(), conn: Q = db, req?:
     ));
     recentlyDenied = Number(d?.c ?? 0) > 0;
   }
-  return { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied };
+  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, availableBalance: null };
+  return facts;
 }
 
 export type Exposure = {
@@ -233,6 +258,11 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
     const ws = mandate.workspaceId;
     await expireStale(tx, ws, now);
     const facts = await factsFor(mandate, now, tx, { amount, merchant });
+    if (source === "stripe") {
+      // Cards draw on the workspace's prepaid balance: one card at a time.
+      await lockBalance(tx, ws);
+      facts.availableBalance = await availableBalance(ws, mandate.currency, tx);
+    }
     let d = evaluate(mandate, { amount, merchant, category, purpose, now }, facts);
 
     let approvalId: string | undefined;

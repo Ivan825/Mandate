@@ -8,6 +8,9 @@ import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
 import { signOutAction, switchWorkspaceAction } from "./actions";
 import { WorkspaceSwitcher } from "./switcher";
+import { ThemeToggle, type Theme } from "./theme";
+import { stripeEnabled } from "@/lib/stripe";
+import { cookies } from "next/headers";
 
 export const metadata: Metadata = {
   title: "Mandate",
@@ -25,21 +28,25 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     try { orgs = (await auth.api.listOrganizations({ headers: await headers() })).map((o) => ({ id: o.id, name: o.name })); } catch { /* ignore */ }
   }
   const problems = configProblems();
+  const rawTheme = (await cookies()).get("theme")?.value;
+  const theme: Theme = rawTheme === "light" || rawTheme === "dark" ? rawTheme : "system";
   return (
-    <html lang="en">
+    <html lang="en" data-theme={theme === "system" ? undefined : theme} suppressHydrationWarning>
       <head>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" />
       </head>
       <body>
         <div className="topbar">
           <div className="topbar-in">
-            <Link href="/" className="brand">Mandate</Link>
+            <Link href="/" className="brand"><span className="mark" aria-hidden /> Mandate</Link>
             {ctx && (
               <nav className="nav">
                 <Link href="/">Exposure</Link>
                 <Link href="/approvals">Approvals{pending > 0 && <span className="badge">{pending}</span>}</Link>
                 <Link href="/ledger">Ledger</Link>
+                <Link href="/stats">Stats</Link>
                 <Link href="/proxy">API proxy</Link>
+                {stripeEnabled() && <Link href="/balance">Balance</Link>}
                 <Link href="/members">Members</Link>
                 <Link href="/docs">Connect agents</Link>
                 <Link href="/settings">Settings</Link>
@@ -55,6 +62,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             ) : (
               <Link href="/sign-in" className="btn secondary sm">Sign in</Link>
             )}
+            <ThemeToggle initial={theme} />
           </div>
         </div>
         <main className="main">

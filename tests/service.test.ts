@@ -151,7 +151,9 @@ test("mcp grants bind a client to the consented workspace and vanish on disconne
 
 test("card reconciliation accumulates partial captures and releases uncaptured holds", async () => {
   const { reconcileCard } = await import("../lib/service");
+  const { creditTopup } = await import("../lib/balance");
   const r = await mandate({ approvalAbove: null });
+  await creditTopup(r.mandate.workspaceId, "USD", 5000, "credit", "beta-credit-" + randomUUID(), "operator");
   const auth = await authorize(r.mandate, { amount: 1000, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() });
   assert.equal(auth.decision, "approved");
   const [t0] = await db.select().from(schema.transactions).where((await import("drizzle-orm")).eq(schema.transactions.id, auth.transactionId));
@@ -166,4 +168,42 @@ test("card reconciliation accumulates partial captures and releases uncaptured h
   await reconcileCard(t2.stripeAuthorizationId!, "closed", 0, "evt4");
   const [t3] = await db.select().from(schema.transactions).where((await import("drizzle-orm")).eq(schema.transactions.id, auth2.transactionId));
   assert.equal(t3.amount, 0);
+});
+
+test("cards spend a prepaid balance: holds, captures, reversals and refunds net out", async () => {
+  const { creditTopup, availableBalance } = await import("../lib/balance");
+  const { reconcileCard } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  // A fresh workspace so the balance starts at zero.
+  const ws2 = "test-ws-" + randomUUID();
+  const [u] = await db.select({ id: schema.user.id }).from(schema.user).limit(1);
+  await db.insert(schema.organization).values({ id: ws2, name: "Balance WS", slug: ws2, createdAt: new Date() });
+  await db.insert(schema.member).values({ id: randomUUID(), organizationId: ws2, userId: u.id, role: "owner", createdAt: new Date() });
+  const ag = await createAgent(ws2, { name: "Card agent" });
+  const r = await createMandate(ws2, { agentId: ag.id, name: "Card", currency: "USD", perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: null, allowedMerchants: [], blockedCategories: [], activeHoursStart: 0, activeHoursEnd: 24, timezone: "UTC", expiresAt: null });
+  if (!r.ok) throw new Error("terms");
+  assert.equal(await availableBalance(ws2, "USD"), 0);
+  // No money, no card spend — even though the mandate allows it.
+  const dry = await authorize(r.mandate, { amount: 100, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() });
+  assert.equal(dry.decision, "declined"); assert.equal(dry.rule, "balance");
+  // The same request over the API rail is not balance-gated.
+  assert.equal((await authorize(r.mandate, { amount: 100, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  const ref = "cs_test_" + randomUUID();
+  assert.deepEqual(await creditTopup(ws2, "USD", 2000, "checkout", ref, "tester"), { credited: true });
+  assert.deepEqual(await creditTopup(ws2, "USD", 2000, "checkout", ref, "tester"), { credited: false }); // webhook replay
+  assert.equal(await availableBalance(ws2, "USD"), 2000);
+  const a = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() });
+  assert.equal(a.decision, "approved");
+  assert.equal(await availableBalance(ws2, "USD"), 500); // hold
+  const b = await authorize(r.mandate, { amount: 600, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() });
+  assert.equal(b.rule, "balance");
+  const [ta] = await db.select().from(schema.transactions).where(eq(schema.transactions.id, a.transactionId));
+  await reconcileCard(ta.stripeAuthorizationId!, "capture", 1200, "evt-" + randomUUID());
+  assert.equal(await availableBalance(ws2, "USD"), 800); // partial capture released 300
+  await reconcileCard(ta.stripeAuthorizationId!, "refund", 200, "evt-" + randomUUID());
+  assert.equal(await availableBalance(ws2, "USD"), 1000);
+  // Concurrent card authorisations on one balance never overspend it.
+  const results = await Promise.all(Array.from({ length: 6 }, () => authorize(r.mandate, { amount: 400, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() })));
+  assert.equal(results.filter((x) => x.decision === "approved").length, 2);
+  assert.equal(await availableBalance(ws2, "USD"), 200);
 });
