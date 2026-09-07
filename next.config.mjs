@@ -5,9 +5,12 @@
 // one font host, plus Stripe.js (card details are rendered inside Stripe's
 // own iframes; the top-up form redirects to Stripe Checkout). Nothing may
 // frame us, and cross-origin agents talk to the JSON endpoints, not the pages.
+// `next dev` evaluates its hot-reload runtime with eval(); production never
+// does, so 'unsafe-eval' is granted to the dev server only.
+const dev = process.env.NODE_ENV !== "production";
 const csp = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://js.stripe.com",
+  `script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ""} https://js.stripe.com`,
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: https:",
