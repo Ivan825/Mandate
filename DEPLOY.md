@@ -11,7 +11,7 @@ openssl rand -base64 32   # MANDATE_ENCRYPTION_KEY  (encrypts stored provider AP
 openssl rand -base64 32   # RECEIPT_SIGNING_KEY     (Ed25519 seed; signs receipts)
 ```
 
-Keep `MANDATE_ENCRYPTION_KEY` and `RECEIPT_SIGNING_KEY` somewhere durable: losing the first makes stored provider keys unreadable; changing the second changes the receipt key id (old receipts still verify against the old public key, which the export embeds).
+All four are **required** whenever `NODE_ENV=production` (which is what `next start`, the Docker image and Vercel use): the app refuses to derive them from each other outside development, and the top bar shows a red configuration notice to signed-in users if one is missing or looks like a placeholder. Keep `MANDATE_ENCRYPTION_KEY` and `RECEIPT_SIGNING_KEY` somewhere durable: losing the first makes stored provider keys unreadable; rotating the second changes the receipt key id, and receipts signed with the old key no longer verify at `/api/receipts/verify` (they still verify offline against the old public key if you kept it).
 
 ## 1. Hosted: Vercel + Neon
 
@@ -44,11 +44,24 @@ Nothing to configure at deployment level. Each person adds an email address or a
 ## 6. Self-hosted: Docker Compose
 
 ```bash
-cp .env.example .env     # fill in the secrets from step 0 and APP_URL
+cp .env.example .env     # fill in the four secrets from step 0, POSTGRES_PASSWORD and APP_URL
 docker compose up -d     # Postgres + app; migrations run on start
 ```
 
-Put it behind HTTPS (Caddy, nginx, a tunnel): OAuth for agents and passkeys require a real origin.
+`docker-compose.yml` has no default secrets: it fails fast if any of `POSTGRES_PASSWORD`, `BETTER_AUTH_SECRET`, `NOTIFY_SECRET`, `MANDATE_ENCRYPTION_KEY`, `RECEIPT_SIGNING_KEY` is unset. Put it behind HTTPS (Caddy, nginx, a tunnel): OAuth for agents and passkeys require a real origin, and `APP_URL` must be the https address. If clients reach Node with no reverse proxy at all, set `TRUST_PROXY=false` so forwarded-address headers are ignored.
+
+## 7. What the hardening pass locks down (for your own review)
+
+- **Agents see one workspace.** An OAuth client is bound, on the consent page, to the workspace the person was looking at; every MCP call resolves that binding, re-reads the member's current role, and refuses tokens whose consent was withdrawn in Settings even before the JWT expires. Only owners and admins can connect an agent that spends; approvers and viewers can connect read-only.
+- **Retries never double-spend.** `Idempotency-Key` is reserved before the policy engine runs, so concurrent retries collapse to one decision; a *pending* answer is never replayed, so the retry after approval consumes the allowance.
+- **Cards answer Stripe first.** Notifications and warnings run after the authorisation response is sent; an authorisation Stripe declines on its side after we approved is voided so it never counts as spend; partial captures accumulate; closed-without-capture releases the hold.
+- **The proxy forwards only what it can price**: chat/responses/embeddings (OpenAI), messages (Anthropic), generateContent/streamGenerateContent/embedContent (Gemini), plus model listings. Path traversal, other endpoints, non-JSON bodies and bodies over 8 MB are refused; request and response headers are allow-listed; attachments, hidden Responses history, `n`, thinking tokens and snake_case Gemini configs are priced; a call that settles above the per-transaction limit or far above its estimate suspends the proxy key and alerts the approvers.
+- **Receipts are verified against this server's key**, never a key embedded in the receipt.
+- **Webhook targets must be public** (no loopback, private, link-local or metadata addresses; https outside development), checked when added and again before every delivery.
+- **Rate limits live in Postgres** for auth endpoints too (magic links, token endpoint, anonymous client registration, invitations) and hold across serverless instances. Addresses come from `x-real-ip` / `cf-connecting-ip` / a single `x-forwarded-for`; set `TRUSTED_PROXIES` for a proxy chain, `TRUST_PROXY=false` when there is no proxy.
+- **Reconnecting an agent** (Settings → Disconnect, then connect again in the client) invalidates every token from the earlier connection, even unexpired ones. Re-connecting an already-consented client skips the consent page, so its workspace binding stays as it was; disconnect first to move it.
+- **The public verifier says what it covers**: `coverage: "chain"` with `eventsCovered: true` only for a full-workspace receipt; a mandate slice is `rows-only`.
+- Also: same-origin-only `next=` redirects; escaped invitation emails; session revocation by id (tokens never reach the page); TLS-verified database connections by default; int4-safe amounts; `ledger:export` enforced; show-once plaintexts swept at creation; `POST`-only seeding; role-gated buttons with a plain-language reason when a role cannot act; ownership transfer on the Members page; timestamps in the viewer's own timezone.
 
 ## Health checks
 

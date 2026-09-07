@@ -2,7 +2,7 @@ import Link from "next/link";
 import { requireCtx, can } from "@/lib/session";
 import { listProviderKeys, listProxyKeys, recentCalls, revealProxyKey, PROVIDERS } from "@/lib/proxy";
 import { listMandates } from "@/lib/service";
-import { fmt } from "@/lib/policy";
+import { fmt, parseList, merchantMatches } from "@/lib/policy";
 import { Pill, When } from "@/app/components";
 import { addProviderKeyAction, removeProviderKeyAction, createProxyKeyAction, revokeProxyKeyAction } from "@/app/actions";
 import { grantValid, sweepReveals } from "@/lib/reveal";
@@ -18,6 +18,11 @@ export default async function ProxyPage({ searchParams }: { searchParams: Promis
   ]);
   const revealed = reveal && /^[0-9a-f-]{36}$/i.test(reveal) && grantValid(reveal, g) ? await revealProxyKey(ctx.workspaceId, reveal) : null;
   const usdMandates = mandates.filter((m) => m.m.currency === "USD");
+  // Proxy calls are authorised as purchases at "OpenAI", "Anthropic" or
+  // "Google Gemini". A mandate whose merchant list leaves those out would
+  // decline every call, so say so before a key is issued.
+  const providerNames = Object.values(PROVIDERS).map((p) => p.name);
+  const blocksProviders = (allowed: string) => { const list = parseList(allowed); return list.length > 0 && !providerNames.some((n) => list.some((pat) => merchantMatches(pat, n))); };
 
   return (
     <div style={{ maxWidth: 900 }}>
@@ -73,7 +78,8 @@ export default async function ProxyPage({ searchParams }: { searchParams: Promis
             <form action={createProxyKeyAction} className="form">
               <div className="field"><label htmlFor="name">Name</label><input id="name" name="name" required placeholder="e.g. Claude Code on the work laptop" /></div>
               <div className="field"><label htmlFor="mandateId">Mandate (limits that apply)</label>
-                <select id="mandateId" name="mandateId">{usdMandates.map((m) => <option key={m.m.id} value={m.m.id}>{m.m.name} · {m.agentName} · {fmt(m.m.dailyLimit, "USD")}/day</option>)}</select>
+                <select id="mandateId" name="mandateId">{usdMandates.map((m) => <option key={m.m.id} value={m.m.id}>{m.m.name} · {m.agentName} · {fmt(m.m.dailyLimit, "USD")}/day{blocksProviders(m.m.allowedMerchants) ? " · ⚠ merchant list excludes providers" : ""}</option>)}</select>
+                <span className="hint">Calls are recorded as purchases at {providerNames.join(", ")}. If the mandate restricts merchants, include the provider's name (or leave the list empty).</span>
               </div>
               <div className="field"><label htmlFor="providerKeyId">Provider key</label>
                 <select id="providerKeyId" name="providerKeyId">{providerKeys.map((k) => <option key={k.id} value={k.id}>{PROVIDERS[k.provider as keyof typeof PROVIDERS]?.name ?? k.provider} ····{k.hint} {k.label && `(${k.label})`}</option>)}</select>

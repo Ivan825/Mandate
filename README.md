@@ -25,7 +25,7 @@ Think of it as a sanction letter for an agent, with the loan-book view to match.
 - **Ledger and receipts**: append-only SHA-256 chain per workspace, verified incrementally; exports carry an Ed25519 signature over the chain head; a public verifier (`/api/receipts/verify`) and key (`/.well-known/mandate-receipt-key`) let anyone check a receipt; a printable receipt page per mandate.
 - **Early warnings**: 80% of daily or total sanction, and unusual velocity, alert the approvers once per window.
 - **Settings**: your channels, connected OAuth agents (disconnect = tokens revoked), passkeys, cardholder details for virtual cards, deployment capability status.
-- **Hardening**: Postgres-backed rate limits per token, key and address; structured JSON logs with request ids; idempotency keys; fail-closed card authorisations; provider keys encrypted with a key held outside the database.
+- **Hardening**: agents bound to the workspace they were consented into, with the member's live role re-checked on every call; idempotency keys reserved before deciding (concurrent retries collapse, *pending* is never replayed); Postgres-backed rate limits per token, key, address and auth endpoint; proxy endpoint allow-list and header allow-lists, with automatic key suspension on settlement overruns; webhook targets restricted to the public internet; receipts verified against the server key only; structured JSON logs with request ids; fail-closed card authorisations that answer Stripe before notifying anyone; provider keys encrypted with a key held outside the database; production refuses to start without its secrets.
 
 ## Run it locally
 
@@ -38,7 +38,7 @@ npm run db:migrate              # applies ./drizzle migrations
 npm run dev                     # http://localhost:3000
 ```
 
-Sign in with any email: without `RESEND_API_KEY`, the sign-in link is printed to the server console. Then `GET /api/dev/seed` (while signed in, dev only) fills your workspace with two agents, two mandates and a few decisions.
+Sign in with any email: without `RESEND_API_KEY`, the sign-in link is printed to the server console. Then `POST /api/dev/seed` (from the browser console while signed in: `fetch('/api/dev/seed',{method:'POST'})`; dev only) fills your workspace with two agents, two mandates and a few decisions.
 
 ```bash
 npm test                            # policy-engine unit tests (pure)
@@ -51,9 +51,9 @@ See `DEPLOY.md` for Vercel + Neon, Google and Resend setup, Stripe, and Docker.
 
 ## What the test suite proves (all on Postgres 16, run in CI)
 
-- **Unit (8)**: policy rule order, exact merchant matching, allowance binding and expiry, overnight hours, timezone-correct expiry, cooling-off, cap on open approvals, term validation.
-- **Integration (9)**: hashed token lookup and revocation; ten concurrent requests never exceed a daily limit; pending → approve → allowance consumed exactly once under parallel retries; denial cooling-off; incremental and full chain verification with a valid signature and a rejected tampered one; grouped exposure sums; rate-limit windows; encryption round-trip; proxy estimates and usage parsing for all three providers.
-- **End to end (23)**: landing; email-link sign-in; onboarding; seed decisions; inbox approval then agent retry by allowance; invitation → second browser accepts as approver → approver cannot issue; provider key stored → proxy key revealed once → metered call, streamed call, unknown-key rejection; OAuth dynamic registration → consent → PKCE token with scopes → MCP tools listed → purchase approved; signed receipt export; public verifier accepts it and rejects a tampered copy; OAuth discovery at the site root.
+- **Unit (12)**: policy rule order, exact merchant matching, allowance binding and expiry, overnight hours, timezone-correct expiry, cooling-off, cap on open approvals, term validation; proxy endpoint allow-list, estimates for attachments / hidden history / `n` / snake_case configs, Gemini thinking tokens, private-address detection for webhooks.
+- **Integration (12)**: hashed token lookup and revocation; ten concurrent requests never exceed a daily limit; pending → approve → allowance consumed exactly once under parallel retries; denial cooling-off; incremental and full chain verification with a valid signature, and rejection of a tampered head, a foreign workspace and a receipt carrying its own key; grouped exposure sums; rate-limit windows; encryption round-trip; proxy estimates and usage parsing for all three providers; twenty concurrent idempotency reservations yield one winner, pending releases, terminal answers replay; MCP grants bind and unbind with consent; partial card captures accumulate and uncaptured holds release.
+- **End to end (28)**: landing; email-link sign-in; onboarding; seed decisions; inbox approval then agent retry by allowance; pending never replayed and approved replayed exactly under one `Idempotency-Key`; oversized amounts rejected; invitation → second browser accepts as approver → approver cannot issue and is turned away from `/mandates/new` with a reason → private webhook target refused; provider key stored → proxy key revealed once → metered call, streamed call, non-generation and traversal paths refused, unknown-key rejection; OAuth dynamic registration → consent (bound to the workspace) → PKCE token with scopes → MCP tools listed → purchase approved; signed receipt export; public verifier accepts it and rejects a tampered copy; OAuth discovery at the site root.
 
 ## Still open
 
@@ -62,6 +62,7 @@ See `DEPLOY.md` for Vercel + Neon, Google and Resend setup, Stripe, and Docker.
 - **Proxy in non-USD mandates**: the price table is in USD; issue a USD mandate for proxy keys.
 - **Magic-link sign-in mid-OAuth**: Google and passkey sign-ins resume an agent's connection automatically; after an email link the person clicks "connect" in the agent once more.
 - **Notification channels are per person**, not per workspace; a workspace-level shared webhook is a natural next step.
+- **Agents connected before this version** show as "not bound" in Settings; disconnect and connect them again once.
 
 ## Layout
 
@@ -77,7 +78,7 @@ app/                      pages, server actions, API routes
   sign-in, consent, invite, members, workspaces, proxy, settings, docs, a/[id] (one-tap), terms, privacy
 lib/auth.ts               Better Auth config (Google, magic link, passkey, orgs+roles, jwt, mcp, cimd)
 lib/roles.ts              access control: owner, admin, approver, viewer
-lib/schema.ts             Mandate tables (workspace-scoped); lib/auth-schema.ts generated auth tables
+lib/schema.ts             Mandate tables (workspace-scoped, incl. mcp_grants); lib/auth-schema.ts generated auth tables (+ rate_limit)
 lib/policy.ts             the decision engine (pure)
 lib/service.ts            mandates, authorisation, approvals, exposure, reconciliation
 lib/proxy.ts, pricing.ts  API-key proxy: keys, estimates, settlement; per-model prices

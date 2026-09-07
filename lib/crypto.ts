@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { isProduction } from "./env";
 
 // Provider API keys are stored encrypted with AES-256-GCM under a key that
 // lives outside the database. In production set MANDATE_ENCRYPTION_KEY to
@@ -12,7 +13,7 @@ function key(): Buffer {
     if (b.length === 32) return b;
     throw new Error("MANDATE_ENCRYPTION_KEY must be 32 bytes, base64-encoded.");
   }
-  if (process.env.VERCEL) throw new Error("MANDATE_ENCRYPTION_KEY is required in production.");
+  if (isProduction()) throw new Error("MANDATE_ENCRYPTION_KEY is required in production.");
   return createHash("sha256").update("mandate-enc:" + (process.env.BETTER_AUTH_SECRET ?? "dev")).digest();
 }
 

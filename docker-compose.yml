@@ -1,12 +1,17 @@
 # One-command self-host: docker compose up
 # Then open http://localhost:3000 — sign-in links print in the `app` logs
 # until you add RESEND_API_KEY.
+#
+# Secrets have NO defaults on purpose: put them in a .env next to this file
+# (docker compose reads it automatically). Generate each with
+#   openssl rand -base64 32
+# The app refuses to start in production without them.
 services:
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: mandate
-      POSTGRES_PASSWORD: mandate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: mandate
     volumes: ["mandate-db:/var/lib/postgresql/data"]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U mandate"], interval: 5s, timeout: 3s, retries: 20 }
@@ -15,12 +20,18 @@ services:
     depends_on: { db: { condition: service_healthy } }
     ports: ["3000:3000"]
     environment:
-      DATABASE_URL: postgres://mandate:mandate@db:5432/mandate
-      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-change-me-to-32-plus-random-characters}
+      DATABASE_URL: postgres://mandate:${POSTGRES_PASSWORD}@db:5432/mandate
+      DATABASE_SSL: "off"
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env (openssl rand -base64 32)}
+      NOTIFY_SECRET: ${NOTIFY_SECRET:?set NOTIFY_SECRET in .env (openssl rand -base64 32)}
+      MANDATE_ENCRYPTION_KEY: ${MANDATE_ENCRYPTION_KEY:?set MANDATE_ENCRYPTION_KEY in .env (openssl rand -base64 32)}
+      RECEIPT_SIGNING_KEY: ${RECEIPT_SIGNING_KEY:?set RECEIPT_SIGNING_KEY in .env (openssl rand -base64 32)}
       APP_URL: ${APP_URL:-http://localhost:3000}
-      MANDATE_ENCRYPTION_KEY: ${MANDATE_ENCRYPTION_KEY:-}
-      RECEIPT_SIGNING_KEY: ${RECEIPT_SIGNING_KEY:-}
-      NOTIFY_SECRET: ${NOTIFY_SECRET:-change-me-too}
+      # Port 3000 is exposed directly here; forwarded-address headers are
+      # client-controlled unless a reverse proxy in front sets them. Set to
+      # "true" (and TRUSTED_PROXIES to your proxy's CIDR) once one is in place.
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
@@ -28,5 +39,6 @@ services:
       NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
 volumes:
   mandate-db: {}

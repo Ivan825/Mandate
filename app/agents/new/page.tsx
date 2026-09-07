@@ -1,8 +1,10 @@
-import { requireCtx } from "@/lib/session";
+import { requireCtx, can } from "@/lib/session";
+import { redirect } from "next/navigation";
 import { createAgentAction } from "@/app/actions";
 
 export default async function NewAgentPage() {
-  await requireCtx();
+  const ctx = await requireCtx();
+  if (!(await can({ agent: ["create"] }))) redirect("/?error=" + encodeURIComponent("Your role (" + ctx.role + ") cannot add agents here."));
   return (
     <div style={{ maxWidth: 560 }}>
       <div className="eyebrow">New agent</div>

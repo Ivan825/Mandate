@@ -6,6 +6,7 @@ import {
   boolean,
   integer,
   jsonb,
+  bigint,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -505,3 +506,15 @@ export const oauthConsentRelations = relations(oauthConsent, ({ one }) => ({
     references: [user.id],
   }),
 }));
+
+// Better Auth's own rate-limit store (rateLimit: { storage: "database" }).
+export const rateLimit = pgTable(
+  "rate_limit",
+  {
+    id: text("id").primaryKey(),
+    key: text("key").notNull(),
+    count: integer("count").notNull(),
+    lastRequest: bigint("last_request", { mode: "number" }).notNull(),
+  },
+  (table) => [index("rateLimit_key_idx").on(table.key)],
+);

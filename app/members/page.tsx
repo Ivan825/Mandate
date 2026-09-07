@@ -4,11 +4,11 @@ import { requireCtx, can } from "@/lib/session";
 import { auth } from "@/lib/auth";
 import { ROLE_LABELS, ASSIGNABLE_ROLES, type Role } from "@/lib/roles";
 import { When } from "@/app/components";
-import { inviteMemberAction, cancelInvitationAction, updateMemberRoleAction, removeMemberAction } from "@/app/actions";
+import { inviteMemberAction, cancelInvitationAction, updateMemberRoleAction, removeMemberAction, transferOwnershipAction } from "@/app/actions";
 
-export default async function MembersPage({ searchParams }: { searchParams: Promise<{ invited?: string; error?: string; created?: string }> }) {
+export default async function MembersPage({ searchParams }: { searchParams: Promise<{ invited?: string; error?: string; created?: string; transferred?: string }> }) {
   const ctx = await requireCtx();
-  const { invited, error, created } = await searchParams;
+  const { invited, error, created, transferred } = await searchParams;
   const h = await headers();
   const [members, invitations, mayInvite, mayManage] = await Promise.all([
     auth.api.listMembers({ query: { organizationId: ctx.workspaceId, limit: 100 }, headers: h }),
@@ -31,6 +31,7 @@ export default async function MembersPage({ searchParams }: { searchParams: Prom
 
       {created && <div className="notice ok" style={{ marginBottom: 14 }}>Workspace created. You're its owner; invite the people who should approve.</div>}
       {invited && <div className="notice ok" style={{ marginBottom: 14 }}>Invitation sent to {invited}. It's valid for 7 days.</div>}
+      {transferred && <div className="notice ok" style={{ marginBottom: 14 }}>Ownership transferred. You are now an admin here.</div>}
       {error && <div className="notice bad" style={{ marginBottom: 14 }}>{error}</div>}
 
       <div className="tbl" style={{ marginBottom: 24 }}>
@@ -55,8 +56,10 @@ export default async function MembersPage({ searchParams }: { searchParams: Prom
                     ) : <span title={ROLE_LABELS[role] ?? role}>{role}</span>}
                   </td>
                   <td><When d={m.createdAt} /></td>
-                  <td>{mayManage && role !== "owner" && !isSelf && (
+                  <td className="actions">{mayManage && role !== "owner" && !isSelf && (
                     <form action={removeMemberAction}><input type="hidden" name="memberId" value={m.id} /><button className="btn danger sm" type="submit">Remove</button></form>
+                  )}{ctx.role === "owner" && !isSelf && (
+                    <form action={transferOwnershipAction}><input type="hidden" name="memberId" value={m.id} /><button className="btn secondary sm" type="submit" title="They become owner; you become admin.">Make owner</button></form>
                   )}</td>
                 </tr>
               );

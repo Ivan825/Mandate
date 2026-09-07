@@ -29,9 +29,23 @@ const upstream = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ choices: [{ message: { content: "Hello" } }], usage: { prompt_tokens: 100, completion_tokens: 20 } }));
 }).listen(UP);
 
+// Rate-limit windows persist in Postgres; a fresh run must not inherit the
+// previous run's sign-in attempts from the same address.
+{
+  const { Client } = await import("pg");
+  const c = new Client({ connectionString: process.env.DATABASE_URL ?? "postgres://mandate:mandate@localhost:5432/mandate" });
+  await c.connect(); await c.query("delete from rate_limit"); await c.query("delete from rate_limits"); await c.end();
+}
+
 // ---- app server, stdout captured for sign-in links ----
 let out = "";
-const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: { ...process.env, ALLOW_SEED: "1", APP_URL: BASE, PROXY_UPSTREAM_OPENAI: `http://localhost:${UP}/openai` }, stdio: ["ignore", "pipe", "pipe"] });
+const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: {
+  ...process.env, ALLOW_SEED: "1", APP_URL: BASE, PROXY_UPSTREAM_OPENAI: `http://localhost:${UP}/openai`,
+  // `next start` is production mode, so the same keys a deployment needs
+  // (BETTER_AUTH_SECRET and NOTIFY_SECRET come from .env or the CI env).
+  MANDATE_ENCRYPTION_KEY: process.env.MANDATE_ENCRYPTION_KEY ?? Buffer.alloc(32, 7).toString("base64"),
+  RECEIPT_SIGNING_KEY: process.env.RECEIPT_SIGNING_KEY ?? Buffer.alloc(32, 9).toString("base64"),
+}, stdio: ["ignore", "pipe", "pipe"] });
 app.stdout.on("data", (d) => { out += d.toString(); });
 app.stderr.on("data", (d) => { out += d.toString(); });
 const waitFor = async (url, ms = 60000) => { const t = Date.now(); while (Date.now() - t < ms) { try { const r = await fetch(url); if (r.ok || r.status === 307) return; } catch {} await new Promise((r) => setTimeout(r, 500)); } throw new Error("server did not start:\n" + out.slice(-800)); };
@@ -56,13 +70,27 @@ try {
   check("signed in to onboarding", (await p.locator(".steps li").count()) === 4);
 
   // 2. seed + inbox approval
-  const seed = await p.evaluate(async () => (await fetch("/api/dev/seed")).json());
+  const seed = await p.evaluate(async () => (await fetch("/api/dev/seed", { method: "POST" })).json());
   check("seed decisions", seed.decisions?.join(",") === "approved,approved,declined,pending,declined,approved,pending", seed.decisions?.join(","));
   await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
   await p.locator(".approval", { hasText: "Anthropic" }).first().getByRole("button", { name: "Approve once" }).click();
   await p.waitForURL(/\/approvals$/); await p.waitForTimeout(500);
   const retry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: { authorization: "Bearer " + seed.tokens.dev, "content-type": "application/json" }, body: JSON.stringify({ amount: 4500, merchant: "Anthropic", purpose: "Top-up before the demo" }) }).then((r) => r.json());
   check("agent retry approved by allowance", retry.rule === "allowance", retry.reason);
+  // Idempotency: a pending answer is never replayed; the retry after approval consumes the allowance.
+  const idem = { authorization: "Bearer " + seed.tokens.dev, "content-type": "application/json", "idempotency-key": "e2e-" + Date.now() };
+  const body = JSON.stringify({ amount: 2100, merchant: "Anthropic", purpose: "idempotent ask" });
+  const a1 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
+  const a2 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
+  check("pending is not cached as a replay", a1.status === 202 && a2.status === 202 && !a2.headers.get("idempotent-replayed"), `${a1.status} ${a2.status} ${JSON.stringify(await a2.clone().json())}`);
+  await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  await p.locator(".approval", { hasText: "idempotent ask" }).first().getByRole("button", { name: "Approve once" }).click();
+  await p.waitForURL(/\/approvals$/); await p.waitForTimeout(400);
+  const a3 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
+  const a4 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
+  check("approved answer is replayed exactly", a3.status === 200 && a4.status === 200 && a4.headers.get("idempotent-replayed") === "true");
+  const big = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body: JSON.stringify({ amount: 2 ** 40, merchant: "Anthropic" }) });
+  check("oversized amount rejected", big.status === 400);
 
   // 3. invite an approver, accept in a second browser
   await p.goto(BASE + "/members", { waitUntil: "networkidle" });
@@ -80,6 +108,13 @@ try {
   await p2.goto(BASE + "/settings", { waitUntil: "networkidle" });
   check("partner joined as approver", (await p2.locator("p.muted").first().textContent())?.includes("approver"));
   check("approver cannot see Issue mandate", (await p2.locator("a.btn.accent", { hasText: "Issue mandate" }).count()) === 0);
+  await p2.goto(BASE + "/mandates/new", { waitUntil: "networkidle" });
+  check("approver is turned away from /mandates/new with a reason", p2.url().includes("error="), p2.url());
+  // Webhook targets must be public: a private address is refused.
+  await p2.goto(BASE + "/settings", { waitUntil: "networkidle" });
+  await p2.selectOption("select[name=type]", "webhook"); await p2.fill("input[name=target]", "http://169.254.169.254/latest/meta-data");
+  await Promise.all([p2.waitForURL(/settings\?(error|channel)=/), p2.locator("form", { has: p2.locator("select[name=type]") }).locator("button[type=submit]").click()]);
+  check("private webhook target refused", p2.url().includes("error="));
 
   // 4. proxy: provider key + proxy key + a metered call, streaming included
   await p.goto(BASE + "/proxy", { waitUntil: "networkidle" });
@@ -94,6 +129,9 @@ try {
   const stream = await fetch(BASE + "/api/proxy/openai/chat/completions", { method: "POST", headers: { authorization: "Bearer " + mpx, "content-type": "application/json" }, body: JSON.stringify({ model: "gpt-4o", stream: true, messages: [{ role: "user", content: "hi" }] }) });
   const streamed = await stream.text();
   check("proxy streams through", stream.status === 200 && streamed.includes("[DONE]"));
+  const files = await fetch(BASE + "/api/proxy/openai/files", { method: "POST", headers: { authorization: "Bearer " + mpx, "content-type": "application/json" }, body: "{}" });
+  const dots = await fetch(BASE + "/api/proxy/openai/chat/../files", { method: "POST", headers: { authorization: "Bearer " + mpx, "content-type": "application/json" }, body: "{}" });
+  check("proxy refuses non-generation endpoints", files.status === 404 && dots.status === 404, `${files.status} ${dots.status}`);
   const bad = await fetch(BASE + "/api/proxy/openai/chat/completions", { method: "POST", headers: { authorization: "Bearer mpx_nope", "content-type": "application/json" }, body: "{}" });
   check("proxy rejects unknown key", bad.status === 401);
 
@@ -118,7 +156,7 @@ try {
   const lm = await mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_mandates", arguments: {} } });
   const inner = JSON.parse(JSON.parse((lm.split("\n").find((l) => l.startsWith("data:")) ?? lm).replace(/^data:\s*/, "")).result.content[0].text);
   const usd = inner.mandates.find((m) => m.currency === "USD");
-  const rp = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "request_purchase", arguments: { mandateId: usd.mandateId, amount: 1500, merchant: "GitHub", purpose: "e2e" } } });
+  const rp = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "request_purchase", arguments: { mandateId: usd.mandateId, amount: 150, merchant: "GitHub", purpose: "e2e" } } });
   check("mcp purchase approved", rp.includes('\\"decision\\": \\"approved\\"'));
 
   // 6. receipt: signed, verifiable through the public endpoint

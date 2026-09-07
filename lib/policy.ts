@@ -94,7 +94,9 @@ export function validateTerms(t: {
   if (!/^[A-Z]{3}$/.test(t.currency)) errs.push({ field: "currency", message: "Currency must be a 3-letter ISO code." });
   for (const [k, v] of [["perTxnLimit", t.perTxnLimit], ["dailyLimit", t.dailyLimit], ["totalLimit", t.totalLimit]] as const) {
     if (!Number.isInteger(v) || v <= 0) errs.push({ field: k, message: "Limits must be positive amounts." });
+    else if (v > 2_147_483_647) errs.push({ field: k, message: "Limits must be below 21,474,836.47 in major units." });
   }
+  if (t.approvalAbove != null && t.approvalAbove > 2_147_483_647) errs.push({ field: "approvalAbove", message: "Threshold too large." });
   if (t.dailyLimit < t.perTxnLimit) errs.push({ field: "dailyLimit", message: "The daily limit cannot be below the per-transaction limit." });
   if (t.totalLimit < t.dailyLimit) errs.push({ field: "totalLimit", message: "The total limit cannot be below the daily limit." });
   if (t.approvalAbove != null) {

@@ -3,15 +3,22 @@ import { deploymentChannels, notifySecret, baseUrl, listChannels } from "@/lib/n
 import { stripeEnabled } from "@/lib/stripe";
 import { PENDING_TTL_MS } from "@/lib/service";
 import { listConnectedAgents } from "@/lib/connections";
-import { sendTestNotificationAction, revokeOAuthClientAction, addChannelAction, removeChannelAction, saveCardholderProfileAction } from "@/app/actions";
+import { sendTestNotificationAction, revokeOAuthClientAction, addChannelAction, removeChannelAction, saveCardholderProfileAction, leaveWorkspaceAction, deleteWorkspaceAction, deleteAccountAction, revokeSessionAction, revokeOtherSessionsAction } from "@/app/actions";
+import { auth } from "@/lib/auth";
+import { headers } from "next/headers";
+import { soleOwnedWorkspaces } from "@/lib/service";
 import { getCardholderProfile } from "@/lib/service";
 import { When } from "@/app/components";
 import { PasskeyPanel } from "./passkeys";
 
-export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ test?: string; disconnected?: string; channel?: string; error?: string; cardholder?: string }> }) {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ test?: string; disconnected?: string; channel?: string; error?: string; cardholder?: string; sessions?: string }> }) {
   const ctx = await requireCtx();
-  const { test, disconnected, channel, error, cardholder } = await searchParams;
-  const [connected, channels, profile] = await Promise.all([listConnectedAgents(ctx.userId), listChannels(ctx.userId), getCardholderProfile(ctx.workspaceId)]);
+  const { test, disconnected, channel, error, cardholder, sessions: sessionsMsg } = await searchParams;
+  const h = await headers();
+  const [connected, channels, profile, sessions, current, sole] = await Promise.all([
+    listConnectedAgents(ctx.userId), listChannels(ctx.userId), getCardholderProfile(ctx.workspaceId),
+    auth.api.listSessions({ headers: h }).catch(() => []), auth.api.getSession({ headers: h }), soleOwnedWorkspaces(ctx.userId),
+  ]);
   const emailOn = Boolean(process.env.RESEND_API_KEY);
   const rows: [string, boolean, string][] = [
     ["Google sign-in", Boolean(process.env.GOOGLE_CLIENT_ID), "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET"],
@@ -67,15 +74,15 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       {disconnected && <div className="notice ok" style={{ marginBottom: 12 }}>Disconnected.</div>}
       <div className="tbl" style={{ marginBottom: 28 }}>
         <table>
-          <thead><tr><th>Agent</th><th>Allowed to</th><th>Connected</th><th>Tokens</th><th></th></tr></thead>
+          <thead><tr><th>Agent</th><th>Allowed to</th><th>Workspace</th><th>Connected</th><th></th></tr></thead>
           <tbody>
             {connected.length === 0 && <tr><td colSpan={5} className="empty">Nothing connected yet. See <a href="/docs">Connect agents</a>.</td></tr>}
             {connected.map((c) => (
               <tr key={c.clientId}>
                 <td>{c.name}{c.uri && <div className="faint mono" style={{ fontSize: 11.5 }}>{c.uri}</div>}</td>
                 <td className="mono" style={{ fontSize: 12.5 }}>{c.scopes.join(" ")}</td>
+                <td>{c.workspaceId === ctx.workspaceId ? "this workspace" : c.workspaceId ? <span className="faint">another workspace</span> : <span className="pill bad" title="Connected before workspace binding existed; disconnect and connect again.">not bound</span>}</td>
                 <td><When d={c.grantedAt} /></td>
-                <td className="num">{c.activeTokens}</td>
                 <td><form action={revokeOAuthClientAction}><input type="hidden" name="clientId" value={c.clientId} /><button className="btn danger sm" type="submit">Disconnect</button></form></td>
               </tr>
             ))}
@@ -111,6 +118,42 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <div className="actions"><button className="btn secondary" type="submit">Save cardholder details</button></div>
         </form>
       ) : <p className="faint">Owners and admins set this.</p>}
+
+      <h2 style={{ margin: "28px 0 8px" }}>Where you're signed in</h2>
+      <p className="muted">Every active session for your account. Revoke one you don't recognise; it signs that device out immediately.</p>
+      {sessionsMsg && <div className="notice ok" style={{ marginBottom: 12 }}>Session(s) revoked.</div>}
+      <div className="tbl" style={{ marginBottom: 10 }}>
+        <table>
+          <thead><tr><th>Device</th><th>Address</th><th>Signed in</th><th>Expires</th><th></th></tr></thead>
+          <tbody>
+            {(sessions as { id: string; token: string; userAgent?: string | null; ipAddress?: string | null; createdAt: Date; expiresAt: Date }[]).map((s) => {
+              const isThis = current?.session.token === s.token;
+              return (
+                <tr key={s.id}><td style={{ maxWidth: 320, fontSize: 12.5 }}>{(s.userAgent ?? "unknown").slice(0, 90)}{isThis && <span className="pill ok" style={{ marginLeft: 8 }}>this device</span>}</td><td className="mono faint">{s.ipAddress ?? ""}</td><td><When d={s.createdAt} /></td><td><When d={s.expiresAt} /></td>
+                  <td>{!isThis && <form action={revokeSessionAction}><input type="hidden" name="id" value={s.id} /><button className="btn secondary sm" type="submit">Revoke</button></form>}</td></tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <form action={revokeOtherSessionsAction} style={{ marginBottom: 28 }}><button className="btn secondary sm" type="submit">Sign out everywhere else</button></form>
+
+      <h2 style={{ margin: "28px 0 8px" }}>Your data</h2>
+      <p className="muted">Download everything Mandate holds about you and the workspaces you're in, as JSON.</p>
+      <a className="btn secondary" href="/api/account/export" style={{ marginBottom: 28, display: "inline-flex" }}>Export my data</a>
+
+      <h2 style={{ margin: "28px 0 8px", color: "var(--bad)" }}>Danger zone</h2>
+      <div className="stack" style={{ marginBottom: 28 }}>
+        {ctx.role !== "owner" ? (
+          <form action={leaveWorkspaceAction} className="card"><div className="eyebrow" style={{ marginBottom: 6 }}>Leave {ctx.workspaceName}</div><p className="muted">You'll stop receiving its requests and lose access to its ledger.</p><button className="btn danger sm" type="submit">Leave this workspace</button></form>
+        ) : (
+          <form action={deleteWorkspaceAction} className="card form"><div className="eyebrow">Delete {ctx.workspaceName}</div><p className="muted" style={{ margin: 0 }}>Deletes every agent, mandate, decision and the ledger in this workspace, for every member. Revoke or export first if you need the records. Type the workspace name to confirm.</p>
+            <div className="field" style={{ maxWidth: 320 }}><input name="confirm" placeholder={ctx.workspaceName} autoComplete="off" /></div><div><button className="btn danger sm" type="submit">Delete workspace permanently</button></div></form>
+        )}
+        <form action={deleteAccountAction} className="card form"><div className="eyebrow">Delete my account</div>
+          <p className="muted" style={{ margin: 0 }}>Removes your sign-in methods, sessions, connected agents and channels. {sole.length > 0 && <>It also deletes {sole.length === 1 ? "the workspace" : "the workspaces"} where you are the only owner: <strong>{sole.map((w) => w.name).join(", ")}</strong>{sole.some((w) => w.otherMembers > 0) && " — other members will lose access"}. Make someone else an owner first if you want it to survive.</>} Type your email to confirm.</p>
+          <div className="field" style={{ maxWidth: 320 }}><input name="confirm" placeholder={ctx.email} autoComplete="off" /></div><div><button className="btn danger sm" type="submit">Delete my account permanently</button></div></form>
+      </div>
 
       <h2 style={{ margin: "28px 0 8px" }}>This deployment</h2>
       <div className="tbl">

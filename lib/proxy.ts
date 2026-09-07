@@ -5,6 +5,8 @@ import { appendEvent } from "./ledger";
 import { encrypt, decrypt } from "./crypto";
 import { authorize, getMandate, type AuthResult } from "./service";
 import { costCents, estimateTokens, priceFor, type Provider } from "./pricing";
+import { sendWarning } from "./notify";
+import { sweepReveals } from "./reveal";
 import type { Mandate } from "./schema";
 
 // The API-key proxy. An agent points its OpenAI / Anthropic / Gemini SDK at
@@ -21,6 +23,37 @@ export const PROVIDERS: Record<Provider, { name: string; base: string; authHeade
 };
 
 export function isProvider(s: string): s is Provider { return s === "openai" || s === "anthropic" || s === "gemini"; }
+
+// Only the endpoints we can price are forwarded. "generate" calls are
+// pre-authorised and settled; "free" calls (model listings) cost nothing and
+// are forwarded as-is; everything else is refused, so a proxy key can never
+// reach billing, fine-tuning, file or admin endpoints with the real key.
+export type RouteKind = "generate" | "free";
+export function classifyRoute(provider: Provider, method: string, path: string): RouteKind | null {
+  if (path.split("/").some((seg) => seg === "" || seg === "." || seg === ".." || seg.includes("\\"))) return null;
+  if (method !== "POST" && method !== "GET") return null;
+  if (provider === "openai") {
+    if (method === "POST" && /^(chat\/completions|responses|embeddings|completions)$/.test(path)) return "generate";
+    if (method === "GET" && /^models(\/[A-Za-z0-9._:-]+)?$/.test(path)) return "free";
+    return null;
+  }
+  if (provider === "anthropic") {
+    if (method === "POST" && path === "messages") return "generate";
+    if (method === "POST" && path === "messages/count_tokens") return "free"; // costs nothing at the provider
+    if (method === "GET" && /^models(\/[A-Za-z0-9._:-]+)?$/.test(path)) return "free";
+    return null;
+  }
+  if (method === "POST" && /^models\/[A-Za-z0-9._-]+:(generateContent|streamGenerateContent|embedContent|batchEmbedContents)$/.test(path)) return "generate";
+  if (method === "POST" && /^models\/[A-Za-z0-9._-]+:countTokens$/.test(path)) return "free";
+  if (method === "GET" && /^models(\/[A-Za-z0-9._-]+)?$/.test(path)) return "free";
+  return null;
+}
+
+// Request headers that may travel to the provider. Anything else (cookies,
+// forwarded-for, custom headers, another org's id) stops here.
+export const FORWARD_REQUEST_HEADERS = new Set(["content-type", "accept", "user-agent", "anthropic-version", "anthropic-beta", "openai-beta", "x-stainless-lang", "x-stainless-package-version", "x-stainless-os", "x-stainless-arch", "x-stainless-runtime", "x-stainless-runtime-version", "x-stainless-retry-count", "x-goog-api-client"]);
+// Response headers passed back to the agent.
+export const FORWARD_RESPONSE_HEADERS = ["content-type", "cache-control", "request-id", "x-request-id", "retry-after", "openai-processing-ms", "openai-version", "anthropic-ratelimit-requests-remaining", "anthropic-ratelimit-tokens-remaining", "x-ratelimit-limit-requests", "x-ratelimit-remaining-requests", "x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"];
 
 // ---------- Provider keys ----------
 
@@ -64,10 +97,12 @@ export async function createProxyKey(workspaceId: string, input: { mandateId: st
     await tx.insert(schema.proxyKeys).values(row);
     await appendEvent(tx, workspaceId, "proxy.key_issued", { proxyKeyId: row.id, mandateId: m.id, provider: pk.provider, name: row.name, tokenPrefix: row.tokenPrefix, by });
   });
+  await sweepReveals().catch(() => {});
   return { ...row, token };
 }
 
 export async function revealProxyKey(workspaceId: string, id: string): Promise<string | null> {
+  await sweepReveals().catch(() => {});
   const [r] = await db.select({ t: schema.proxyKeys.tokenReveal }).from(schema.proxyKeys).where(and(eq(schema.proxyKeys.id, id), eq(schema.proxyKeys.workspaceId, workspaceId))).limit(1);
   return r?.t ?? null;
 }
@@ -107,21 +142,43 @@ export async function resolveProxyToken(token: string): Promise<Resolved | null>
 
 // ---------- Estimating and settling ----------
 
-export type Estimate = { model: string; inputTokens: number; outputTokens: number; cents: number; priceMatched: string; streaming: boolean };
+export type Estimate = { model: string; inputTokens: number; outputTokens: number; cents: number; priceMatched: string; streaming: boolean; unpriceable?: string };
+
+// Tokens charged per attached image / audio / file part, since their bytes
+// (or a URL) say nothing about what the provider will bill.
+const MEDIA_TOKENS = 1_600;
+// A Responses call that continues a stored conversation carries history we
+// cannot see; budget for it rather than under-authorise.
+const HIDDEN_HISTORY_TOKENS = 32_000;
+
+function countMedia(v: unknown, depth = 0): number {
+  if (depth > 6 || !v || typeof v !== "object") return 0;
+  if (Array.isArray(v)) return v.reduce((n, x) => n + countMedia(x, depth + 1), 0);
+  const o = v as Record<string, unknown>;
+  let n = 0;
+  const t = typeof o.type === "string" ? o.type : "";
+  if (/^(image|image_url|input_image|input_audio|input_file|file|document|audio|video)$/.test(t)) n += 1;
+  if (o.inline_data || o.inlineData || o.file_data || o.fileData) n += 1;
+  for (const k of Object.keys(o)) if (k !== "type") n += countMedia(o[k], depth + 1);
+  return n;
+}
 
 export function estimateRequest(provider: Provider, path: string, body: unknown): Estimate {
   const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   let model = typeof b.model === "string" ? b.model : "";
   if (provider === "gemini") { const m = path.match(/models\/([^:/]+)/); if (m) model = m[1]; }
-  const text = JSON.stringify(b.messages ?? b.input ?? b.contents ?? b.prompt ?? b.system ?? "") + JSON.stringify(b.system ?? "") + JSON.stringify(b.tools ?? "");
-  const inputTokens = estimateTokens(text);
-  const gen = (b.generationConfig && typeof b.generationConfig === "object" ? b.generationConfig : {}) as Record<string, unknown>;
-  const maxOut = [b.max_tokens, b.max_output_tokens, b.max_completion_tokens, gen.maxOutputTokens].find((v) => typeof v === "number") as number | undefined;
+  const text = JSON.stringify(b.messages ?? b.input ?? b.contents ?? b.prompt ?? b.system ?? "") + JSON.stringify(b.system ?? "") + JSON.stringify(b.systemInstruction ?? b.system_instruction ?? "") + JSON.stringify(b.tools ?? "") + JSON.stringify(b.instructions ?? "");
+  let inputTokens = estimateTokens(text) + countMedia(b.messages ?? b.input ?? b.contents ?? null) * MEDIA_TOKENS;
+  if (typeof b.previous_response_id === "string" || typeof b.conversation === "string" || (b.conversation && typeof b.conversation === "object")) inputTokens += HIDDEN_HISTORY_TOKENS;
+  const gen = ((b.generationConfig ?? b.generation_config) && typeof (b.generationConfig ?? b.generation_config) === "object" ? (b.generationConfig ?? b.generation_config) : {}) as Record<string, unknown>;
+  const maxOut = [b.max_tokens, b.max_output_tokens, b.max_completion_tokens, gen.maxOutputTokens, gen.max_output_tokens].find((v) => typeof v === "number") as number | undefined;
   const isEmbedding = /embed/i.test(path) || /embed/i.test(model);
   const outputTokens = isEmbedding ? 0 : Math.max(1, Math.min(maxOut ?? PROVIDERS[provider].defaultMaxOut, 200_000));
   const { price, matched } = priceFor(provider, model || "unknown");
   const streaming = b.stream === true || /stream/i.test(path);
-  return { model: model || "unknown", inputTokens, outputTokens, cents: costCents(price, inputTokens, outputTokens), priceMatched: matched, streaming };
+  const n = typeof b.n === "number" && b.n > 1 ? Math.min(b.n, 16) : 1;
+  const cents = Math.max(1, costCents(price, inputTokens, outputTokens * n));
+  return { model: model || "unknown", inputTokens, outputTokens: outputTokens * n, cents, priceMatched: matched, streaming };
 }
 
 export type Usage = { inputTokens: number; outputTokens: number; cachedTokens: number };
@@ -130,6 +187,7 @@ export type Usage = { inputTokens: number; outputTokens: number; cachedTokens: n
 export function parseUsage(provider: Provider, text: string): Usage | null {
   const nums = (re: RegExp) => { let last: number | null = null; for (const m of text.matchAll(re)) last = Number(m[1]); return last; };
   if (provider === "openai") {
+    // completion_tokens / output_tokens already include reasoning tokens.
     const inp = nums(/"prompt_tokens"\s*:\s*(\d+)/g) ?? nums(/"input_tokens"\s*:\s*(\d+)/g);
     const out = nums(/"completion_tokens"\s*:\s*(\d+)/g) ?? nums(/"output_tokens"\s*:\s*(\d+)/g);
     const cached = nums(/"cached_tokens"\s*:\s*(\d+)/g) ?? 0;
@@ -146,9 +204,10 @@ export function parseUsage(provider: Provider, text: string): Usage | null {
   }
   const inp = nums(/"promptTokenCount"\s*:\s*(\d+)/g);
   const out = nums(/"candidatesTokenCount"\s*:\s*(\d+)/g);
+  const thoughts = nums(/"thoughtsTokenCount"\s*:\s*(\d+)/g) ?? 0; // billed as output, reported separately
   const cached = nums(/"cachedContentTokenCount"\s*:\s*(\d+)/g) ?? 0;
   if (inp == null && out == null) return null;
-  return { inputTokens: inp ?? 0, outputTokens: out ?? 0, cachedTokens: cached };
+  return { inputTokens: inp ?? 0, outputTokens: (out ?? 0) + thoughts, cachedTokens: cached };
 }
 
 export async function preauthorize(r: Resolved, est: Estimate, path: string): Promise<{ auth: AuthResult; callId: string }> {
@@ -167,10 +226,15 @@ export async function preauthorize(r: Resolved, est: Estimate, path: string): Pr
 
 // Replace the estimate with what the provider actually billed. A failed
 // upstream call settles to zero so the mandate isn't charged for nothing.
+// The ledger always records the true cost; if that cost breaches the
+// mandate's per-transaction limit or runs far past the estimate, the proxy
+// key is suspended and the approvers told, so a mis-estimate cannot repeat.
+const OVERRUN_FACTOR = 2;
 export async function settle(r: Resolved, callId: string, transactionId: string, upstreamStatus: number, usage: Usage | null, est: Estimate) {
   const { price } = priceFor(r.provider, est.model);
   const ok = upstreamStatus >= 200 && upstreamStatus < 300;
   const actual = !ok ? 0 : usage ? costCents(price, usage.inputTokens, usage.outputTokens, usage.cachedTokens) : est.cents;
+  const overrun = ok && (actual > r.mandate.perTxnLimit || (actual > est.cents * OVERRUN_FACTOR && actual - est.cents >= 50));
   await db.transaction(async (tx) => {
     await tx.update(schema.transactions).set({ amount: actual, reason: !ok ? `Upstream ${upstreamStatus}; settled to zero.` : usage ? `Settled on reported usage (est. ${est.cents}¢).` : `Settled at estimate (no usage reported).` }).where(eq(schema.transactions.id, transactionId));
     await tx.update(schema.proxyCalls).set({ actualAmount: actual, inputTokens: usage?.inputTokens ?? null, outputTokens: usage?.outputTokens ?? null, upstreamStatus, settledAt: new Date() }).where(eq(schema.proxyCalls.id, callId));
@@ -178,7 +242,16 @@ export async function settle(r: Resolved, callId: string, transactionId: string,
       transactionId, callId, mandateId: r.mandate.id, provider: r.provider, model: est.model, estimatedAmount: est.cents, actualAmount: actual,
       inputTokens: usage?.inputTokens ?? null, outputTokens: usage?.outputTokens ?? null, upstreamStatus,
     });
+    if (overrun) {
+      await tx.update(schema.proxyKeys).set({ status: "revoked", revokedAt: new Date(), tokenReveal: null }).where(and(eq(schema.proxyKeys.id, r.proxyKey.id), eq(schema.proxyKeys.status, "active")));
+      await appendEvent(tx, r.mandate.workspaceId, "proxy.key_suspended", { proxyKeyId: r.proxyKey.id, name: r.proxyKey.name, mandateId: r.mandate.id, transactionId, estimatedAmount: est.cents, actualAmount: actual, perTxnLimit: r.mandate.perTxnLimit, reason: actual > r.mandate.perTxnLimit ? "settled above per-transaction limit" : "settled far above estimate" });
+    }
   });
+  if (overrun) {
+    try {
+      await sendWarning(r.mandate.workspaceId, `Proxy key "${r.proxyKey.name}" suspended after a ${(actual / 100).toFixed(2)} USD call`, `${r.mandate.name}: a ${est.model} call was estimated at ${(est.cents / 100).toFixed(2)} USD and settled at ${(actual / 100).toFixed(2)} USD (per-transaction limit ${(r.mandate.perTxnLimit / 100).toFixed(2)} USD). The key was revoked; issue a new one once the agent's requests are bounded.`, { kind: "proxy_overrun", mandateId: r.mandate.id, proxyKeyId: r.proxyKey.id, estimatedAmount: est.cents, actualAmount: actual });
+    } catch (e) { console.error("overrun warning failed:", (e as Error).message); }
+  }
 }
 
 export async function recordDeclined(r: Resolved, callId: string, upstreamStatus: number) {

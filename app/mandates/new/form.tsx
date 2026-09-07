@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect, useState } from "react";
 import Link from "next/link";
 import { createMandateAction, type MandateFormState } from "@/app/actions";
 
@@ -10,6 +10,18 @@ export function MandateForm({ agents, defaultAgent, stripeOn }: { agents: AgentO
   const [state, action, pending] = useActionState<MandateFormState, FormData>(createMandateAction, undefined);
   const err = (field: string) => state?.errors?.find((e) => e.field === field)?.message;
   const v = (field: string, fallback = "") => state?.values?.[field] ?? fallback;
+  // Default the mandate's clock to the browser's zone; the list is every
+  // zone the runtime knows, with the browser's own first.
+  const [zones, setZones] = useState<string[]>(["UTC"]);
+  const [browserZone, setBrowserZone] = useState("UTC");
+  useEffect(() => {
+    try {
+      const mine = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+      const all = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.("timeZone") ?? [mine, "UTC"];
+      setBrowserZone(mine);
+      setZones([mine, ...all.filter((z) => z !== mine)]);
+    } catch { /* keep UTC */ }
+  }, []);
 
   return (
     <form action={action} className="form" key={state?.errors ? JSON.stringify(state.values) : "fresh"}>
@@ -45,23 +57,23 @@ export function MandateForm({ agents, defaultAgent, stripeOn }: { agents: AgentO
           </div>
           <div className="field">
             <label htmlFor="perTxnLimit">Per transaction</label>
-            <input id="perTxnLimit" name="perTxnLimit" type="number" min="0.01" step="0.01" required defaultValue={v("perTxnLimit", "50")} aria-invalid={Boolean(err("perTxnLimit"))} />
+            <input id="perTxnLimit" name="perTxnLimit" type="number" min="0.01" step="0.01" required defaultValue={v("perTxnLimit", "25")} aria-invalid={Boolean(err("perTxnLimit"))} />
           </div>
           <div className="field">
             <label htmlFor="dailyLimit">Per day</label>
-            <input id="dailyLimit" name="dailyLimit" type="number" min="0.01" step="0.01" required defaultValue={v("dailyLimit", "100")} aria-invalid={Boolean(err("dailyLimit"))} />
+            <input id="dailyLimit" name="dailyLimit" type="number" min="0.01" step="0.01" required defaultValue={v("dailyLimit", "50")} aria-invalid={Boolean(err("dailyLimit"))} />
             {err("dailyLimit") && <span className="hint" style={{ color: "var(--bad)" }}>{err("dailyLimit")}</span>}
           </div>
         </div>
         <div className="row">
           <div className="field">
             <label htmlFor="totalLimit">Total sanctioned</label>
-            <input id="totalLimit" name="totalLimit" type="number" min="0.01" step="0.01" required defaultValue={v("totalLimit", "500")} aria-invalid={Boolean(err("totalLimit"))} />
+            <input id="totalLimit" name="totalLimit" type="number" min="0.01" step="0.01" required defaultValue={v("totalLimit", "200")} aria-invalid={Boolean(err("totalLimit"))} />
             <span className="hint">{err("totalLimit") ?? "Lifetime cap for this mandate. Issue a new one to renew."}</span>
           </div>
           <div className="field">
             <label htmlFor="approvalAbove">Ask me above</label>
-            <input id="approvalAbove" name="approvalAbove" type="number" min="0" step="0.01" defaultValue={v("approvalAbove", "20")} aria-invalid={Boolean(err("approvalAbove"))} />
+            <input id="approvalAbove" name="approvalAbove" type="number" min="0" step="0.01" defaultValue={v("approvalAbove", "10")} aria-invalid={Boolean(err("approvalAbove"))} />
             <span className="hint" style={err("approvalAbove") ? { color: "var(--bad)" } : undefined}>{err("approvalAbove") ?? "Leave blank to never escalate. Above this, the agent is paused until you approve in the inbox. Approvals lapse after 24 hours."}</span>
           </div>
         </div>
@@ -93,15 +105,15 @@ export function MandateForm({ agents, defaultAgent, stripeOn }: { agents: AgentO
           </div>
           <div className="field">
             <label htmlFor="timezone">Timezone</label>
-            <select id="timezone" name="timezone" defaultValue={v("timezone", "Asia/Kolkata")}>
-              <option>Asia/Kolkata</option><option>America/New_York</option><option>America/Los_Angeles</option><option>Europe/London</option><option>Asia/Singapore</option><option>UTC</option>
+            <select id="timezone" name="timezone" defaultValue={v("timezone", browserZone)} key={browserZone}>
+              {zones.map((z) => <option key={z}>{z}</option>)}
             </select>
           </div>
         </div>
         <div className="field" style={{ maxWidth: 260 }}>
           <label htmlFor="expiresAt">Expires on</label>
-          <input id="expiresAt" name="expiresAt" type="date" defaultValue={v("expiresAt")} />
-          <span className="hint">Valid until the end of that day in the mandate's timezone.</span>
+          <input id="expiresAt" name="expiresAt" type="date" defaultValue={v("expiresAt", new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10))} />
+          <span className="hint">Valid until the end of that day in the mandate's timezone. Defaults to 30 days; renew by issuing a new one.</span>
         </div>
       </fieldset>
 

@@ -76,7 +76,8 @@ td.r,th.r{text-align:right}
 .pill.approved,.pill.active,.pill.ok{border-color:var(--ok);color:var(--ok);background:var(--ok-soft)}
 .pill.pending{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
 .pill.declined,.pill.revoked,.pill.denied,.pill.bad{border-color:var(--bad);color:var(--bad);background:var(--bad-soft)}
-.pill.used,.pill.expired{opacity:.7}
+.pill.used,.pill.expired,.pill.voided{opacity:.7}
+.pill.voided{text-decoration:line-through}
 
 /* forms */
 .form{display:grid;gap:14px}

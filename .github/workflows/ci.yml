@@ -15,7 +15,10 @@ jobs:
           --health-cmd "pg_isready -U mandate" --health-interval 5s --health-timeout 3s --health-retries 20
     env:
       DATABASE_URL: postgres://mandate:mandate@localhost:5432/mandate
-      BETTER_AUTH_SECRET: ci-only-secret-change-me-please-32chars
+      BETTER_AUTH_SECRET: ci-secret-0123456789abcdef0123456789abcdef
+      NOTIFY_SECRET: ci-notify-0123456789abcdef0123456789abcdef
+      MANDATE_ENCRYPTION_KEY: BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
+      RECEIPT_SIGNING_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
       APP_URL: http://localhost:3000
     steps:
       - uses: actions/checkout@v5

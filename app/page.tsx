@@ -6,10 +6,10 @@ import { fmt } from "@/lib/policy";
 import { Pill, Util, When } from "./components";
 import { appUrl } from "@/lib/env";
 
-export default async function ExposurePage({ searchParams }: { searchParams: Promise<{ joined?: string }> }) {
+export default async function ExposurePage({ searchParams }: { searchParams: Promise<{ joined?: string; left?: string; deleted?: string; error?: string }> }) {
   const ctx = await getCtx();
   if (!ctx) return <Landing base={appUrl()} />;
-  const { joined } = await searchParams;
+  const { joined, left, deleted, error } = await searchParams;
   const [book, recent, agents] = await Promise.all([exposureBook(ctx.workspaceId), recentTransactions(ctx.workspaceId, 12), listAgents(ctx.workspaceId)]);
   const active = book.filter((b) => b.effectiveStatus === "active");
   const byCcy = new Map<string, { limit: number; used: number }>();
@@ -25,6 +25,7 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
     const canIssue = ctx.role === "owner" || ctx.role === "admin";
     return (
       <div style={{ maxWidth: 680 }}>
+        {(left || deleted) && <div className="notice ok" style={{ marginBottom: 16 }}>{deleted ? "Workspace deleted." : "You left the workspace."} You're now in <strong>{ctx.workspaceName}</strong>.</div>}
         <div className="eyebrow">Welcome to {ctx.workspaceName}</div>
         <h1>Give your agents a sanction, not a card</h1>
         <p className="muted" style={{ margin: "10px 0 20px" }}>Four short steps and your first agent is spending under terms you set.</p>
@@ -41,6 +42,8 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
 
   return (
     <>
+      {(left || deleted) && <div className="notice ok" style={{ marginBottom: 16 }}>{deleted ? "Workspace deleted." : "You left the workspace."} You're now in <strong>{ctx.workspaceName}</strong>.</div>}
+      {error && <div className="notice bad" style={{ marginBottom: 16 }}>{error}</div>}
       {joined && <div className="notice ok" style={{ marginBottom: 16 }}>You've joined <strong>{ctx.workspaceName}</strong>. Requests that need a decision will reach you through the channels in Settings.</div>}
       <div className="page-head">
         <div>

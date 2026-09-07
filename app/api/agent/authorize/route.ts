@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMandateByToken, authorize, factsFor, getIdempotent, putIdempotent } from "@/lib/service";
+import { getMandateByToken, authorize, factsFor, reserveIdempotent, completeIdempotent, releaseIdempotent, MAX_AMOUNT } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { rateLimit, clientIp } from "@/lib/ratelimit";
 import { logger } from "@/lib/log";
@@ -35,8 +35,8 @@ export async function POST(req: NextRequest) {
   let body: Body;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Body must be JSON." }, { status: 400 }); }
   const amount = body.amount;
-  if (typeof amount !== "number" || !Number.isInteger(amount) || amount <= 0 || amount > 1e12) {
-    return NextResponse.json({ error: "amount must be a positive integer in minor units (e.g. 1299 for $12.99)." }, { status: 400 });
+  if (typeof amount !== "number" || !Number.isInteger(amount) || amount <= 0 || amount > MAX_AMOUNT) {
+    return NextResponse.json({ error: `amount must be a positive integer in minor units (e.g. 1299 for $12.99), at most ${MAX_AMOUNT}.` }, { status: 400 });
   }
   const merchant = str(body.merchant, 120);
   const purpose = str(body.purpose, 300);
@@ -48,25 +48,34 @@ export async function POST(req: NextRequest) {
 
   const idem = (req.headers.get("idempotency-key") ?? "").trim().slice(0, 128);
   if (idem) {
-    const prior = await getIdempotent(m.id, idem);
-    if (prior) return NextResponse.json(JSON.parse(prior.response), { status: prior.status, headers: { "Idempotent-Replayed": "true" } });
+    const r = await reserveIdempotent(m.id, idem);
+    if (r.kind === "replay") return NextResponse.json(JSON.parse(r.response), { status: r.status, headers: { "Idempotent-Replayed": "true" } });
+    if (r.kind === "in_progress") return NextResponse.json({ error: "A request with this Idempotency-Key is still being decided. Retry in a moment." }, { status: 409, headers: { "retry-after": "1" } });
   }
 
+  let r;
   try {
-    const r = await authorize(m, { amount, merchant, category, purpose }, "agent_api", { actor: `token ${m.tokenPrefix}…` });
-    const f = await factsFor(m);
-    const status = r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200;
-    const responseBody = {
-      decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
-      remaining: { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), perTransaction: m.perTxnLimit, currency: m.currency, todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency) },
-      notified: r.notified ?? false,
-      next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request." : undefined,
-    };
-    if (idem) await putIdempotent(m.id, idem, status, responseBody);
-    log.info("decision", { mandateId: m.id, decision: r.decision, rule: r.rule, amount, merchant });
-    return NextResponse.json(responseBody, { status, headers: { "x-request-id": log.id } });
+    r = await authorize(m, { amount, merchant, category, purpose }, "agent_api", { actor: `token ${m.tokenPrefix}…` });
   } catch (e) {
+    if (idem) await releaseIdempotent(m.id, idem).catch(() => {});
     log.error("authorize.failed", { message: (e as Error).message });
     return NextResponse.json({ error: "Authorisation could not be decided; nothing was approved. Retry shortly." }, { status: 503 });
   }
+  const status = r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200;
+  const responseBody: Record<string, unknown> = {
+    decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
+    notified: r.notified ?? false,
+    next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request with the same Idempotency-Key." : undefined,
+  };
+  // The decision is committed: record the terminal answer before anything
+  // else can fail, so a retry can only ever replay it. "pending" is not an
+  // answer to remember — the retry must re-evaluate to consume the approval.
+  if (idem) { if (r.decision === "pending") await releaseIdempotent(m.id, idem); else await completeIdempotent(m.id, idem, status, responseBody); }
+  try {
+    const f = await factsFor(m);
+    responseBody.remaining = { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), perTransaction: m.perTxnLimit, currency: m.currency, todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency) };
+    if (idem && r.decision !== "pending") await completeIdempotent(m.id, idem, status, responseBody);
+  } catch (e) { log.warn("facts.failed", { message: (e as Error).message }); }
+  log.info("decision", { mandateId: m.id, decision: r.decision, rule: r.rule, amount, merchant });
+  return NextResponse.json(responseBody, { status, headers: { "x-request-id": log.id } });
 }

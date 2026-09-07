@@ -16,8 +16,4 @@ export function Util({ used, limit, currency, label }: { used: number; limit: nu
   );
 }
 
-export function When({ d }: { d: Date | number | string | null }) {
-  if (!d) return <span className="faint">—</span>;
-  const date = new Date(d);
-  return <span className="num" title={date.toISOString()}>{date.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false })}</span>;
-}
+export { When } from "./when";

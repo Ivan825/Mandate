@@ -23,7 +23,16 @@ export async function rateLimit(key: string, limit: number, windowSec = 60): Pro
   }
 }
 
+// The address the platform's edge saw. x-real-ip is set by the platform and
+// cannot be supplied by the client; in x-forwarded-for the LAST entry is the
+// one the nearest trusted proxy appended, so a client-supplied prefix is
+// ignored. A bare `node server.js` with no proxy in front sees the client's
+// own headers; set TRUST_PROXY=false there to fall back to a shared bucket.
 export function clientIp(req: Request): string {
   const h = req.headers;
-  return (h.get("x-forwarded-for") ?? "").split(",")[0].trim() || h.get("x-real-ip") || "unknown";
+  if (process.env.TRUST_PROXY === "false") return "direct";
+  const real = (h.get("x-real-ip") ?? "").trim();
+  if (real) return real;
+  const fwd = (h.get("x-forwarded-for") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return fwd.at(-1) || "unknown";
 }

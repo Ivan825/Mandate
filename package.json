@@ -6,10 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "tsx --test tests/policy.test.ts",
+    "test": "tsx --test tests/policy.test.ts tests/proxy.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node scripts/migrate.mjs",
-    "auth:generate": "AUTH_GEN=1 auth generate --config lib/auth.ts --output lib/auth-schema.ts --adapter drizzle --dialect postgresql -y",
+    "auth:generate": "AUTH_GEN=1 npx @better-auth/cli@latest generate --config lib/auth.ts --output lib/auth-schema.ts --adapter drizzle --dialect postgresql -y",
     "test:integration": "tsx --test tests/service.test.ts",
     "test:e2e": "node tests/e2e.mjs"
   },
@@ -38,5 +38,8 @@
     "playwright": "^1.63.0",
     "tsx": "^4.23.13",
     "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "postcss": "^8.5.23"
   }
 }

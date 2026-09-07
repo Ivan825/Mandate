@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCtx } from "@/lib/session";
+import { getCtx, can } from "@/lib/session";
 import { buildReceipt } from "@/lib/receipts";
 
 // Receipt export: the workspace's chain (or one mandate's slice) with the
@@ -7,6 +7,7 @@ import { buildReceipt } from "@/lib/receipts";
 export async function GET(req: NextRequest) {
   const ctx = await getCtx();
   if (!ctx) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  if (!(await can({ ledger: ["export"] }))) return NextResponse.json({ error: "Your role cannot export the ledger." }, { status: 403 });
   const raw = req.nextUrl.searchParams.get("mandate");
   const mandateId = raw && /^[0-9a-f-]{36}$/i.test(raw) ? raw : null;
   const body = await buildReceipt(ctx.workspaceId, mandateId);

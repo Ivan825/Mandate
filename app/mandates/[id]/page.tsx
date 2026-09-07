@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireCtx } from "@/lib/session";
+import { requireCtx, can } from "@/lib/session";
 import { getMandate, factsFor, recentTransactions, listApprovals, revealToken } from "@/lib/service";
 import { db, schema } from "@/lib/db";
 import { eq } from "drizzle-orm";
@@ -29,6 +29,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
   const expired = m.status === "active" && m.expiresAt && new Date() > new Date(m.expiresAt);
   const status = expired ? "expired" : m.status;
   const liveAllowances = facts.approvedAllowances.filter((a) => !a.expiresAt || new Date() <= new Date(a.expiresAt)).length;
+  const [mayRevoke, mayTry] = await Promise.all([can({ mandate: ["revoke"] }), can({ mandate: ["try"] })]);
 
   return (
     <>
@@ -40,7 +41,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         </div>
         <div className="actions">
           <Link className="btn secondary" href={`/mandates/${m.id}/receipt`}>Receipt</Link>
-          {m.status === "active" && (
+          {m.status === "active" && mayRevoke && (
             <form action={revokeMandateAction}><input type="hidden" name="mandateId" value={m.id} /><button className="btn danger" type="submit">Revoke now</button></form>
           )}
         </div>
@@ -91,6 +92,8 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
           <p className="faint" style={{ fontSize: 12.5, marginBottom: 12 }}>This goes through the same decision path as a real request and counts against the mandate — use it to see how the terms behave.</p>
           {status !== "active" ? (
             <p className="muted">This mandate is {status}; attempts will be declined.</p>
+          ) : !mayTry ? (
+            <p className="muted">Your role ({ctx.role}) can watch this mandate but not spend under it.</p>
           ) : (
             <form action={simulatePurchaseAction} className="form">
               <input type="hidden" name="mandateId" value={m.id} />

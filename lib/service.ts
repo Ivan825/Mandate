@@ -5,6 +5,7 @@ import { appendEvent, recordEvent } from "./ledger";
 import { evaluate, localDayStart, validateTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type TermsError } from "./policy";
 import { sendApprovalRequested } from "./notify";
 import { checkWarnings } from "./warnings";
+import { sweepReveals } from "./reveal";
 import type { Mandate, Approval, Transaction } from "./schema";
 
 const { agents, mandates, transactions, approvals, idempotencyKeys } = schema;
@@ -88,11 +89,15 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
       expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null, tokenPrefix: row.tokenPrefix,
     });
   });
+  // Any plaintext older than the reveal window is cleared right now, not
+  // only when someone next opens a page.
+  await sweepReveals().catch(() => {});
   return { ok: true, mandate: row, token };
 }
 
 // The plaintext token, available only inside the reveal window (lib/reveal.ts).
 export async function revealToken(workspaceId: string, mandateId: string): Promise<string | null> {
+  await sweepReveals().catch(() => {});
   const [m] = await db.select({ t: mandates.tokenReveal }).from(mandates).where(and(eq(mandates.id, mandateId), eq(mandates.workspaceId, workspaceId))).limit(1);
   return m?.t ?? null;
 }
@@ -204,15 +209,18 @@ export async function countPending(workspaceId: string): Promise<number> {
 
 export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy";
 export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean };
+// Postgres int4; also a sanity ceiling no mandate should ever reach.
+export const MAX_AMOUNT = 2_147_483_647;
 
 // The single path every purchase attempt goes through, regardless of source.
 // The mandate row is locked FOR UPDATE for the duration, so two concurrent
 // attempts on one mandate are decided one after the other against fresh
 // sums; an allowance is consumed at most once; the ledger entry commits with
 // the decision or not at all.
-export async function authorize(m: Mandate, req: AuthRequest, source: Source, extra: { stripeAuthorizationId?: string; actor?: string } = {}): Promise<AuthResult> {
+export async function authorize(m: Mandate, req: AuthRequest, source: Source, extra: { stripeAuthorizationId?: string; actor?: string; background?: (work: () => Promise<void>) => void } = {}): Promise<AuthResult> {
   const now = req.now ?? new Date();
   const amount = Math.round(req.amount);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) throw new Error(`amount must be between 1 and ${MAX_AMOUNT} minor units.`);
   const merchant = req.merchant.trim().slice(0, 120);
   const purpose = (req.purpose ?? "").trim().slice(0, 300);
   const category = (req.category ?? "").trim().slice(0, 64);
@@ -262,36 +270,79 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
     return { ...d, transactionId: t.id, approvalId, mandate };
   });
 
-  // Notify only once the request is durably recorded, and never let a slow
-  // channel hold up the agent's answer.
+  // Notify only once the request is durably recorded. Callers with a hard
+  // deadline (Stripe gives a card authorisation two seconds) pass
+  // `background` and get their answer before any channel is contacted.
   let notified = false;
-  if (newApproval) {
-    const a = newApproval as Approval;
-    const [ag] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, result.mandate.agentId)).limit(1);
-    const outcomes = await sendApprovalRequested({ approval: a, mandate: result.mandate, agentName: ag?.name ?? "Agent" });
-    notified = outcomes.some((o) => o.ok);
-    for (const o of outcomes) if (!o.ok) console.error(`notify ${o.channel} failed: ${o.error}`);
-    if (outcomes.length) await recordEvent(result.mandate.workspaceId, "approval.notified", { approvalId: a.id, channels: outcomes });
-  }
-  if (result.decision === "approved") {
-    const [ag] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, result.mandate.agentId)).limit(1);
-    const f = await factsFor(result.mandate, now);
-    await checkWarnings(result.mandate, ag?.name ?? "Agent", f);
-  }
+  const sideEffects = async () => {
+    if (newApproval) {
+      const a = newApproval as Approval;
+      const [ag] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, result.mandate.agentId)).limit(1);
+      const outcomes = await sendApprovalRequested({ approval: a, mandate: result.mandate, agentName: ag?.name ?? "Agent" });
+      notified = outcomes.some((o) => o.ok);
+      for (const o of outcomes) if (!o.ok) console.error(`notify ${o.channel} failed: ${o.error}`);
+      if (outcomes.length) await recordEvent(result.mandate.workspaceId, "approval.notified", { approvalId: a.id, channels: outcomes });
+    }
+    if (result.decision === "approved") {
+      const [ag] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, result.mandate.agentId)).limit(1);
+      const f = await factsFor(result.mandate, now);
+      await checkWarnings(result.mandate, ag?.name ?? "Agent", f);
+    }
+  };
+  if (extra.background) extra.background(() => sideEffects().catch((e) => console.error("authorize side effects failed:", (e as Error).message)));
+  else await sideEffects();
   const { mandate: _m, ...rest } = result;
   void _m;
   return { ...rest, notified };
 }
 
-// ---------- Idempotency ----------
-
-export async function getIdempotent(mandateId: string, key: string) {
-  const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.id, `${mandateId}:${key}`)).limit(1);
-  return row ?? null;
+// A card authorisation Stripe ended up declining on its side (or that timed
+// out) must not count as spend: mark the approved transaction void.
+export async function voidTransactionByStripeAuthorization(stripeAuthorizationId: string, reason: string) {
+  const [t] = await db.select().from(transactions).where(and(eq(transactions.stripeAuthorizationId, stripeAuthorizationId), eq(transactions.decision, "approved"))).limit(1);
+  if (!t) return null;
+  await db.transaction(async (tx) => {
+    await tx.update(transactions).set({ decision: "voided", reason: `Voided: ${reason}` }).where(eq(transactions.id, t.id));
+    await appendEvent(tx, t.workspaceId, "authorization.voided", { transactionId: t.id, mandateId: t.mandateId, amount: t.amount, currency: t.currency, merchant: t.merchant, stripeAuthorizationId, reason });
+  });
+  return t;
 }
 
-export async function putIdempotent(mandateId: string, key: string, status: number, response: unknown) {
-  await db.insert(idempotencyKeys).values({ id: `${mandateId}:${key}`, mandateId, status, response: JSON.stringify(response), createdAt: new Date() }).onConflictDoNothing();
+// ---------- Idempotency ----------
+
+// Idempotency in three steps so two concurrent retries with the same key can
+// never both reach the policy engine: reserve the key (status 0) before
+// deciding; complete it with the stored answer once the outcome is terminal;
+// release it when the outcome is "pending", so the next retry re-evaluates
+// and picks up the approval instead of replaying "pending" forever.
+export type IdemReservation =
+  | { kind: "reserved" }
+  | { kind: "replay"; status: number; response: string }
+  | { kind: "in_progress" };
+
+export async function reserveIdempotent(mandateId: string, key: string): Promise<IdemReservation> {
+  const id = `${mandateId}:${key}`;
+  const inserted = await db.insert(idempotencyKeys).values({ id, mandateId, status: 0, response: "", createdAt: new Date() }).onConflictDoNothing().returning({ id: idempotencyKeys.id });
+  if (inserted.length) return { kind: "reserved" };
+  const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.id, id)).limit(1);
+  if (!row) return { kind: "reserved" }; // released between our insert and select; treat as fresh
+  if (row.status === 0) {
+    // A reservation older than a minute belongs to a request that crashed; take it over.
+    if (Date.now() - row.createdAt.getTime() > 60_000) {
+      const took = await db.update(idempotencyKeys).set({ createdAt: new Date() }).where(and(eq(idempotencyKeys.id, id), eq(idempotencyKeys.createdAt, row.createdAt), eq(idempotencyKeys.status, 0))).returning({ id: idempotencyKeys.id });
+      return took.length ? { kind: "reserved" } : { kind: "in_progress" };
+    }
+    return { kind: "in_progress" };
+  }
+  return { kind: "replay", status: row.status, response: row.response };
+}
+
+export async function completeIdempotent(mandateId: string, key: string, status: number, response: unknown) {
+  await db.update(idempotencyKeys).set({ status, response: JSON.stringify(response) }).where(eq(idempotencyKeys.id, `${mandateId}:${key}`));
+}
+
+export async function releaseIdempotent(mandateId: string, key: string) {
+  await db.delete(idempotencyKeys).where(and(eq(idempotencyKeys.id, `${mandateId}:${key}`), eq(idempotencyKeys.status, 0)));
 }
 
 // ---------- Approvals ----------
@@ -351,19 +402,105 @@ export async function saveCardholderProfile(workspaceId: string, p: Omit<typeof 
 // Stripe tells us later what actually happened to an authorisation: it was
 // captured (possibly for less), reversed, or refunded. The approved
 // transaction is adjusted so the mandate's sums reflect money that moved.
-export async function reconcileCard(stripeAuthorizationId: string, kind: "capture" | "reversal" | "refund", amount: number, ref: string) {
-  const [t] = await db.select().from(transactions).where(eq(transactions.stripeAuthorizationId, stripeAuthorizationId)).limit(1);
-  if (!t) return false;
+// Card lifecycle after the authorisation: captures arrive one per
+// issuing_transaction (a merchant may capture in parts), so they accumulate;
+// a reversal or an authorisation closed without any capture releases the
+// hold; a refund is a negative approved transaction so sums net down.
+export async function reconcileCard(stripeAuthorizationId: string, kind: "capture" | "reversal" | "refund" | "closed", amount: number, ref: string, at: Date = new Date()) {
+  const [t0] = await db.select({ id: transactions.id }).from(transactions).where(eq(transactions.stripeAuthorizationId, stripeAuthorizationId)).limit(1);
+  if (!t0) return false;
   await db.transaction(async (tx) => {
+    // Lock the row: two capture webhooks for one authorisation must add up.
+    const [t] = await tx.select().from(transactions).where(eq(transactions.id, t0.id)).for("update").limit(1);
+    const [prior] = await tx.select({ c: sql<number>`count(*)::int` }).from(schema.ledger)
+      .where(and(eq(schema.ledger.workspaceId, t.workspaceId), eq(schema.ledger.type, "stripe.capture"), sql`${schema.ledger.payload} like ${'%"stripeAuthorizationId":"' + stripeAuthorizationId + '"%'}`));
+    const captures = Number(prior?.c ?? 0);
     if (kind === "capture") {
-      await tx.update(transactions).set({ amount, reason: `Captured ${amount} of ${t.amount} authorised.` }).where(eq(transactions.id, t.id));
+      const total = captures === 0 ? amount : t.amount + amount;
+      await tx.update(transactions).set({ amount: total, reason: captures === 0 ? `Captured ${amount} of ${t.amount} authorised.` : `Captured ${amount} more; ${total} in total.` }).where(eq(transactions.id, t.id));
     } else if (kind === "reversal") {
       await tx.update(transactions).set({ amount: 0, reason: "Authorisation reversed by the network; nothing charged." }).where(eq(transactions.id, t.id));
+    } else if (kind === "closed") {
+      if (captures === 0) await tx.update(transactions).set({ amount: 0, reason: "Authorisation closed without capture; hold released." }).where(eq(transactions.id, t.id));
     } else {
-      // A refund is a negative approved transaction so daily/total sums net down.
-      await tx.insert(transactions).values({ id: randomUUID(), workspaceId: t.workspaceId, mandateId: t.mandateId, amount: -Math.abs(amount), currency: t.currency, merchant: t.merchant, category: t.category, purpose: `Refund of ${t.purpose || "card purchase"}`, decision: "approved", reason: "Refund from merchant.", source: "stripe", actor: t.actor, stripeAuthorizationId: null, approvalId: null, createdAt: new Date() });
+      await tx.insert(transactions).values({ id: randomUUID(), workspaceId: t.workspaceId, mandateId: t.mandateId, amount: -Math.abs(amount), currency: t.currency, merchant: t.merchant, category: t.category, purpose: `Refund of ${t.purpose || "card purchase"}`, decision: "approved", reason: "Refund from merchant.", source: "stripe", actor: t.actor, stripeAuthorizationId: null, approvalId: null, createdAt: at });
     }
-    await appendEvent(tx, t.workspaceId, `stripe.${kind}`, { transactionId: t.id, mandateId: t.mandateId, stripeAuthorizationId, amount, ref });
+    await appendEvent(tx, t.workspaceId, `stripe.${kind}`, { transactionId: t.id, mandateId: t.mandateId, stripeAuthorizationId, amount, ref, at: at.toISOString() });
   });
   return true;
+}
+
+// ---------- Lifecycle: leaving, deleting, exporting ----------
+
+// Everything a workspace owns, removed in dependency order. Used when an
+// owner deletes a workspace and when the last owner deletes their account.
+export async function purgeWorkspace(tx: Tx, workspaceId: string) {
+  await tx.delete(schema.proxyCalls).where(eq(schema.proxyCalls.workspaceId, workspaceId));
+  await tx.delete(schema.proxyKeys).where(eq(schema.proxyKeys.workspaceId, workspaceId));
+  await tx.delete(schema.providerKeys).where(eq(schema.providerKeys.workspaceId, workspaceId));
+  await tx.delete(schema.idempotencyKeys).where(sql`${schema.idempotencyKeys.mandateId} in (select id from mandates where workspace_id = ${workspaceId})`);
+  await tx.delete(transactions).where(eq(transactions.workspaceId, workspaceId));
+  await tx.delete(approvals).where(eq(approvals.workspaceId, workspaceId));
+  await tx.delete(mandates).where(eq(mandates.workspaceId, workspaceId));
+  await tx.delete(agents).where(eq(agents.workspaceId, workspaceId));
+  await tx.delete(schema.cardholderProfiles).where(eq(schema.cardholderProfiles.workspaceId, workspaceId));
+  await tx.delete(schema.ledgerHeads).where(eq(schema.ledgerHeads.workspaceId, workspaceId));
+  await tx.delete(schema.ledger).where(eq(schema.ledger.workspaceId, workspaceId));
+  await tx.delete(schema.invitation).where(eq(schema.invitation.organizationId, workspaceId));
+  await tx.delete(schema.member).where(eq(schema.member.organizationId, workspaceId));
+  await tx.delete(schema.organization).where(eq(schema.organization.id, workspaceId));
+}
+
+export async function deleteWorkspace(workspaceId: string, byUserId: string) {
+  await db.transaction(async (tx) => {
+    const [m] = await tx.select({ role: schema.member.role }).from(schema.member).where(and(eq(schema.member.organizationId, workspaceId), eq(schema.member.userId, byUserId))).limit(1);
+    if (!m || !/\bowner\b/.test(m.role)) throw new Error("Only an owner can delete a workspace.");
+    await purgeWorkspace(tx, workspaceId);
+  });
+}
+
+// Workspaces where this user is the only owner: deleting the account deletes
+// them too (there would be nobody left to hold the authority).
+export async function soleOwnedWorkspaces(userId: string): Promise<{ id: string; name: string; otherMembers: number }[]> {
+  const mine = await db.select({ orgId: schema.member.organizationId, role: schema.member.role, name: schema.organization.name }).from(schema.member)
+    .innerJoin(schema.organization, eq(schema.organization.id, schema.member.organizationId)).where(eq(schema.member.userId, userId));
+  const out: { id: string; name: string; otherMembers: number }[] = [];
+  for (const m of mine) {
+    if (!/\bowner\b/.test(m.role)) continue;
+    const others = await db.select({ role: schema.member.role }).from(schema.member).where(and(eq(schema.member.organizationId, m.orgId), sql`${schema.member.userId} <> ${userId}`));
+    if (!others.some((o) => /\bowner\b/.test(o.role))) out.push({ id: m.orgId, name: m.name, otherMembers: others.length });
+  }
+  return out;
+}
+
+export async function deleteAccount(userId: string) {
+  await db.transaction(async (tx) => {
+    const sole = await soleOwnedWorkspaces(userId);
+    for (const w of sole) await purgeWorkspace(tx, w.id);
+    await tx.delete(schema.member).where(eq(schema.member.userId, userId));
+    await tx.delete(schema.notificationChannels).where(eq(schema.notificationChannels.userId, userId));
+    // sessions, accounts, passkeys, OAuth tokens and consents cascade from the user row
+    await tx.delete(schema.user).where(eq(schema.user.id, userId));
+  });
+}
+
+// Everything the person can see about themselves and their workspaces, as JSON.
+export async function exportAccount(userId: string) {
+  const [u] = await db.select({ id: schema.user.id, email: schema.user.email, name: schema.user.name, createdAt: schema.user.createdAt }).from(schema.user).where(eq(schema.user.id, userId)).limit(1);
+  const memberships = await db.select({ workspaceId: schema.member.organizationId, role: schema.member.role, name: schema.organization.name }).from(schema.member)
+    .innerJoin(schema.organization, eq(schema.organization.id, schema.member.organizationId)).where(eq(schema.member.userId, userId));
+  const channels = await db.select({ type: schema.notificationChannels.type, target: schema.notificationChannels.target, label: schema.notificationChannels.label }).from(schema.notificationChannels).where(eq(schema.notificationChannels.userId, userId));
+  const workspaces = [];
+  for (const m of memberships) {
+    const ws = m.workspaceId;
+    workspaces.push({
+      id: ws, name: m.name, role: m.role,
+      agents: await db.select().from(agents).where(eq(agents.workspaceId, ws)),
+      mandates: (await db.select().from(mandates).where(eq(mandates.workspaceId, ws))).map(({ tokenHash: _h, tokenReveal: _r, ...rest }) => { void _h; void _r; return rest; }),
+      transactions: await db.select().from(transactions).where(eq(transactions.workspaceId, ws)),
+      approvals: await db.select().from(approvals).where(eq(approvals.workspaceId, ws)),
+      ledger: await db.select().from(schema.ledger).where(eq(schema.ledger.workspaceId, ws)).orderBy(schema.ledger.seq),
+    });
+  }
+  return { exportedAt: new Date().toISOString(), user: u, channels, workspaces };
 }

@@ -5,6 +5,7 @@ import { getMandate, recentTransactions, listApprovals } from "@/lib/service";
 import { buildReceipt } from "@/lib/receipts";
 import { db, schema } from "@/lib/db";
 import { fmt, parseList } from "@/lib/policy";
+import { PrintButton } from "./print";
 
 // A printable receipt: the sanction terms, every decision under them, and
 // the signed chain head. Print to PDF from the browser; the JSON export is
@@ -25,9 +26,8 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
     <div className="receipt">
       <style>{`@media print { .topbar, .no-print { display: none !important } .main { padding: 0 } body { background: #fff } .receipt { max-width: none } }`}</style>
       <div className="no-print actions" style={{ marginBottom: 16 }}>
-        <button className="btn" type="button" id="print">Print / save as PDF</button>
+        <PrintButton />
         <a className="btn secondary" href={`/api/ledger/export?mandate=${m.id}`}>Download JSON receipt</a>
-        <script dangerouslySetInnerHTML={{ __html: `document.getElementById('print').addEventListener('click',()=>window.print())` }} />
       </div>
       <div className="eyebrow">Mandate receipt · {ctx.workspaceName}</div>
       <h1 style={{ margin: "6px 0 4px" }}>{m.name}</h1>

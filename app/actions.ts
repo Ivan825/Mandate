@@ -6,9 +6,9 @@ import { headers } from "next/headers";
 import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile } from "@/lib/service";
 import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
-import { requireCtx, requirePermission } from "@/lib/session";
+import { requireCtx, requirePermission, can } from "@/lib/session";
 import { auth } from "@/lib/auth";
-import { revokeConnectedAgent } from "@/lib/connections";
+import { revokeConnectedAgent, bindClientWorkspace } from "@/lib/connections";
 import { grant } from "@/lib/reveal";
 
 // Every mutating action resolves the caller's workspace from the session
@@ -43,7 +43,7 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
   for (const [k, v] of form.entries()) if (typeof v === "string" && !k.startsWith("$")) values[k] = v;
   const agentId = String(form.get("agentId") ?? "");
   if (!isUuid(agentId)) return { errors: [{ field: "agentId", message: "Pick an agent." }], values };
-  const timezone = String(form.get("timezone") ?? "Asia/Kolkata");
+  const timezone = String(form.get("timezone") ?? "UTC");
   const approvalRaw = String(form.get("approvalAbove") ?? "").trim();
   const expiresRaw = String(form.get("expiresAt") ?? "").trim();
   const res = await createMandate(ctx.workspaceId, {
@@ -129,6 +129,8 @@ export async function decideApprovalAction(form: FormData) {
 
 export async function sendTestNotificationAction() {
   const ctx = await requireCtx();
+  const { rateLimit } = await import("@/lib/ratelimit");
+  if (!(await rateLimit(`user:${ctx.userId}:notify-test`, 10, 3600)).ok) redirect("/settings?error=" + encodeURIComponent("Too many test notifications this hour."));
   const { sendTest, listChannels } = await import("@/lib/notify");
   const channels = await listChannels(ctx.userId);
   if (channels.length === 0) redirect("/settings?test=none");
@@ -165,9 +167,29 @@ export async function revokeOAuthClientAction(form: FormData) {
   const ctx = await requireCtx();
   const clientId = String(form.get("clientId") ?? "");
   if (!clientId) return;
-  await revokeConnectedAgent(ctx.userId, clientId);
+  await revokeConnectedAgent(ctx.userId, clientId, ctx.workspaceId);
   revalidatePath("/settings");
   redirect("/settings?disconnected=1");
+}
+
+// Consent page, right after Better Auth has recorded the consent: pin the
+// agent to the workspace the person is looking at. The scopes are read from
+// the stored consent, not from the page, so a hand-built call cannot claim
+// less than was granted. Only roles that can act on mandates may bind an
+// agent that spends.
+export async function bindAgentAction(clientId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const ctx = await requireCtx();
+  if (!clientId || clientId.length > 200) return { ok: false, error: "Missing client id." };
+  const { db, schema } = await import("@/lib/db");
+  const { and, eq } = await import("drizzle-orm");
+  const [consent] = await db.select({ scopes: schema.oauthConsent.scopes }).from(schema.oauthConsent).where(and(eq(schema.oauthConsent.userId, ctx.userId), eq(schema.oauthConsent.clientId, clientId))).limit(1);
+  if (!consent) return { ok: false, error: "No consent on record for this agent; allow it first." };
+  if ((consent.scopes ?? []).includes("mandate:spend") && !(await can({ mandate: ["try"] }))) {
+    await revokeConnectedAgent(ctx.userId, clientId, ctx.workspaceId);
+    return { ok: false, error: `Your role in ${ctx.workspaceName} (${ctx.role}) cannot let an agent spend, so the connection was withdrawn. Switch to a workspace where you are an owner or admin, or ask the agent for read-only access.` };
+  }
+  await bindClientWorkspace(ctx.userId, clientId, ctx.workspaceId);
+  return { ok: true };
 }
 
 // ---------- Workspaces, members, invitations ----------
@@ -198,6 +220,8 @@ export async function inviteMemberAction(form: FormData) {
   const role = String(form.get("role") ?? "approver");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) redirect("/members?error=" + encodeURIComponent("Enter a valid email address."));
   if (!["admin", "approver", "viewer"].includes(role)) redirect("/members?error=" + encodeURIComponent("Pick a role."));
+  const { rateLimit } = await import("@/lib/ratelimit");
+  if (!(await rateLimit(`user:${ctx.userId}:invite`, 20, 3600)).ok) redirect("/members?error=" + encodeURIComponent("Too many invitations this hour; try again later."));
   try {
     await auth.api.createInvitation({ body: { email, role: role as "admin" | "approver" | "viewer", organizationId: ctx.workspaceId, resend: true }, headers: await headers() });
   } catch (e) {
@@ -224,6 +248,28 @@ export async function updateMemberRoleAction(form: FormData) {
   try { await auth.api.updateMemberRole({ body: { memberId, role: role as "admin" | "approver" | "viewer", organizationId: ctx.workspaceId }, headers: await headers() }); } catch (e) { redirect("/members?error=" + encodeURIComponent((e as Error).message)); }
   revalidatePath("/members");
   redirect("/members");
+}
+
+// Ownership moves as one step: the chosen member becomes owner, the current
+// owner steps down to admin. Only an owner may do this, and only to a member
+// who is already in the workspace.
+export async function transferOwnershipAction(form: FormData) {
+  const ctx = await requireCtx();
+  if (ctx.role !== "owner") redirect("/members?error=" + encodeURIComponent("Only the owner can transfer ownership."));
+  const memberId = String(form.get("memberId") ?? "");
+  if (!memberId) return;
+  const { db, schema } = await import("@/lib/db");
+  const { and, eq } = await import("drizzle-orm");
+  const { recordEvent } = await import("@/lib/ledger");
+  const [target] = await db.select().from(schema.member).where(and(eq(schema.member.id, memberId), eq(schema.member.organizationId, ctx.workspaceId))).limit(1);
+  if (!target || target.userId === ctx.userId) redirect("/members?error=" + encodeURIComponent("Pick another member of this workspace."));
+  await db.transaction(async (tx) => {
+    await tx.update(schema.member).set({ role: "owner" }).where(eq(schema.member.id, target.id));
+    await tx.update(schema.member).set({ role: "admin" }).where(and(eq(schema.member.organizationId, ctx.workspaceId), eq(schema.member.userId, ctx.userId)));
+  });
+  await recordEvent(ctx.workspaceId, "workspace.ownership_transferred", { from: ctx.userId, to: target.userId, by: ctx.email });
+  revalidatePath("/", "layout");
+  redirect("/members?transferred=1");
 }
 
 export async function removeMemberAction(form: FormData) {
@@ -304,4 +350,59 @@ export async function saveCardholderProfileAction(form: FormData) {
   await saveCardholderProfile(ctx.workspaceId, { name: f("name").slice(0, 60), email: f("email") || ctx.email, phone: f("phone").slice(0, 20), dob: f("dob"), line1: f("line1").slice(0, 100), line2: f("line2").slice(0, 100), city: f("city").slice(0, 60), state: f("state").slice(0, 40), postalCode: f("postalCode").slice(0, 16), country });
   revalidatePath("/settings");
   redirect("/settings?cardholder=saved");
+}
+
+// ---------- Account and workspace lifecycle ----------
+
+export async function leaveWorkspaceAction() {
+  const ctx = await requireCtx();
+  if (ctx.role === "owner") redirect("/settings?error=" + encodeURIComponent("An owner can't leave. On the Members page use \"Make owner\" on someone else first, or delete the workspace."));
+  try { await auth.api.leaveOrganization({ body: { organizationId: ctx.workspaceId }, headers: await headers() }); }
+  catch (e) { redirect("/settings?error=" + encodeURIComponent((e as Error).message)); }
+  const { ensureActiveWorkspace } = await import("@/lib/session");
+  await ensureActiveWorkspace();
+  revalidatePath("/", "layout");
+  redirect("/?left=1");
+}
+
+export async function deleteWorkspaceAction(form: FormData) {
+  const ctx = await requireCtx();
+  if (String(form.get("confirm") ?? "") !== ctx.workspaceName) redirect("/settings?error=" + encodeURIComponent("Type the workspace name exactly to confirm."));
+  const { deleteWorkspace } = await import("@/lib/service");
+  try { await deleteWorkspace(ctx.workspaceId, ctx.userId); }
+  catch (e) { redirect("/settings?error=" + encodeURIComponent((e as Error).message)); }
+  const { ensureActiveWorkspace } = await import("@/lib/session");
+  await ensureActiveWorkspace();
+  revalidatePath("/", "layout");
+  redirect("/?deleted=1");
+}
+
+export async function deleteAccountAction(form: FormData) {
+  const ctx = await requireCtx();
+  if (String(form.get("confirm") ?? "").trim().toLowerCase() !== ctx.email.toLowerCase()) redirect("/settings?error=" + encodeURIComponent("Type your email exactly to confirm."));
+  const { deleteAccount } = await import("@/lib/service");
+  await deleteAccount(ctx.userId);
+  try { await auth.api.signOut({ headers: await headers() }); } catch { /* session rows are already gone */ }
+  redirect("/?goodbye=1");
+}
+
+export async function revokeSessionAction(form: FormData) {
+  const ctx = await requireCtx();
+  const id = String(form.get("id") ?? "");
+  if (!id) return;
+  // Session tokens never leave the server; the page identifies a session by id.
+  const { db, schema } = await import("@/lib/db");
+  const { and, eq } = await import("drizzle-orm");
+  const [s] = await db.select({ token: schema.session.token }).from(schema.session).where(and(eq(schema.session.id, id), eq(schema.session.userId, ctx.userId))).limit(1);
+  if (!s) return;
+  try { await auth.api.revokeSession({ body: { token: s.token }, headers: await headers() }); } catch (e) { console.error((e as Error).message); }
+  revalidatePath("/settings");
+  redirect("/settings?sessions=revoked");
+}
+
+export async function revokeOtherSessionsAction() {
+  await requireCtx();
+  try { await auth.api.revokeOtherSessions({ headers: await headers() }); } catch (e) { console.error((e as Error).message); }
+  revalidatePath("/settings");
+  redirect("/settings?sessions=revoked");
 }

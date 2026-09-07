@@ -10,9 +10,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  let r: { events?: { seq: number; type: string; createdAt: string; prevHash: string; hash: string; payload: unknown }[]; signature?: Signature | null; scope?: { all?: boolean } };
+  let r: { workspaceId?: string; events?: { seq: number; type: string; createdAt: string; prevHash: string; hash: string; payload: unknown }[]; signature?: Signature | null; scope?: { all?: boolean } };
   try { r = await req.json(); } catch { return NextResponse.json({ error: "Body must be a receipt JSON." }, { status: 400 }); }
-  const events = r.events ?? [];
+  const events = Array.isArray(r.events) ? r.events : [];
+  if (events.length > 50_000) return NextResponse.json({ error: "Receipt too large to verify online; verify offline with the public key." }, { status: 413 });
   let chainOk = true, detail = "";
   if (r.scope?.all) {
     let prev = GENESIS, expected = 1;
@@ -29,9 +30,19 @@ export async function POST(req: NextRequest) {
     // A mandate slice can only be checked row-by-row (each row's own hash), not as a chain.
     for (const e of events) if (hashEvent(e.seq, e.type, canonical(e.payload), e.prevHash, new Date(e.createdAt).getTime()) !== e.hash) { chainOk = false; detail = `Row #${e.seq} does not match its hash.`; break; }
   }
-  const sigOk = r.signature ? verifySignature(r.signature) : false;
-  const ours = r.signature ? r.signature.keyId === keyId() : false;
-  return NextResponse.json({ chainOk, detail: detail || undefined, signatureValid: sigOk, signedByThisServer: ours, events: events.length });
+  // The signature is checked against this server's own key, over a message
+  // rebuilt from the head; nothing embedded in the receipt is trusted.
+  const sigOk = r.signature ? verifySignature(r.signature, typeof r.workspaceId === "string" ? r.workspaceId : undefined) : false;
+  const full = r.scope?.all === true;
+  return NextResponse.json({
+    chainOk, detail: detail || undefined, signatureValid: sigOk, signedByThisServer: sigOk, keyId: keyId(), events: events.length,
+    // Only a full-workspace receipt has its rows covered by the signature; a
+    // mandate slice proves each row's own hash but not that the slice is
+    // complete or unaltered — say so, rather than leave "chainOk" to imply it.
+    coverage: full ? "chain" : "rows-only",
+    eventsCovered: full && chainOk && sigOk,
+    note: full ? undefined : "This is a mandate-scoped slice. The signature covers the workspace chain head at export time, not these rows; verify the full receipt (scope.all) for a covered verdict.",
+  });
 }
 
 function canonical(value: unknown): string {

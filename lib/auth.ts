@@ -39,7 +39,36 @@ export const auth = betterAuth({
     ? { google: { clientId: process.env.GOOGLE_CLIENT_ID, clientSecret: process.env.GOOGLE_CLIENT_SECRET } }
     : {},
   session: {
-    cookieCache: { enabled: true, maxAge: 60 },
+    // No cookie cache: a revoked session must die on the very next request,
+    // even at the cost of one database read per page.
+    cookieCache: { enabled: false },
+  },
+  // Rate limits live in Postgres so they hold across serverless instances
+  // (the default in-memory store resets on every cold start). Tighter rules
+  // for the endpoints that send email or accept anonymous registrations.
+  advanced: {
+    // Same address resolution as lib/ratelimit.ts: the platform-set header
+    // first, then a single-entry x-forwarded-for; a chain is trusted only
+    // through TRUSTED_PROXIES (comma-separated CIDRs). Without a resolvable
+    // address Better Auth falls back to one shared bucket, which is safe but
+    // coarse — so set x-real-ip at your reverse proxy.
+    ipAddress: {
+      ipAddressHeaders: ["x-real-ip", "cf-connecting-ip", "x-forwarded-for"],
+      trustedProxies: (process.env.TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    },
+  },
+  rateLimit: {
+    enabled: true,
+    storage: "database",
+    window: 60,
+    max: 120,
+    customRules: {
+      "/sign-in/magic-link": { window: 600, max: 10 },
+      "/magic-link/verify": { window: 60, max: 10 },
+      "/oauth2/register": { window: 3600, max: 20 },
+      "/oauth2/token": { window: 60, max: 60 },
+      "/organization/invite-member": { window: 3600, max: 20 },
+    },
   },
   databaseHooks: {
     session: {

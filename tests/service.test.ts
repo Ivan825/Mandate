@@ -78,8 +78,12 @@ test("ledger chain verifies, incrementally and from genesis, and the receipt is 
   const receipt = await buildReceipt(ws, null);
   assert.ok(receipt.signature);
   assert.equal(verifySignature(receipt.signature!), true);
-  const tampered = { ...receipt.signature!, message: receipt.signature!.message + "x" };
-  assert.equal(verifySignature(tampered), false);
+  // The verifier rebuilds the message from the head, so tampering with the
+  // head, the workspace, or bringing your own key must all fail.
+  assert.equal(verifySignature({ ...receipt.signature!, head: { ...receipt.signature!.head, hash: "0".repeat(64) } }), false);
+  assert.equal(verifySignature({ ...receipt.signature!, workspaceId: "someone-else" }), false);
+  assert.equal(verifySignature({ ...receipt.signature!, publicKeyPem: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n-----END PUBLIC KEY-----" }), true);
+  assert.equal(verifySignature(receipt.signature!, "another-workspace"), false);
 });
 
 test("exposure book sums approved spend", async () => {
@@ -108,4 +112,58 @@ test("proxy estimates are conservative and usage parses for all providers", () =
   assert.deepEqual(parseUsage("anthropic", '{"usage":{"input_tokens":10,"output_tokens":5}}'), { inputTokens: 10, outputTokens: 5, cachedTokens: 0 });
   assert.deepEqual(parseUsage("gemini", '{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}'), { inputTokens: 10, outputTokens: 5, cachedTokens: 0 });
   assert.equal(parseUsage("openai", "no usage here"), null);
+});
+
+test("idempotency: a key is reserved once, replays terminal answers, and releases pending", async () => {
+  const { reserveIdempotent, completeIdempotent, releaseIdempotent } = await import("../lib/service");
+  const r = await mandate();
+  const m = r.mandate;
+  // Twenty concurrent reservations of one key: exactly one wins.
+  const outcomes = await Promise.all(Array.from({ length: 20 }, () => reserveIdempotent(m.id, "k1")));
+  assert.equal(outcomes.filter((o) => o.kind === "reserved").length, 1);
+  assert.equal(outcomes.filter((o) => o.kind === "in_progress").length, 19);
+  // Pending is released, so the next attempt re-evaluates.
+  await releaseIdempotent(m.id, "k1");
+  assert.equal((await reserveIdempotent(m.id, "k1")).kind, "reserved");
+  await completeIdempotent(m.id, "k1", 403, { decision: "declined" });
+  const replay = await reserveIdempotent(m.id, "k1");
+  assert.equal(replay.kind, "replay");
+  if (replay.kind === "replay") { assert.equal(replay.status, 403); assert.equal(JSON.parse(replay.response).decision, "declined"); }
+  // A completed key is not released by mistake.
+  await releaseIdempotent(m.id, "k1");
+  assert.equal((await reserveIdempotent(m.id, "k1")).kind, "replay");
+});
+
+test("mcp grants bind a client to the consented workspace and vanish on disconnect", async () => {
+  const { bindClientWorkspace, grantedWorkspace, revokeConnectedAgent, isTokenRevoked } = await import("../lib/connections");
+  const [u] = await db.select({ id: schema.user.id }).from(schema.user).limit(1);
+  const clientId = "client-" + randomUUID();
+  await db.insert(schema.oauthClient).values({ id: randomUUID(), clientId, name: "T", redirectUris: ["http://127.0.0.1/cb"] } as typeof schema.oauthClient.$inferInsert);
+  await db.insert(schema.oauthConsent).values({ id: randomUUID(), clientId, userId: u.id, scopes: ["mandate:read"], createdAt: new Date(), updatedAt: new Date() });
+  await bindClientWorkspace(u.id, clientId, ws);
+  assert.equal((await grantedWorkspace(u.id, clientId))?.workspaceId, ws);
+  assert.equal(await isTokenRevoked(null, u.id, clientId), false);
+  await bindClientWorkspace(u.id, clientId, ws); // re-consent is an upsert
+  await revokeConnectedAgent(u.id, clientId, ws);
+  assert.equal(await grantedWorkspace(u.id, clientId), null);
+  assert.equal(await isTokenRevoked(null, u.id, clientId), true);
+});
+
+test("card reconciliation accumulates partial captures and releases uncaptured holds", async () => {
+  const { reconcileCard } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null });
+  const auth = await authorize(r.mandate, { amount: 1000, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() });
+  assert.equal(auth.decision, "approved");
+  const [t0] = await db.select().from(schema.transactions).where((await import("drizzle-orm")).eq(schema.transactions.id, auth.transactionId));
+  const authId = t0.stripeAuthorizationId!;
+  await reconcileCard(authId, "capture", 300, "evt1");
+  await reconcileCard(authId, "capture", 200, "evt2");
+  await reconcileCard(authId, "closed", 0, "evt3");
+  const [t1] = await db.select().from(schema.transactions).where((await import("drizzle-orm")).eq(schema.transactions.id, auth.transactionId));
+  assert.equal(t1.amount, 500);
+  const auth2 = await authorize(r.mandate, { amount: 700, merchant: "OpenAI" }, "stripe", { stripeAuthorizationId: "iauth_" + randomUUID() });
+  const [t2] = await db.select().from(schema.transactions).where((await import("drizzle-orm")).eq(schema.transactions.id, auth2.transactionId));
+  await reconcileCard(t2.stripeAuthorizationId!, "closed", 0, "evt4");
+  const [t3] = await db.select().from(schema.transactions).where((await import("drizzle-orm")).eq(schema.transactions.id, auth2.transactionId));
+  assert.equal(t3.amount, 0);
 });

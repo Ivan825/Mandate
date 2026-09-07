@@ -1,5 +1,6 @@
 import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from "node:crypto";
 import { allEvents, verifyChain } from "./ledger";
+import { isProduction } from "./env";
 
 // A receipt is the workspace's ledger (or one mandate's slice) plus a
 // signature over the chain head. The signing key lives outside the database
@@ -16,7 +17,7 @@ function seed(): Buffer {
     if (b.length === 32) return b;
     throw new Error("RECEIPT_SIGNING_KEY must be a 32-byte seed, base64-encoded (openssl rand -base64 32).");
   }
-  if (process.env.VERCEL) throw new Error("RECEIPT_SIGNING_KEY is required in production.");
+  if (isProduction()) throw new Error("RECEIPT_SIGNING_KEY is required in production.");
   return createHash("sha256").update("mandate-receipt:" + (process.env.BETTER_AUTH_SECRET ?? "dev")).digest();
 }
 
@@ -41,9 +42,15 @@ export function signHead(workspaceId: string, head: { seq: number; hash: string 
   return { alg: "Ed25519", keyId: keyId(), publicKeyPem: publicKeyPem(), signedAt, head, workspaceId, signature, message };
 }
 
-export function verifySignature(sig: Signature): boolean {
+// Verification never trusts anything inside the receipt except the head and
+// the signature bytes: the message is rebuilt from the claimed fields and
+// checked against THIS server's key, so a receipt cannot bring its own key.
+export function verifySignature(sig: Signature, expectWorkspaceId?: string): boolean {
   try {
-    return edVerify(null, Buffer.from(sig.message), createPublicKey(sig.publicKeyPem), Buffer.from(sig.signature, "base64"));
+    if (!sig || sig.alg !== "Ed25519" || typeof sig.signature !== "string" || !sig.head) return false;
+    if (expectWorkspaceId && sig.workspaceId !== expectWorkspaceId) return false;
+    const message = `mandate-receipt|${sig.workspaceId}|${sig.head.seq}|${sig.head.hash}|${sig.signedAt}`;
+    return edVerify(null, Buffer.from(message), createPublicKey(publicKeyPem()), Buffer.from(sig.signature, "base64"));
   } catch { return false; }
 }
 

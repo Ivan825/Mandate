@@ -1,11 +1,13 @@
 import Link from "next/link";
-import { requireCtx } from "@/lib/session";
+import { requireCtx, can } from "@/lib/session";
+import { redirect } from "next/navigation";
 import { listAgents } from "@/lib/service";
 import { stripeEnabled } from "@/lib/stripe";
 import { MandateForm } from "./form";
 
 export default async function NewMandatePage({ searchParams }: { searchParams: Promise<{ agent?: string }> }) {
   const ctx = await requireCtx();
+  if (!(await can({ mandate: ["issue"] }))) redirect("/?error=" + encodeURIComponent("Your role (" + ctx.role + ") cannot issue mandates here."));
   const { agent } = await searchParams;
   const agents = await listAgents(ctx.workspaceId);
   if (agents.length === 0) {

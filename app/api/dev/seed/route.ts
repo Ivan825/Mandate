@@ -1,13 +1,20 @@
 import { NextResponse } from "next/server";
-import { getCtx } from "@/lib/session";
+import { getCtx, can } from "@/lib/session";
 import { createAgent, createMandate, authorize, listAgents } from "@/lib/service";
 
 // Populates the signed-in user's workspace with a demo state. Development
-// only (or ALLOW_SEED=1); runs once per empty workspace. GET /api/dev/seed
+// only (or ALLOW_SEED=1); runs once per empty workspace. It mutates, so it
+// is a POST — a GET link in an email cannot trigger it — and, like every
+// action, only owners and admins may run it.
+//   curl -X POST -b <session cookie> https://…/api/dev/seed
 export async function GET() {
+  return NextResponse.json({ error: "Seed with POST (fetch('/api/dev/seed', { method: 'POST' }) from the browser console while signed in)." }, { status: 405 });
+}
+export async function POST() {
   if (process.env.NODE_ENV === "production" && process.env.ALLOW_SEED !== "1") return NextResponse.json({ error: "Seeding is disabled in production (set ALLOW_SEED=1 to override)." }, { status: 403 });
   const ctx = await getCtx();
   if (!ctx) return NextResponse.json({ error: "Sign in first; the demo is created in your workspace." }, { status: 401 });
+  if (!(await can({ mandate: ["issue"] }))) return NextResponse.json({ error: "Only owners and admins can seed a workspace." }, { status: 403 });
   const ws = ctx.workspaceId;
   if ((await listAgents(ws)).length > 0) return NextResponse.json({ seeded: false, reason: "Workspace already has agents." });
 

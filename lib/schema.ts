@@ -208,6 +208,17 @@ export const stripeEvents = pgTable("stripe_events", {
   receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
 });
 
+// Which workspace an OAuth (MCP) client was connected to. Written on the
+// consent page, read on every MCP call, so an agent only ever sees the
+// workspace the person was looking at when they clicked Allow.
+export const mcpGrants = pgTable("mcp_grants", {
+  id: text("id").primaryKey(), // `${userId}:${clientId}`
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  clientId: text("client_id").notNull(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+}, (t) => [index("mcp_grants_user_idx").on(t.userId), index("mcp_grants_ws_idx").on(t.workspaceId)]);
 
 export type Agent = typeof agents.$inferSelect;
 export type Mandate = typeof mandates.$inferSelect;

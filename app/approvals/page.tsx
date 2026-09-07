@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireCtx } from "@/lib/session";
+import { requireCtx, can } from "@/lib/session";
 import { listApprovals } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { Pill, When } from "@/app/components";
@@ -7,7 +7,7 @@ import { decideApprovalAction } from "@/app/actions";
 
 export default async function ApprovalsPage() {
   const ctx = await requireCtx();
-  const all = await listApprovals(ctx.workspaceId);
+  const [all, mayDecide] = await Promise.all([listApprovals(ctx.workspaceId), can({ approval: ["decide"] })]);
   const pending = all.filter((r) => r.a.status === "pending");
   const history = all.filter((r) => r.a.status !== "pending").slice(0, 30);
 
@@ -29,11 +29,13 @@ export default async function ApprovalsPage() {
               <div className="meta"><strong>{agentName}</strong> · <Link href={`/mandates/${a.mandateId}`}>{mandateName}</Link> · asked <When d={a.requestedAt} /></div>
               {a.purpose && <div className="meta">“{a.purpose}”</div>}
             </div>
-            <form action={decideApprovalAction} className="actions">
-              <input type="hidden" name="approvalId" value={a.id} />
-              <button className="btn ok" name="decision" value="approve" type="submit">Approve once</button>
-              <button className="btn danger" name="decision" value="deny" type="submit">Deny</button>
-            </form>
+            {mayDecide ? (
+              <form action={decideApprovalAction} className="actions">
+                <input type="hidden" name="approvalId" value={a.id} />
+                <button className="btn ok" name="decision" value="approve" type="submit">Approve once</button>
+                <button className="btn danger" name="decision" value="deny" type="submit">Deny</button>
+              </form>
+            ) : <span className="faint">Waiting for an approver</span>}
           </div>
         ))}
       </div>
