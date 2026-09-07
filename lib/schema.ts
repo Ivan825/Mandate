@@ -30,7 +30,7 @@ export const mandates = pgTable("mandates", {
   blockedCategories: text("blocked_categories").notNull().default("[]"), // JSON string[]
   activeHoursStart: integer("active_hours_start").notNull().default(0),
   activeHoursEnd: integer("active_hours_end").notNull().default(24),
-  timezone: text("timezone").notNull().default("Asia/Kolkata"),
+  timezone: text("timezone").notNull().default("UTC"),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   // The agent's credential is never stored in clear. tokenHash is what we
   // look up by; tokenPrefix is shown so the owner can recognise it;
@@ -68,7 +68,7 @@ export const transactions = pgTable("transactions", {
   stripeAuthorizationId: text("stripe_authorization_id"),
   approvalId: text("approval_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-}, (t) => [index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt)]);
+}, (t) => [index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId)]);
 
 export const approvals = pgTable("approvals", {
   id: text("id").primaryKey(),

@@ -464,6 +464,16 @@ export async function reconcileCard(stripeAuthorizationId: string, kind: "captur
 
 // Everything a workspace owns, removed in dependency order. Used when an
 // owner deletes a workspace and when the last owner deletes their account.
+// Cards live at Stripe: cancel them before the rows go, so nothing can be
+// charged to a workspace that no longer exists. Errors are logged, never
+// fatal — the webhook fails closed for an unknown card anyway.
+export async function cancelWorkspaceCards(workspaceId: string) {
+  const { stripeEnabled, deactivateCard } = await import("./stripe");
+  if (!stripeEnabled()) return;
+  const rows = await db.select({ id: mandates.id, cardId: mandates.stripeCardId }).from(mandates).where(and(eq(mandates.workspaceId, workspaceId), sql`${mandates.stripeCardId} is not null`));
+  for (const r of rows) { try { await deactivateCard(r.cardId!); } catch (e) { console.error(`could not cancel card ${r.cardId}: ${(e as Error).message}`); } }
+}
+
 export async function purgeWorkspace(tx: Tx, workspaceId: string) {
   await tx.delete(schema.proxyCalls).where(eq(schema.proxyCalls.workspaceId, workspaceId));
   await tx.delete(schema.proxyKeys).where(eq(schema.proxyKeys.workspaceId, workspaceId));
@@ -482,6 +492,7 @@ export async function purgeWorkspace(tx: Tx, workspaceId: string) {
 }
 
 export async function deleteWorkspace(workspaceId: string, byUserId: string) {
+  await cancelWorkspaceCards(workspaceId);
   await db.transaction(async (tx) => {
     const [m] = await tx.select({ role: schema.member.role }).from(schema.member).where(and(eq(schema.member.organizationId, workspaceId), eq(schema.member.userId, byUserId))).limit(1);
     if (!m || !/\bowner\b/.test(m.role)) throw new Error("Only an owner can delete a workspace.");
@@ -504,6 +515,7 @@ export async function soleOwnedWorkspaces(userId: string): Promise<{ id: string;
 }
 
 export async function deleteAccount(userId: string) {
+  for (const w of await soleOwnedWorkspaces(userId)) await cancelWorkspaceCards(w.id);
   await db.transaction(async (tx) => {
     const sole = await soleOwnedWorkspaces(userId);
     for (const w of sole) await purgeWorkspace(tx, w.id);

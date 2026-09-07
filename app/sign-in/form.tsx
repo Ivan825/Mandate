@@ -30,7 +30,7 @@ export function SignInForm({ google, next, sent, error, emailDelivery }: { googl
       <button className="btn secondary" type="button" onClick={passkey} style={{ justifyContent: "center" }}>Use a passkey</button>
       <div className="eyebrow" style={{ textAlign: "center", margin: "4px 0" }}>or email me a link</div>
       {state === "sent" ? (
-        <div className="notice ok">Link sent to <strong>{email || "your email"}</strong>. It's valid for 15 minutes.{emailDelivery === "console" && <> <span className="faint">(No email service configured: the link was printed to the server console.)</span></>}</div>
+        <div className="notice ok">Link sent to <strong>{email || "your email"}</strong>. It's valid for 15 minutes.{emailDelivery === "console" && <> <span className="faint">(This deployment has no email service yet: the link was printed where the server runs. If that isn't you, ask whoever runs it.)</span></>}</div>
       ) : (
         <form onSubmit={sendLink} className="form">
           <div className="field">

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCtx } from "@/lib/session";
 import { SignInForm } from "./form";
@@ -16,6 +17,7 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
       <h1 style={{ margin: "6px 0 8px" }}>Sign in</h1>
       <p className="muted" style={{ marginBottom: 18 }}>No passwords. Use Google, a passkey, or a link sent to your email.</p>
       <SignInForm google={google} next={next} sent={Boolean(sent)} error={error ?? null} emailDelivery={emailDelivery} />
+      <p className="faint" style={{ fontSize: 12.5, marginTop: 14 }}>By signing in you agree to the <Link href="/terms">Terms</Link> and <Link href="/privacy">Privacy policy</Link>. New accounts get a personal workspace; nothing is shared until you invite someone.</p>
     </div>
   );
 }

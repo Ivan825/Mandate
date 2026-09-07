@@ -30,7 +30,7 @@ Think of it as a sanction letter for an agent, with the loan-book view to match.
 
 ## Run it locally
 
-Requires Node 22+ and Postgres 16 (or `docker compose up` for both).
+Requires Node 22+ (CI and the Docker image use 24) and Postgres 16 (or `docker compose up` for both).
 
 ```bash
 cp .env.example .env            # set DATABASE_URL, BETTER_AUTH_SECRET, APP_URL
@@ -48,7 +48,7 @@ npm run build && npm run test:e2e   # real browser + real HTTP through every flo
 npx tsc --noEmit
 ```
 
-See `DEPLOY.md` for Vercel + Neon, Google and Resend setup, Stripe, and Docker.
+See `LAUNCH.md` for the step-by-step path to a public beta (accounts, secrets, Vercel + Neon + Resend, Google, monitoring, the pre-launch walkthrough) and `DEPLOY.md` for the reference on each piece, Stripe Issuing and Docker.
 
 ## What the test suite proves (all on Postgres 16, run in CI)
 
@@ -90,3 +90,7 @@ drizzle/                  committed SQL migrations
 tests/                    unit, integration, e2e
 mcp/server.mjs            zero-dependency stdio MCP server
 ```
+
+## Licence
+
+MIT — see `LICENSE`. The hosted service at the operator's domain runs this same code; self-host it, fork it, or build on it.

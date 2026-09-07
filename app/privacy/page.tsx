@@ -1,6 +1,6 @@
 export default function PrivacyPage() {
   const operator = process.env.LEGAL_OPERATOR_NAME ?? "the operator of this Mandate deployment";
-  const contact = process.env.LEGAL_CONTACT_EMAIL ?? "the address shown on the sign-in page";
+  const contact = process.env.LEGAL_CONTACT_EMAIL ?? "the contact address in the page footer";
   return (
     <div className="legal">
       <div className="eyebrow">Legal</div>
@@ -18,7 +18,7 @@ export default function PrivacyPage() {
       <h2>Why</h2>
       <p>To run the service you asked for: decide requests, notify approvers, keep the record, and let you connect agents. We do not sell personal data and do not use it for advertising.</p>
       <h2>Who else sees it</h2>
-      <p>Processors we rely on to run the service: our hosting and database providers, an email delivery provider for sign-in links and alerts, the webhook destinations you configure, and Stripe if you enable virtual cards. Each receives only what its function needs. Agents you connect see the mandates in your workspace and the decisions on their own requests.</p>
+      <p>Processors we rely on to run the service: our hosting and database providers, an email delivery provider for sign-in links and alerts, the webhook destinations you configure, Google Fonts (your browser fetches the typefaces from Google, which sees your IP address), and Stripe if virtual cards are enabled — Stripe holds the cardholder identity details you enter and the card itself, under its own privacy terms, and keeps them after you delete your account where card-programme rules require. Each receives only what its function needs. Agents you connect see the mandates in your workspace and the decisions on their own requests.</p>
       <h2>Your choices</h2>
       <p>Disconnect an agent, remove a channel, revoke a mandate, leave a workspace, or delete your account at any time from Settings. You can export your ledger. Google sign-in uses only your basic profile; you can revoke Mandate's access in your Google account.</p>
       <h2>Retention and security</h2>

@@ -27,6 +27,7 @@ const TOOLS = [
         merchant: { type: "string", description: "Merchant or service being paid" },
         purpose: { type: "string", description: "One line on why, shown to the owner" },
         category: { type: "string", description: "Optional merchant category slug" },
+        idempotencyKey: { type: "string", description: "Reuse on retries of the same purchase so a network error never double-spends" },
       },
       required: ["amount", "merchant"],
       additionalProperties: false,
@@ -63,7 +64,8 @@ async function handle(msg) {
           return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
         }
         if (name === "request_purchase") {
-          const r = await call("/api/agent/authorize", { method: "POST", body: JSON.stringify(args) });
+          const { idempotencyKey, ...body } = args ?? {};
+          const r = await call("/api/agent/authorize", { method: "POST", body: JSON.stringify(body), headers: idempotencyKey ? { "idempotency-key": String(idempotencyKey).slice(0, 128) } : {} });
           return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 && r.status !== 403 });
         }
         return fail(-32601, `Unknown tool ${name}`);

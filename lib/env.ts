@@ -27,5 +27,18 @@ export function configProblems(): string[] {
   const weak = (name: string) => { const v = process.env[name]; if (v && (v.length < 32 || /change-me|dev-only|ci-only|example/i.test(v))) out.push(`${name} looks like a placeholder; use at least 32 random characters.`); };
   weak("BETTER_AUTH_SECRET"); weak("NOTIFY_SECRET");
   if (appUrl().startsWith("http://") && !/localhost|127\.0\.0\.1/.test(appUrl())) out.push("APP_URL is http://; cookies and passkeys need https in production.");
+  // Outside users cannot read the server console: production must be able
+  // to deliver a sign-in link (or offer Google) and must send from a real address.
+  if (!process.env.RESEND_API_KEY && !process.env.GOOGLE_CLIENT_ID) out.push("Neither RESEND_API_KEY nor Google sign-in is set; nobody outside can sign in.");
+  if (process.env.RESEND_API_KEY && (!process.env.EMAIL_FROM || /mandate\.local|example\./.test(process.env.EMAIL_FROM))) out.push("EMAIL_FROM must be a verified sender on your domain.");
+  if (!process.env.LEGAL_CONTACT_EMAIL) out.push("LEGAL_CONTACT_EMAIL is not set; Terms and Privacy need a contact address.");
   return out;
+}
+
+// The people who run this deployment: they see configuration warnings and
+// the deployment table; everyone else sees a product, not its plumbing.
+export function isOperator(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const list = (process.env.OPERATOR_EMAILS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return list.length === 0 ? !isProduction() : list.includes(email.toLowerCase());
 }

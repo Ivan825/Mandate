@@ -58,7 +58,10 @@ p{margin:0 0 10px;max-width:68ch}
 .spacer{flex:1;min-width:8px}
 .topbar .btn,.topbar .theme{flex-shrink:0}
 @media (max-width:720px){.topbar .theme span+span{display:none}}
-.main{max-width:1080px;margin:0 auto;padding:32px 24px 80px}
+.main{max-width:1080px;margin:0 auto;padding:32px 24px 60px;min-height:calc(100vh - 56px - 52px)}
+.sitefoot{border-top:1px solid var(--rule);background:var(--surface)}
+.sitefoot-in{max-width:1080px;margin:0 auto;padding:16px 24px;display:flex;gap:20px;font-size:13px;color:var(--ink-3)}
+.sitefoot-in a{color:var(--ink-3)}
 .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:24px;flex-wrap:wrap}
 .page-head p{margin:6px 0 0}
 

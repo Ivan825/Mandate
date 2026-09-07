@@ -99,7 +99,7 @@ export function StatsView({ rows, mandates }: { rows: StatRow[]; mandates: Manda
     const dayOfMonth = new Date(now).getDate();
     const projected = dayOfMonth > 0 ? Math.round((monthSpend / dayOfMonth) * daysInMonth) : 0;
     const activeMandates = mandates.filter((m) => m.status === "active" && m.currency === currency);
-    const idle = activeMandates.filter((m) => !approved.some((r) => r.md === m.name));
+    const idle = activeMandates.filter((m) => !approved.some((r) => r.mid === m.id));
     const sanctioned = activeMandates.reduce((s, m) => s + m.totalLimit, 0);
     const busiest = buckets.reduce((best, b) => (b.total > (best?.total ?? -1) ? b : best), buckets[0]);
 

@@ -127,7 +127,7 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
             <span className="hint">Cards are issued in {cardCurrency} and paid from the workspace's prepaid balance; pick {cardCurrency} above.</span>
           </>
         ) : (
-          <p className="muted" style={{ margin: 0 }}>Stripe Issuing is not configured, so no card will be issued. The mandate still works through the agent API. Add <code>STRIPE_SECRET_KEY</code> to enable virtual cards.</p>
+          <p className="muted" style={{ margin: 0 }}>Virtual cards are not enabled on this deployment yet, so no card will be issued. The mandate works through the API, MCP and the API-key proxy; when cards are switched on, issue a new mandate to get one.</p>
         )}
       </fieldset>
 

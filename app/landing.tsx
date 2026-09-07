@@ -4,9 +4,10 @@ import Link from "next/link";
 // felt the specific fear: the $50k token month, the wrong item bought, the
 // key pushed to a branch. One thesis, one mechanism, one call to action.
 
-export function Landing({ base }: { base: string }) {
+export function Landing({ base, goodbye = false }: { base: string; goodbye?: boolean }) {
   return (
     <div className="landing">
+      {goodbye && <div className="notice ok" style={{ margin: "24px 0 0" }}>Your account and its data were deleted. Thank you for trying Mandate.</div>}
       <section className="hero">
         <div className="eyebrow">For everyone who lets an agent spend</div>
         <h1>Give your agents a sanction, not a card.</h1>
@@ -61,12 +62,6 @@ request_purchase({ …same… })
         <div className="actions"><Link href="/sign-in" className="btn accent">Create your first mandate</Link><a href="https://github.com/Ivan825/Mandate" className="btn secondary">Source on GitHub</a></div>
       </section>
 
-      <footer className="foot">
-        <span>Mandate</span>
-        <Link href="/terms">Terms</Link>
-        <Link href="/privacy">Privacy</Link>
-        <Link href="/sign-in">Sign in</Link>
-      </footer>
     </div>
   );
 }

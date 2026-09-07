@@ -8,7 +8,8 @@ import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { soleOwnedWorkspaces } from "@/lib/service";
 import { getCardholderProfile } from "@/lib/service";
-import { cardholderProblem, issuingRegion, termsAcceptanceRequired } from "@/lib/stripe";
+import { cardholderProblem, issuingRegion, termsAcceptanceRequired, cardholderTermsUrl } from "@/lib/stripe";
+import { isOperator } from "@/lib/env";
 import { When } from "@/app/components";
 import { PasskeyPanel } from "./passkeys";
 
@@ -22,6 +23,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     auth.api.listSessions({ headers: h }).catch(() => []), auth.api.getSession({ headers: h }), soleOwnedWorkspaces(ctx.userId),
   ]);
   const emailOn = Boolean(process.env.RESEND_API_KEY);
+  const operator = isOperator(ctx.email);
   const rows: [string, boolean, string][] = [
     ["Google sign-in", Boolean(process.env.GOOGLE_CLIENT_ID), "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET"],
     ["Email delivery (sign-in links, alerts, invitations)", emailOn, "RESEND_API_KEY + EMAIL_FROM (else printed to the server console)"],
@@ -57,7 +59,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <div className="eyebrow">Add a channel</div>
           <div className="field"><label htmlFor="type">Type</label>
             <select id="type" name="type" defaultValue="email">
-              <option value="email">Email{emailOn ? "" : " (prints to console until RESEND_API_KEY is set)"}</option>
+              <option value="email">Email{emailOn ? "" : " (not delivered on this deployment yet)"}</option>
               <option value="webhook">Webhook (n8n, Zapier, Make, your own URL)</option>
             </select>
           </div>
@@ -96,6 +98,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <p className="muted">Sign in with Face ID, Touch ID or a security key instead of waiting for an email link.</p>
       <PasskeyPanel />
 
+      {stripeEnabled() && <>
       <h2 style={{ margin: "28px 0 8px" }}>Cardholder details (for virtual cards)</h2>
       <p className="muted">Stripe Issuing needs the real name, date of birth, mobile number and billing address of the person the cards belong to. Saved per workspace; used when a mandate is issued with a card. This deployment issues <strong>{region.currency}</strong> cards to addresses in <strong>{region.code === "EU" ? "the EEA" : region.code}</strong>.</p>
       {cardholder && <div className="notice ok" style={{ marginBottom: 12 }}>Cardholder details saved.</div>}
@@ -122,11 +125,12 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           {profile?.termsAcceptedAt ? (
             <p className="faint" style={{ fontSize: 12.5, margin: 0 }}>Stripe's cardholder terms accepted on <When d={profile.termsAcceptedAt} />.</p>
           ) : (
-            <label className="check"><input type="checkbox" name="acceptTerms" required={termsAcceptanceRequired()} /> I accept the <a href="https://stripe.com/legal/issuing/celtic-authorized-user-terms" target="_blank" rel="noreferrer">Stripe Issuing cardholder terms</a> and the card issuer's terms for my region{termsAcceptanceRequired() ? " (required)" : ""}.</label>
+            <label className="check"><input type="checkbox" name="acceptTerms" required={termsAcceptanceRequired()} /> I accept the <a href={cardholderTermsUrl()} target="_blank" rel="noreferrer">Stripe Issuing cardholder terms</a> and the card issuer's terms for my region{termsAcceptanceRequired() ? " (required)" : ""}.</label>
           )}
           <div className="actions"><button className="btn secondary" type="submit">Save cardholder details</button></div>
         </form>
       ) : <p className="faint">Owners and admins set this.</p>}
+      </>}
 
       <h2 style={{ margin: "28px 0 8px" }}>Where you're signed in</h2>
       <p className="muted">Every active session for your account. Revoke one you don't recognise; it signs that device out immediately.</p>
@@ -164,7 +168,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <div className="field" style={{ maxWidth: 320 }}><input name="confirm" placeholder={ctx.email} autoComplete="off" /></div><div><button className="btn danger sm" type="submit">Delete my account permanently</button></div></form>
       </div>
 
-      <h2 style={{ margin: "28px 0 8px" }}>This deployment</h2>
+      {operator && <>
+      <h2 style={{ margin: "28px 0 8px" }}>This deployment <span className="pill">operators only</span></h2>
       <div className="tbl">
         <table>
           <thead><tr><th>Capability</th><th>State</th><th>Set by</th></tr></thead>
@@ -177,6 +182,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           </tbody>
         </table>
       </div>
+      </>}
     </div>
   );
 }

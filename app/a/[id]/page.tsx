@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { verifyLink } from "@/lib/notify";
 import { decideApproval, getApproval } from "@/lib/service";
 import { fmt } from "@/lib/policy";
-import { rateLimit } from "@/lib/ratelimit";
+import { rateLimit, clientIp } from "@/lib/ratelimit";
 import { headers } from "next/headers";
 
 // One-tap decision from a notification. The link is signed and expires with
@@ -27,7 +27,7 @@ export default async function OneTapPage({ params, searchParams }: Params) {
     const dec = String(form.get("d")) === "approve" ? "approve" : "deny";
     const tok = String(form.get("t") ?? "");
     const h = await headers();
-    const ip = (h.get("x-forwarded-for") ?? "").split(",")[0].trim() || "unknown";
+    const ip = clientIp(new Request("http://x", { headers: h }));
     if (!(await rateLimit(`ip:${ip}:onetap`, 30)).ok) return;
     if (!verifyLink(id, dec, tok)) return;
     await decideApproval(null, id, dec === "approve" ? "approved" : "denied", "one-tap link");

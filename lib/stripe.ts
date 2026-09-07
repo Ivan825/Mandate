@@ -34,6 +34,13 @@ export function issuingRegion(): { code: string; currency: string; countries: st
   return { code: REGIONS[code] ? code : "US", ...r, currency: (process.env.STRIPE_ISSUING_CURRENCY ?? r.currency).toUpperCase() };
 }
 // UK and EU cardholders must accept Stripe's cardholder terms explicitly.
+// Stripe's cardholder terms differ by issuing partner; link the right one.
+export function cardholderTermsUrl(): string {
+  const code = issuingRegion().code;
+  if (code === "GB") return "https://stripe.com/gb/legal/issuing/cardholder-terms";
+  if (code === "EU") return "https://stripe.com/legal/issuing/eu/cardholder-terms";
+  return "https://stripe.com/legal/issuing/celtic-authorized-user-terms";
+}
 export function termsAcceptanceRequired(): boolean {
   return issuingRegion().code !== "US";
 }

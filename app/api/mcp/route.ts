@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { after } from "next/server";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { requireMcpAuth } from "@better-auth/mcp";
 import { and, eq } from "drizzle-orm";
@@ -110,14 +111,13 @@ function buildServer(p: Principal) {
     }
     let r;
     try {
-      r = await authorize(m, { amount, merchant, purpose, category }, "mcp", { actor: p.clientName });
+      r = await authorize(m, { amount, merchant, purpose, category }, "mcp", { actor: p.clientName, background: (w) => after(w) });
     } catch (e) {
       if (key) await releaseIdempotent(m.id, key).catch(() => {});
       throw e;
     }
     const body: Record<string, unknown> = {
       decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
-      ownerNotified: r.notified ?? false,
       next: r.decision === "pending" ? "Tell the user their approval is needed, wait, then call request_purchase again with the same arguments." : undefined,
     };
     // Record the committed decision before anything else can fail.

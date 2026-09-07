@@ -36,6 +36,13 @@
       "when": 1788771989132,
       "tag": "0004_cards_and_balance",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788775278695,
+      "tag": "0005_release_prep",
+      "breakpoints": true
     }
   ]
 }

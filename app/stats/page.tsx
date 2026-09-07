@@ -1,6 +1,6 @@
 import { requireCtx } from "@/lib/session";
 import { statsRows } from "@/lib/stats";
-import { StatsView } from "./view";
+import { StatsClient } from "./client";
 
 export default async function StatsPage() {
   const ctx = await requireCtx();
@@ -14,7 +14,7 @@ export default async function StatsPage() {
           <p className="muted">Every decision in the last year, sliced by day, week, month or year. Approved amounts are what counts as spend; declines and escalations show where the terms bit.{truncated && " Showing the most recent 5,000 decisions."}</p>
         </div>
       </div>
-      <StatsView rows={rows} mandates={mandates} />
+      <StatsClient rows={rows} mandates={mandates} />
     </>
   );
 }

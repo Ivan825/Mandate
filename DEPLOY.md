@@ -17,9 +17,19 @@ All four are **required** whenever `NODE_ENV=production` (which is what `next st
 
 1. **Neon**: create a project, copy the pooled connection string as `DATABASE_URL`.
 2. **Vercel**: import the GitHub repo. Framework preset Next.js; no build overrides.
-3. **Environment variables** (Production): `DATABASE_URL`, `BETTER_AUTH_SECRET`, `APP_URL` (`https://<app>.vercel.app`, later your domain), `NOTIFY_SECRET`, `MANDATE_ENCRYPTION_KEY`, `RECEIPT_SIGNING_KEY`, `LEGAL_OPERATOR_NAME`, `LEGAL_CONTACT_EMAIL`.
+3. **Environment variables** (Production): `DATABASE_URL`, `BETTER_AUTH_SECRET`, `APP_URL` (your final https domain), `NOTIFY_SECRET`, `MANDATE_ENCRYPTION_KEY`, `RECEIPT_SIGNING_KEY`, `RESEND_API_KEY`, `EMAIL_FROM`, `LEGAL_OPERATOR_NAME`, `LEGAL_CONTACT_EMAIL`, `OPERATOR_EMAILS`, `CRON_SECRET`, and `SENTRY_DSN`. Production refuses to consider itself configured without email delivery (or Google) — outside users cannot read your logs.
 4. **Migrate** from your machine once: `DATABASE_URL=<neon> npm run db:migrate`. (Repeat after any change under `drizzle/`.)
 5. Deploy. Sign in with your email; until step 2 below, the link appears in Vercel's function logs.
+
+### Vercel checklist (things that bite once real people arrive)
+
+- **Set the final domain before inviting anyone.** Passkeys bind to the hostname in `APP_URL`; a passkey registered on `*.vercel.app` will not work on your custom domain. OAuth clients (agents) also register against that URL.
+- **Function timeouts.** The API proxy streams for up to 300 s (`maxDuration` in its route); on the Hobby plan enable Fluid Compute (Project → Settings → Functions) or the stream is cut at the plan's ceiling. Everything else finishes in a few seconds.
+- **Neon auto-suspend + cold starts vs Stripe's 2-second window.** For the card rail, keep Neon's compute from suspending (its "auto-suspend" setting, or the paid always-on tier) — a cold database plus a cold function can miss the authorisation deadline, and Stripe then applies your account's timeout rule (set it to *decline*).
+- **Turn off Vercel Deployment Protection / Attack Challenge for the API paths** (`/api/mcp`, `/api/proxy/*`, `/api/webhooks/stripe`, `/api/agent/*`, `/.well-known/*`): agents and Stripe cannot answer a browser challenge.
+- **Cron.** `vercel.json` schedules `/api/cron/cleanup` daily; set `CRON_SECRET` (Vercel sends it as the bearer automatically).
+- **Operators.** Set `OPERATOR_EMAILS` to your address(es): configuration warnings and the deployment table in Settings show only to you; everyone else sees a product.
+- **Google OAuth consent screen** must be published (*In production*, not *Testing*) or only listed test users can sign in and their tokens expire after seven days.
 
 ## 2. Sign-in providers
 

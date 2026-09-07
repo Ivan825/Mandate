@@ -1,6 +1,6 @@
 export default function TermsPage() {
   const operator = process.env.LEGAL_OPERATOR_NAME ?? "the operator of this Mandate deployment";
-  const contact = process.env.LEGAL_CONTACT_EMAIL ?? "the address shown on the sign-in page";
+  const contact = process.env.LEGAL_CONTACT_EMAIL ?? "the contact address in the page footer";
   return (
     <div className="legal">
       <div className="eyebrow">Legal</div>

@@ -10,11 +10,16 @@ import { signOutAction, switchWorkspaceAction } from "./actions";
 import { WorkspaceSwitcher } from "./switcher";
 import { ThemeToggle, type Theme } from "./theme";
 import { stripeEnabled } from "@/lib/stripe";
+import { isOperator } from "@/lib/env";
 import { cookies } from "next/headers";
 
+const description = "Give your AI agents a sanction, not a card: per-transaction, daily and lifetime limits, merchant scope, hours, and a human in the loop above a threshold — enforced on every purchase and written to a signed ledger.";
 export const metadata: Metadata = {
-  title: "Mandate",
-  description: "Scoped, revocable spending authority for AI agents.",
+  title: { default: "Mandate", template: "%s · Mandate" },
+  description,
+  metadataBase: (() => { try { return new URL(process.env.APP_URL ?? process.env.BETTER_AUTH_URL ?? "http://localhost:3000"); } catch { return undefined; } })(),
+  openGraph: { title: "Mandate — spending authority for AI agents", description, type: "website", siteName: "Mandate" },
+  twitter: { card: "summary", title: "Mandate — spending authority for AI agents", description },
 };
 
 export const dynamic = "force-dynamic";
@@ -66,9 +71,18 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </div>
         </div>
         <main className="main">
-          {problems.length > 0 && <div className="notice bad" style={{ marginBottom: 20 }}><strong>Configuration problem.</strong> {problems.join(" ")}</div>}
+          {problems.length > 0 && isOperator(ctx?.email) && <div className="notice bad" style={{ marginBottom: 20 }}><strong>Configuration problem (shown to operators only).</strong> {problems.join(" ")}</div>}
           {children}
         </main>
+        <footer className="sitefoot">
+          <div className="sitefoot-in">
+            <span>Mandate</span>
+            <Link href="/terms">Terms</Link>
+            <Link href="/privacy">Privacy</Link>
+            <Link href="/docs">Connect agents</Link>
+            {process.env.LEGAL_CONTACT_EMAIL && <a href={`mailto:${process.env.LEGAL_CONTACT_EMAIL}`}>Contact</a>}
+          </div>
+        </footer>
       </body>
     </html>
   );

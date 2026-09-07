@@ -5,12 +5,17 @@ import { exposureBook, recentTransactions, listAgents } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { Pill, Util, When } from "./components";
 import { appUrl } from "@/lib/env";
+import { listChannels } from "@/lib/notify";
+import { listConnectedAgents } from "@/lib/connections";
 
-export default async function ExposurePage({ searchParams }: { searchParams: Promise<{ joined?: string; left?: string; deleted?: string; error?: string }> }) {
+export default async function ExposurePage({ searchParams }: { searchParams: Promise<{ joined?: string; left?: string; deleted?: string; error?: string; goodbye?: string }> }) {
   const ctx = await getCtx();
-  if (!ctx) return <Landing base={appUrl()} />;
-  const { joined, left, deleted, error } = await searchParams;
-  const [book, recent, agents] = await Promise.all([exposureBook(ctx.workspaceId), recentTransactions(ctx.workspaceId, 12), listAgents(ctx.workspaceId)]);
+  const { joined, left, deleted, error, goodbye } = await searchParams;
+  if (!ctx) return <Landing base={appUrl()} goodbye={Boolean(goodbye)} />;
+  const [book, recent, agents, channels, connected] = await Promise.all([
+    exposureBook(ctx.workspaceId), recentTransactions(ctx.workspaceId, 12), listAgents(ctx.workspaceId),
+    listChannels(ctx.userId), listConnectedAgents(ctx.userId),
+  ]);
   const active = book.filter((b) => b.effectiveStatus === "active");
   const byCcy = new Map<string, { limit: number; used: number }>();
   for (const b of active) {
@@ -32,8 +37,8 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
         <ol className="steps">
           <li className={agents.length ? "done" : ""}><strong>Add an agent</strong> — anything that acts for you: a shopping agent, Claude Code, a research assistant. {canIssue && agents.length === 0 && <Link href="/agents/new">Add one</Link>}</li>
           <li><strong>Issue it a mandate</strong> — limits, merchants, hours, and the amount above which it must ask you. {canIssue && agents.length > 0 && <Link href="/mandates/new">Issue one</Link>}</li>
-          <li><strong>Tell Mandate how to reach you</strong> — an email address or a webhook, so approvals reach you wherever you already look. <Link href="/settings">Settings</Link></li>
-          <li><strong>Connect the agent</strong> — one click from Claude, ChatGPT or Cursor, or a token for your own code. <Link href="/docs">Connect agents</Link></li>
+          <li className={channels.length ? "done" : ""}><strong>Tell Mandate how to reach you</strong> — an email address or a webhook, so approvals reach you wherever you already look. {channels.length === 0 && <Link href="/settings">Settings</Link>}</li>
+          <li className={connected.length ? "done" : ""}><strong>Connect the agent</strong> — one click from Claude, ChatGPT or Cursor, or a token for your own code. {connected.length === 0 && <Link href="/docs">Connect agents</Link>}</li>
         </ol>
         {!canIssue && <p className="faint">You're a {ctx.role} here; an owner or admin issues the mandates.</p>}
       </div>

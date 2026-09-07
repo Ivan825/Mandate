@@ -6,7 +6,7 @@ import { getSessionCookie } from "better-auth/cookies";
 // Agent-facing routes authenticate themselves (mandate token, OAuth bearer,
 // Stripe signature, signed one-tap link) and are never behind the cookie.
 
-const OPEN = ["/sign-in", "/consent", "/a/", "/api/auth", "/api/agent", "/api/mcp", "/api/proxy", "/api/receipts", "/api/webhooks", "/oauth2", "/.well-known", "/terms", "/privacy", "/invite/"];
+const OPEN = ["/sign-in", "/consent", "/a/", "/api/auth", "/api/agent", "/api/mcp", "/api/proxy", "/api/receipts", "/api/webhooks", "/api/cron", "/oauth2", "/.well-known", "/terms", "/privacy", "/invite/"];
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;

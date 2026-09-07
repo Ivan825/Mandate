@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { getMandateByToken, authorize, factsFor, reserveIdempotent, completeIdempotent, releaseIdempotent, MAX_AMOUNT } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { rateLimit, clientIp } from "@/lib/ratelimit";
@@ -20,6 +20,8 @@ function str(v: unknown, max: number): string | null {
   if (typeof v !== "string") return null;
   return v.trim().slice(0, max);
 }
+
+export const maxDuration = 30;
 
 export async function POST(req: NextRequest) {
   const log = logger(req, "agent_api");
@@ -55,7 +57,9 @@ export async function POST(req: NextRequest) {
 
   let r;
   try {
-    r = await authorize(m, { amount, merchant, category, purpose }, "agent_api", { actor: `token ${m.tokenPrefix}…` });
+    // Notifications go out after the response: the agent gets its answer
+    // in milliseconds even when an email provider is slow.
+    r = await authorize(m, { amount, merchant, category, purpose }, "agent_api", { actor: `token ${m.tokenPrefix}…`, background: (w) => after(w) });
   } catch (e) {
     if (idem) await releaseIdempotent(m.id, idem).catch(() => {});
     log.error("authorize.failed", { message: (e as Error).message });
@@ -64,8 +68,7 @@ export async function POST(req: NextRequest) {
   const status = r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200;
   const responseBody: Record<string, unknown> = {
     decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
-    notified: r.notified ?? false,
-    next: r.decision === "pending" ? "Wait for the owner to approve, then retry the same request with the same Idempotency-Key." : undefined,
+    next: r.decision === "pending" ? "The owner is being notified. Wait for approval, then retry the same request with the same Idempotency-Key." : undefined,
   };
   // The decision is committed: record the terminal answer before anything
   // else can fail, so a retry can only ever replay it. "pending" is not an
