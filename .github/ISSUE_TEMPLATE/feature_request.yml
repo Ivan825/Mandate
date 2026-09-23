@@ -1,0 +1,20 @@
+name: Feature request
+description: Something that would make an agent safer to trust with money, or the person's job easier
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you can't, or that's harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: How you imagine it working. Rough is fine.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried

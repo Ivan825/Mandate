@@ -1,6 +1,6 @@
 {
   "name": "mandate",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -12,7 +12,8 @@
     "auth:generate": "AUTH_GEN=1 npx @better-auth/cli@latest generate --config lib/auth.ts --output lib/auth-schema.ts --adapter drizzle --dialect postgresql -y",
     "test:integration": "tsx --test tests/service.test.ts",
     "test:e2e": "node tests/e2e.mjs",
-    "preflight": "node scripts/preflight.mjs"
+    "preflight": "node scripts/preflight.mjs",
+    "screenshots": "node scripts/screenshots.mjs"
   },
   "dependencies": {
     "@better-auth/cimd": "^1.7.5",
@@ -48,5 +49,24 @@
   "engines": {
     "node": ">=22"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "description": "Scoped, revocable spending authority for AI agents: limits, approvals, a signed ledger, and revocation \u2014 over MCP, an API-key proxy, REST tokens or virtual cards.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivan825/Mandate.git"
+  },
+  "homepage": "https://mandate-ashen.vercel.app",
+  "bugs": {
+    "url": "https://github.com/Ivan825/Mandate/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "mcp",
+    "oauth",
+    "spending-limits",
+    "payments",
+    "stripe-issuing",
+    "llm-proxy",
+    "nextjs"
+  ]
 }

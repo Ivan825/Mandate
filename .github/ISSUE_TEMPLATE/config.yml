@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Ivan825/Mandate/blob/main/SECURITY.md
+    about: Please report privately by email, not as an issue.
+  - name: Connecting an agent
+    url: https://mandate-ashen.vercel.app/docs
+    about: Copy-paste snippets for Claude, the OpenAI SDK and your own code.

@@ -1,0 +1,34 @@
+name: Bug report
+description: Something didn't behave the way the terms or the docs say it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: rail
+    attributes:
+      label: Which path
+      options: [Web app, MCP (Claude / other client), API-key proxy, REST token, Virtual card, Email / webhook notifications, Self-hosting / deployment, Other]
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: Hosted beta or self-hosted? If self-hosted, which platform and commit.
+      placeholder: hosted beta / Vercel+Neon at commit abc1234
+  - type: input
+    id: reqid
+    attributes:
+      label: Request id or ledger row
+      description: From the `x-request-id` response header, the Ledger page, or the mandate's Decisions table. Helps a lot.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, exact error text
+      render: shell

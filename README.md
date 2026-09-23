@@ -1,96 +1,143 @@
-# Mandate
+<p align="center">
+  <img src="docs/images/exposure.png" alt="Mandate — the exposure book: what your agents may spend, and what they have" width="100%">
+</p>
 
-Scoped, revocable spending authority for AI agents.
+<h1 align="center">Mandate</h1>
 
-An agent never holds your card, your API key or your account. It holds a **mandate**: a limit per transaction, per day and in total; the merchants it may pay; the hours it may act; and the amount above which it must ask you first. Every attempt is decided against those terms, every decision is written to a signed, hash-chained ledger, and revoking a mandate cuts the agent off instantly.
+<p align="center"><strong>Scoped, revocable spending authority for AI agents.</strong><br>
+Give an agent a limit instead of a card. Every request is decided against the terms you set, every decision is written to a signed ledger, and revoking cuts the agent off instantly.</p>
 
-Think of it as a sanction letter for an agent, with the loan-book view to match.
+<p align="center">
+  <a href="https://github.com/Ivan825/Mandate/actions/workflows/ci.yml"><img src="https://github.com/Ivan825/Mandate/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licence"></a>
+  <a href="https://mandate-ashen.vercel.app"><img src="https://img.shields.io/badge/beta-live-e8873a" alt="Beta live"></a>
+  <img src="https://img.shields.io/badge/MCP-OAuth%202.1-4c7ef3" alt="MCP with OAuth 2.1">
+  <img src="https://img.shields.io/badge/node-%E2%89%A522-339933" alt="Node 22+">
+</p>
+
+<p align="center">
+  <a href="https://mandate-ashen.vercel.app">Hosted beta</a> ·
+  <a href="#connect-an-agent">Connect an agent</a> ·
+  <a href="#run-it-locally">Run locally</a> ·
+  <a href="#deploy-your-own">Deploy your own</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+---
+
+## The problem
+
+Agents are starting to buy things: API credits, SaaS seats, groceries, ads. Today the only way to let one do that is to hand it your card or your API key — and then it holds *all* of your money, with no limits, no log, and no way to take it back short of cancelling the card.
+
+Mandate replaces the card with a **mandate**: how much per transaction, per day and in total; which merchants; which hours; and the amount above which the agent must ask you first. The agent gets a token that only works inside those terms. You get an approval inbox, a hash-chained ledger with signed receipts, and a revoke button.
 
 ## How agents connect
 
-1. **One click, no secrets (MCP + OAuth 2.1).** Mandate is a remote MCP server and its own OAuth authorisation server. In Claude, ChatGPT, Cursor or any MCP client, add `https://your-mandate/api/mcp`; the agent sends the person to sign in and approve, and receives a scoped token. Tools: `list_mandates`, `check_mandate`, `request_purchase`. Scopes: `mandate:read`, `mandate:spend`. Client-ID metadata documents (CIMD) and RFC 7591 dynamic registration are both supported.
-2. **API-key proxy (binding).** Store your OpenAI / Anthropic / Gemini keys encrypted; hand each agent a proxy key bound to a mandate; point the SDK's base URL at Mandate. Each call is priced from the request, pre-authorised, forwarded with the real key, and settled on reported usage, streaming included.
-3. **Your own code (REST + mandate token).** `POST /api/agent/authorize` with a `Bearer mnd_…` token shown once at issue. `200` approved, `403` declined with the rule, `202` pending. Send `Idempotency-Key` on every attempt.
-4. **Local stdio MCP** (`mcp/server.mjs`) wrapping the REST API for a single machine.
-5. **Virtual cards (Stripe Issuing).** A card bound to a mandate, paid from a prepaid workspace balance (Stripe Checkout top-ups). Every card authorisation is decided in real time by the same policy engine plus a balance check; captures, reversals and refunds are reconciled; card details are shown through Stripe's Issuing Elements; freeze and cancel from the mandate page.
+| Rail | What the agent holds | Enforced by |
+|---|---|---|
+| **MCP + OAuth 2.1** — Claude, ChatGPT, Cursor, any MCP client | A scoped OAuth token from a one-click consent | Mandate, on every tool call |
+| **API-key proxy** — OpenAI / Anthropic / Gemini | A proxy key bound to a mandate; the real key never leaves Mandate | Mandate prices, pre-authorises and settles each call |
+| **REST** — your own code | A `mnd_…` token shown once at issue | Mandate decides; the agent reports merchant and amount |
+| **Virtual cards** — Stripe Issuing (operator opt-in) | A card bound to a mandate, funded from a prepaid balance | Every authorisation decided in real time by the same engine |
 
-## Product surface
+## Connect an agent
 
-- **Front door**: public landing page, terms and privacy, a four-step onboarding on first sign-in; light and dark themes (follows the system, or pick one in the top bar — the wordmark turns orange in the dark).
-- **Sign-in**: Google, passwordless email link, passkeys. No passwords.
-- **Workspaces, members, roles**: every person gets a personal workspace; create more for a household or a team; invite by email as admin, approver or viewer; switch between workspaces from the top bar. Approvers decide requests but cannot issue mandates.
-- **Exposure book**: sanctioned vs utilised per mandate, pending approvals, recent decisions with the actor (connected agent, token, proxy key, card).
-- **Approval inbox**: every approver is notified through their own channels (email, or a webhook for n8n / Zapier / Make / your own service) with signed one-tap approve/deny links that confirm before deciding; unanswered requests expire after 24 h; allowances last 24 h; a denial blocks the same ask for 6 h.
-- **API-key proxy**: see above; the `/proxy` page manages provider keys, proxy keys and shows every call with estimate vs settled cost.
-- **Ledger and receipts**: append-only SHA-256 chain per workspace, verified incrementally; exports carry an Ed25519 signature over the chain head; a public verifier (`/api/receipts/verify`) and key (`/.well-known/mandate-receipt-key`) let anyone check a receipt; a printable receipt page per mandate.
-- **Stats**: day / week / month / year spend, stacked by agent or merchant, by-agent and by-merchant shares, decisions per period with the rules that declined, a weekday × hour heat map, and a written reading of the numbers (trend, concentration, run-rate against sanctioned limits, idle mandates). Plain SVG, hover for exact figures, a table view for every chart.
-- **Early warnings**: 80% of daily or total sanction, and unusual velocity, alert the approvers once per window.
-- **Settings**: your channels, connected OAuth agents (disconnect = tokens revoked), passkeys, cardholder details for virtual cards, deployment capability status.
-- **Hardening**: agents bound to the workspace they were consented into, with the member's live role re-checked on every call; idempotency keys reserved before deciding (concurrent retries collapse, *pending* is never replayed); Postgres-backed rate limits per token, key, address and auth endpoint; proxy endpoint allow-list and header allow-lists, with automatic key suspension on settlement overruns; webhook targets restricted to the public internet; receipts verified against the server key only; structured JSON logs with request ids; fail-closed card authorisations that answer Stripe before notifying anyone; provider keys encrypted with a key held outside the database; production refuses to start without its secrets.
+**Claude Desktop** → Settings → Connectors → Add custom connector:
+
+```
+https://mandate-ashen.vercel.app/api/mcp
+```
+
+Approve on the consent page, then ask Claude to *"list my mandates"* or *"request a $5 purchase at OpenAI"*. Claude Code: `claude mcp add --transport http mandate https://mandate-ashen.vercel.app/api/mcp`.
+
+**Any OpenAI-compatible SDK**, metered through a mandate:
+
+```bash
+OPENAI_BASE_URL=https://mandate-ashen.vercel.app/api/proxy/openai \
+OPENAI_API_KEY=mpx_…   # a proxy key from the API proxy page
+```
+
+**Your own agent**, one HTTP call per purchase:
+
+```bash
+curl -X POST https://mandate-ashen.vercel.app/api/agent/authorize \
+  -H "authorization: Bearer mnd_…" -H "content-type: application/json" \
+  -H "idempotency-key: order-1234" \
+  -d '{"amount":1299,"merchant":"OpenAI","purpose":"API credits"}'
+# 200 approved · 403 declined (with the rule) · 202 pending your approval — retry after you approve
+```
+
+<p align="center">
+  <img src="docs/images/mandate.png" alt="A mandate: terms, utilisation, escalation, and a simulator to try it as the agent" width="49%">
+  <img src="docs/images/approvals.png" alt="The approval inbox with one-tap approve and deny" width="49%">
+</p>
+
+## What you get
+
+- **Terms, not trust.** Per-transaction, daily and lifetime limits; merchant allow-list; blocked categories; active hours in the agent's timezone; expiry; an "ask me above" threshold.
+- **Approvals that agents can wait for.** Requests above the threshold park as *pending*; you approve once from email, a webhook (n8n, Zapier, Make, your own endpoint) or the inbox; the agent retries with the same idempotency key and goes through exactly once.
+- **A ledger you can hand to someone.** Append-only SHA-256 chain per workspace, Ed25519-signed exports, and a public verifier — anyone can check a receipt without an account.
+- **Metered LLM spend.** Store provider keys encrypted, hand out proxy keys, and see estimate vs settled cost per call, streaming included.
+- **Workspaces and roles.** Personal and shared workspaces; owners, admins, approvers, viewers; invitations by email.
+- **Stats.** Spend by day/week/month/year, by agent or merchant, decline reasons, a weekday×hour heat map and a written reading of the trend.
+- **Sign-in without passwords.** Google, email links, passkeys. Light and dark themes.
 
 ## Run it locally
 
-Requires Node 22+ (CI and the Docker image use 24) and Postgres 16 (or `docker compose up` for both).
+Node 22+ and Postgres 16 (or `docker compose up` for both).
 
 ```bash
-cp .env.example .env            # set DATABASE_URL, BETTER_AUTH_SECRET, APP_URL
+git clone https://github.com/Ivan825/Mandate.git && cd Mandate
+cp .env.example .env          # DATABASE_URL, BETTER_AUTH_SECRET, APP_URL
 npm install
-npm run db:migrate              # applies ./drizzle migrations
-npm run dev                     # http://localhost:3000
+npm run db:migrate
+npm run dev                   # http://localhost:3000
 ```
 
-Sign in with any email: without `RESEND_API_KEY` or `SMTP_URL`, the sign-in link is printed to the server console. Then `POST /api/dev/seed` (from the browser console while signed in: `fetch('/api/dev/seed',{method:'POST'})`; dev only) fills your workspace with two agents, two mandates and a few decisions.
+Sign in with any email — without an email provider configured, the sign-in link is printed to the terminal. Then seed a demo workspace from the browser console: `fetch('/api/dev/seed', {method:'POST'})`.
 
 ```bash
-npm test                            # policy-engine unit tests (pure)
-npm run test:integration            # service layer against Postgres
-npm run build && npm run test:e2e   # real browser + real HTTP through every flow (needs Playwright's Chromium)
-npx tsc --noEmit
+npm test                      # policy engine, pure
+npm run test:integration      # service layer against Postgres
+npm run build && npm run test:e2e   # real browser through every flow
 ```
 
-See `LAUNCH.md` for the step-by-step path to a public beta (accounts, secrets, Vercel + Neon + Resend, Google, monitoring, the pre-launch walkthrough) `deploy/aws/README.md` for a single-server AWS deployment with HTTPS, backups and cron, and `DEPLOY.md` for the reference on each piece, Stripe Issuing and Docker.
+## Deploy your own
 
-## What the test suite proves (all on Postgres 16, run in CI)
+The supported path is **Vercel + Neon** — both free tiers, about an hour, no domain required. [`LAUNCH.md`](LAUNCH.md) is the runbook: secrets, database, email, Google sign-in, monitoring, and a pre-launch walkthrough.
 
-- **Unit (13)**: policy rule order, exact merchant matching, allowance binding and expiry, overnight hours, timezone-correct expiry, cooling-off, cap on open approvals, term validation; proxy endpoint allow-list, estimates for attachments / hidden history / `n` / snake_case configs, Gemini thinking tokens, private-address detection for webhooks.
-- **Integration (13)**: hashed token lookup and revocation; ten concurrent requests never exceed a daily limit; pending → approve → allowance consumed exactly once under parallel retries; denial cooling-off; cards spend a prepaid balance (declined dry, API rail unaffected, idempotent top-up, hold, partial capture, refund, six concurrent authorisations never overspend); incremental and full chain verification with a valid signature, and rejection of a tampered head, a foreign workspace and a receipt carrying its own key; grouped exposure sums; rate-limit windows; encryption round-trip; proxy estimates and usage parsing for all three providers; twenty concurrent idempotency reservations yield one winner, pending releases, terminal answers replay; MCP grants bind and unbind with consent; partial card captures accumulate and uncaptured holds release.
-- **End to end (38)**: landing; email-link sign-in; onboarding; seed decisions; inbox approval then agent retry by allowance; pending never replayed and approved replayed exactly under one `Idempotency-Key`; oversized amounts rejected; invitation → second browser accepts as approver → approver cannot issue and is turned away from `/mandates/new` with a reason → private webhook target refused; provider key stored → proxy key revealed once → metered call, streamed call, non-generation and traversal paths refused, unknown-key rejection; OAuth dynamic registration → consent (bound to the workspace) → PKCE token with scopes → MCP tools listed → purchase approved; cards via signed Stripe webhooks: declined with no balance, unsigned events rejected, Checkout top-up credited once, approved then declined at the balance, re-sent request answered identically, Stripe-side decline voids the hold, partial capture releases the rest, card reveal, balance and stats pages render (stats switches grain and shows a tooltip); signed receipt export; public verifier accepts it and rejects a tampered copy; OAuth discovery at the site root.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FIvan825%2FMandate&project-name=mandate&env=DATABASE_URL,BETTER_AUTH_SECRET,NOTIFY_SECRET,MANDATE_ENCRYPTION_KEY,RECEIPT_SIGNING_KEY,APP_URL,SMTP_URL,EMAIL_FROM,LEGAL_OPERATOR_NAME,LEGAL_CONTACT_EMAIL,OPERATOR_EMAILS,CRON_SECRET&envDescription=Generate%20the%20secrets%20with%20openssl%20rand%20-base64%2032%3B%20LAUNCH.md%20explains%20each%20one.&envLink=https%3A%2F%2Fgithub.com%2FIvan825%2FMandate%2Fblob%2Fmain%2FLAUNCH.md)
 
-## Still open
+Also included: a single-server AWS deployment with automatic HTTPS and backups ([`deploy/aws`](deploy/aws/README.md)), ECS Fargate + RDS as a CloudFormation stack ([`deploy/ecs`](deploy/ecs/README.md)), and a Dockerfile.
 
-- **Billing** (deliberately deferred): plans, limits and a billing page.
-- **Stripe Issuing live**: the code is complete and exercised end to end with signed webhook events; going live needs the operator's Stripe account in the US, UK or EEA and Issuing approval (DEPLOY.md §5). Balance refunds are manual.
-- **Proxy in non-USD mandates**: the price table is in USD; issue a USD mandate for proxy keys.
-- **Magic-link sign-in mid-OAuth**: Google and passkey sign-ins resume an agent's connection automatically; after an email link the person clicks "connect" in the agent once more.
-- **Notification channels are per person**, not per workspace; a workspace-level shared webhook is a natural next step.
-- **Agents connected before this version** show as "not bound" in Settings; disconnect and connect them again once.
+## Security model, in short
 
-## Layout
+- Agents never hold a card, an account password or a provider key — only a token scoped to one mandate, or an OAuth grant bound to one workspace with the member's live role re-checked on every call.
+- Decisions are idempotent: concurrent retries collapse to one, *pending* is never replayed, terminal answers are.
+- Postgres-backed rate limits per token, key, address and auth endpoint. Webhook targets must be on the public internet. Provider keys are encrypted with a key held outside the database.
+- Production refuses to start without its secrets. Receipts verify against the server's own key only.
 
-```
-app/                      pages, server actions, API routes
-  api/auth/[...all]       Better Auth (sign-in, OAuth 2.1 server, passkeys)
-  api/mcp                 remote MCP server (requireMcpAuth)
-  api/proxy/[provider]    API-key proxy for OpenAI / Anthropic / Gemini
-  api/agent/              token-based REST for your own agents
-  api/webhooks/stripe     real-time card authorisation + reconciliation
-  api/ledger/, api/receipts/   export, verify
-  .well-known/            OAuth discovery and the receipt public key
-  sign-in, consent, invite, members, workspaces, proxy, settings, docs, a/[id] (one-tap), terms, privacy
-lib/auth.ts               Better Auth config (Google, magic link, passkey, orgs+roles, jwt, mcp, cimd)
-lib/roles.ts              access control: owner, admin, approver, viewer
-lib/schema.ts             Mandate tables (workspace-scoped, incl. mcp_grants); lib/auth-schema.ts generated auth tables (+ rate_limit)
-lib/policy.ts             the decision engine (pure)
-lib/service.ts            mandates, authorisation, approvals, exposure, reconciliation
-lib/proxy.ts, pricing.ts  API-key proxy: keys, estimates, settlement; per-model prices
-lib/ledger.ts, receipts.ts   per-workspace hash chain; Ed25519-signed receipts
-lib/notify.ts, warnings.ts   email/webhook delivery, one-tap links; utilisation and velocity alerts
-lib/ratelimit.ts, log.ts  Postgres rate limits; structured logs
-drizzle/                  committed SQL migrations
-tests/                    unit, integration, e2e
-mcp/server.mjs            zero-dependency stdio MCP server
-```
+Found something? See [`SECURITY.md`](SECURITY.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [`LAUNCH.md`](LAUNCH.md) | From this repo to a public beta on free tiers |
+| [`DEPLOY.md`](DEPLOY.md) | Every environment variable, Stripe Issuing, Docker |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Code layout, the decision engine, the ledger, hardening details |
+| [`docs/TESTING.md`](docs/TESTING.md) | What the unit, integration and end-to-end suites prove |
+| `/docs` on a running instance | Connection guide for agents, with copy-paste snippets |
+
+## Status
+
+Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens, approvals, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
+
+## Contributing
+
+Issues and pull requests are welcome — [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup, the test commands and what a good PR looks like. Be kind: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ## Licence
 
-MIT — see `LICENSE`. The hosted service at the operator's domain runs this same code; self-host it, fork it, or build on it.
+[MIT](LICENSE). Self-host it, fork it, build on it.
