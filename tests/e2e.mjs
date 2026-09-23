@@ -223,6 +223,10 @@ try {
   // 7. discovery
   const prm = await fetch(BASE + "/.well-known/oauth-protected-resource/api/mcp").then((r) => r.json());
   check("oauth discovery at root", prm.resource === BASE + "/api/mcp");
+  const asm = await fetch(BASE + "/.well-known/oauth-authorization-server/api/auth").then((r) => r.json());
+  check("authorization server metadata (issuer path)", asm.issuer === BASE + "/api/auth" && typeof asm.token_endpoint === "string");
+  const asmRoot = await fetch(BASE + "/.well-known/oauth-authorization-server").then((r) => r.json());
+  check("authorization server metadata (bare root alias)", asmRoot.issuer === asm.issuer && asmRoot.token_endpoint === asm.token_endpoint);
 
   await b.close();
 } catch (e) {
