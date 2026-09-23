@@ -43,6 +43,13 @@
       "when": 1788775278695,
       "tag": "0005_release_prep",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790186483793,
+      "tag": "0006_better_auth_1_7_5",
+      "breakpoints": true
     }
   ]
 }

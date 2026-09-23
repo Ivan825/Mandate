@@ -48,7 +48,9 @@ export const account = pgTable(
   "account",
   {
     id: text("id").primaryKey(),
-    issuer: text("issuer").notNull(),
+    // Better Auth 1.7.3+ no longer writes this (see the 1.7 upgrade guide);
+    // kept nullable so existing rows survive. Safe to drop in a later cleanup.
+    issuer: text("issuer"),
     accountId: text("account_id").notNull(),
     providerId: text("provider_id").notNull(),
     userId: text("user_id")
@@ -67,8 +69,8 @@ export const account = pgTable(
       .notNull(),
   },
   (table) => [
-    uniqueIndex("account_issuer_accountId_uidx").on(
-      table.issuer,
+    index("account_providerId_accountId_idx").on(
+      table.providerId,
       table.accountId,
     ),
     index("account_userId_idx").on(table.userId),

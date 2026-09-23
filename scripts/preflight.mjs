@@ -28,7 +28,7 @@ if (env("DATABASE_URL")) {
     const v = await pool.query("select version()");
     ok("database reachable", true, v.rows[0].version.split(" ").slice(0, 2).join(" "));
     const m = await pool.query("select count(*)::int as n from drizzle.__drizzle_migrations").catch(() => null);
-    ok("migrations applied", Boolean(m && m.rows[0].n >= 6), m ? `${m.rows[0].n} applied` : "run: npm run db:migrate");
+    ok("migrations applied", Boolean(m && m.rows[0].n >= 7), m ? `${m.rows[0].n} applied` : "run: npm run db:migrate");
     const t = await pool.query("select to_regclass('public.mcp_grants') as a, to_regclass('public.topups') as b, to_regclass('public.rate_limit') as c");
     ok("schema current (mcp_grants, topups, rate_limit)", Boolean(t.rows[0].a && t.rows[0].b && t.rows[0].c));
   } catch (e) { ok("database reachable", false, e.message); }

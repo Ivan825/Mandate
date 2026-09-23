@@ -15,12 +15,12 @@
     "preflight": "node scripts/preflight.mjs"
   },
   "dependencies": {
-    "@better-auth/cimd": "1.7",
-    "@better-auth/drizzle-adapter": "1.7",
-    "@better-auth/mcp": "1.7",
-    "@better-auth/passkey": "1.7",
+    "@better-auth/cimd": "^1.7.5",
+    "@better-auth/drizzle-adapter": "^1.7.5",
+    "@better-auth/mcp": "^1.7.5",
+    "@better-auth/passkey": "^1.7.5",
     "@modelcontextprotocol/server": "^2.0.0",
-    "better-auth": "1.7",
+    "better-auth": "^1.7.5",
     "drizzle-orm": "^0.45.2",
     "next": "^15.5.25",
     "nodemailer": "^10.0.10",
