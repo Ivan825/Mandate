@@ -29,8 +29,8 @@ export function configProblems(): string[] {
   if (appUrl().startsWith("http://") && !/localhost|127\.0\.0\.1/.test(appUrl())) out.push("APP_URL is http://; cookies and passkeys need https in production.");
   // Outside users cannot read the server console: production must be able
   // to deliver a sign-in link (or offer Google) and must send from a real address.
-  if (!process.env.RESEND_API_KEY && !process.env.GOOGLE_CLIENT_ID) out.push("Neither RESEND_API_KEY nor Google sign-in is set; nobody outside can sign in.");
-  if (process.env.RESEND_API_KEY && (!process.env.EMAIL_FROM || /mandate\.local|example\./.test(process.env.EMAIL_FROM))) out.push("EMAIL_FROM must be a verified sender on your domain.");
+  if (!process.env.RESEND_API_KEY && !process.env.SMTP_URL && !process.env.GOOGLE_CLIENT_ID) out.push("No email delivery (RESEND_API_KEY or SMTP_URL) and no Google sign-in; nobody outside can sign in.");
+  if (process.env.RESEND_API_KEY && (!process.env.EMAIL_FROM || /mandate\.local|example\./.test(process.env.EMAIL_FROM))) out.push("EMAIL_FROM must be a verified sender on your Resend domain.");
   if (!process.env.LEGAL_CONTACT_EMAIL) out.push("LEGAL_CONTACT_EMAIL is not set; Terms and Privacy need a contact address.");
   return out;
 }

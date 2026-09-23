@@ -61,7 +61,15 @@ The card rail is the one part that needs something other than an account signup,
 
 **Rehearsal in test mode.** With test keys, tick "Send through Stripe test authorisation" on a mandate page: Stripe fires a real `issuing_authorization.request` at your webhook and the decision comes back through the same code path. The e2e suite also drives the webhook with locally signed events (no Stripe calls).
 
-## 6. Self-hosted: Docker Compose
+## 6b. AWS ECS Fargate + RDS
+
+`deploy/ecs/README.md` — task definition with secrets from Secrets Manager, ECR push script, ALB with 600 s idle timeout for streaming, RDS certificate bundle baked into the image (`DATABASE_SSL_CA`).
+
+## 6a. AWS / any VPS with HTTPS, backups and cron
+
+`deploy/aws/README.md` — one instance, `docker compose` with the production overlay (`deploy/aws/docker-compose.prod.yml`): Caddy for certificates, nightly `pg_dump`, daily cleanup call, app not exposed except through Caddy.
+
+## 6. Self-hosted: Docker Compose (local / behind your own proxy)
 
 ```bash
 cp .env.example .env     # fill in the four secrets from step 0, POSTGRES_PASSWORD and APP_URL

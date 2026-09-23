@@ -5,3 +5,4 @@ data/
 Claude outputs/
 tsconfig.tsbuildinfo
 next-env.d.ts
+deploy/ecs/params.env

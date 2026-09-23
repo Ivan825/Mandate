@@ -39,7 +39,7 @@ npm run db:migrate              # applies ./drizzle migrations
 npm run dev                     # http://localhost:3000
 ```
 
-Sign in with any email: without `RESEND_API_KEY`, the sign-in link is printed to the server console. Then `POST /api/dev/seed` (from the browser console while signed in: `fetch('/api/dev/seed',{method:'POST'})`; dev only) fills your workspace with two agents, two mandates and a few decisions.
+Sign in with any email: without `RESEND_API_KEY` or `SMTP_URL`, the sign-in link is printed to the server console. Then `POST /api/dev/seed` (from the browser console while signed in: `fetch('/api/dev/seed',{method:'POST'})`; dev only) fills your workspace with two agents, two mandates and a few decisions.
 
 ```bash
 npm test                            # policy-engine unit tests (pure)
@@ -48,7 +48,7 @@ npm run build && npm run test:e2e   # real browser + real HTTP through every flo
 npx tsc --noEmit
 ```
 
-See `LAUNCH.md` for the step-by-step path to a public beta (accounts, secrets, Vercel + Neon + Resend, Google, monitoring, the pre-launch walkthrough) and `DEPLOY.md` for the reference on each piece, Stripe Issuing and Docker.
+See `LAUNCH.md` for the step-by-step path to a public beta (accounts, secrets, Vercel + Neon + Resend, Google, monitoring, the pre-launch walkthrough) `deploy/aws/README.md` for a single-server AWS deployment with HTTPS, backups and cron, and `DEPLOY.md` for the reference on each piece, Stripe Issuing and Docker.
 
 ## What the test suite proves (all on Postgres 16, run in CI)
 

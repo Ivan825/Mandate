@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { emailEnabled } from "@/lib/mailer";
 import { getCtx } from "@/lib/session";
 import { SignInForm } from "./form";
 
@@ -10,7 +11,7 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
   const next = rawNext && /^\/(?![\/\\])/.test(rawNext) ? rawNext : "/";
   if (ctx) redirect(next);
   const google = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
-  const emailDelivery = process.env.RESEND_API_KEY ? "email" : "console";
+  const emailDelivery = emailEnabled() ? "email" : "console";
   return (
     <div style={{ maxWidth: 420, margin: "56px auto" }}>
       <div className="eyebrow">Mandate</div>

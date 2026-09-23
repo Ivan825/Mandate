@@ -1,0 +1,14 @@
+# Automatic HTTPS for the domain in DOMAIN. Caddy fetches and renews the
+# certificate itself; nothing else to configure.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3000 {
+		# The app reads the client address from these (TRUST_PROXY=true).
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		# Streaming responses (API proxy) must not be buffered.
+		flush_interval -1
+	}
+	# Long-lived streams through the API proxy.
+	request_body { max_size 16MB }
+}

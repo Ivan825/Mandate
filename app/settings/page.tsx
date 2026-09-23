@@ -1,3 +1,4 @@
+import { emailEnabled } from "@/lib/mailer";
 import { requireCtx } from "@/lib/session";
 import { deploymentChannels, notifySecret, baseUrl, listChannels } from "@/lib/notify";
 import { stripeEnabled } from "@/lib/stripe";
@@ -22,11 +23,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     listConnectedAgents(ctx.userId), listChannels(ctx.userId), getCardholderProfile(ctx.workspaceId),
     auth.api.listSessions({ headers: h }).catch(() => []), auth.api.getSession({ headers: h }), soleOwnedWorkspaces(ctx.userId),
   ]);
-  const emailOn = Boolean(process.env.RESEND_API_KEY);
+  const emailOn = emailEnabled();
   const operator = isOperator(ctx.email);
   const rows: [string, boolean, string][] = [
     ["Google sign-in", Boolean(process.env.GOOGLE_CLIENT_ID), "GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET"],
-    ["Email delivery (sign-in links, alerts, invitations)", emailOn, "RESEND_API_KEY + EMAIL_FROM (else printed to the server console)"],
+    ["Email delivery (sign-in links, alerts, invitations)", emailOn, "RESEND_API_KEY or SMTP_URL (+ EMAIL_FROM)"],
     ["Deployment-wide fallback webhook", deploymentChannels().length > 0, "NOTIFY_WEBHOOK_URL (used only when no member has a channel)"],
     ["One-tap links signed", Boolean(notifySecret()), "NOTIFY_SECRET"],
     ["Stripe virtual cards + top-ups", stripeEnabled(), "STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET + STRIPE_PUBLISHABLE_KEY"],

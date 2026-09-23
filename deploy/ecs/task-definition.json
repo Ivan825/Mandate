@@ -1,0 +1,52 @@
+{
+  "family": "mandate",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/mandateTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/mandate:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 3000, "protocol": "tcp" }],
+      "environment": [
+        { "name": "NODE_ENV", "value": "production" },
+        { "name": "PORT", "value": "3000" },
+        { "name": "APP_URL", "value": "https://YOUR_HOSTNAME" },
+        { "name": "DATABASE_SSL_CA", "value": "/app/certs/rds.pem" },
+        { "name": "TRUST_PROXY", "value": "true" },
+        { "name": "LEGAL_OPERATOR_NAME", "value": "Your name" },
+        { "name": "LEGAL_CONTACT_EMAIL", "value": "you@example.com" },
+        { "name": "OPERATOR_EMAILS", "value": "you@example.com" },
+        { "name": "STRIPE_ISSUING_REGION", "value": "US" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/DATABASE_URL" },
+        { "name": "BETTER_AUTH_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/BETTER_AUTH_SECRET" },
+        { "name": "NOTIFY_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/NOTIFY_SECRET" },
+        { "name": "MANDATE_ENCRYPTION_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/MANDATE_ENCRYPTION_KEY" },
+        { "name": "RECEIPT_SIGNING_KEY", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/RECEIPT_SIGNING_KEY" },
+        { "name": "CRON_SECRET", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/CRON_SECRET" },
+        { "name": "SMTP_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mandate/SMTP_URL" }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget -qO- http://localhost:3000/terms >/dev/null || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/mandate",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "app",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

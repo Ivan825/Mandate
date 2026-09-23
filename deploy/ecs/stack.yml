@@ -1,0 +1,318 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Mandate on ECS Fargate: load balancer with HTTPS, one Fargate service, RDS
+  Postgres 16, CloudWatch logs, and a daily cleanup call. Secrets come from
+  Secrets Manager (created by deploy/ecs/create-secrets.sh); the database
+  password and DATABASE_URL are generated here.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The default VPC is fine.
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Two or more public subnets of that VPC (default-VPC subnets are public).
+  VpcCidr:
+    Type: String
+    Default: 172.31.0.0/16
+    Description: CIDR of the VPC; the app trusts X-Forwarded-For from inside it (the load balancer).
+  Hostname:
+    Type: String
+    Description: e.g. mandate.example.com — APP_URL becomes https://<this>.
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for Hostname (same region).
+  ImageUri:
+    Type: String
+    Description: e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/mandate:latest
+  SecretsPrefix:
+    Type: String
+    Default: mandate
+    Description: Secrets Manager names are <prefix>/BETTER_AUTH_SECRET etc.
+  LegalOperatorName:
+    Type: String
+  LegalContactEmail:
+    Type: String
+  OperatorEmails:
+    Type: String
+    Description: Comma-separated; these accounts see configuration warnings.
+  DesiredCount:
+    Type: Number
+    Default: 1
+  Cpu:
+    Type: String
+    Default: "512"
+  Memory:
+    Type: String
+    Default: "1024"
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  StripeIssuingRegion:
+    Type: String
+    Default: US
+
+Resources:
+  # ---------- Database ----------
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretsPrefix}/db-master"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "mandate"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Mandate database subnets
+      SubnetIds: !Ref SubnetIds
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Mandate Postgres, reachable from the app only
+      VpcId: !Ref VpcId
+  DbIngressFromApp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+  Db:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: "16.10"
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      DBName: mandate
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      StorageEncrypted: true
+      AutoMinorVersionUpgrade: true
+  DbUrlSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretsPrefix}/DATABASE_URL"
+      SecretString: !Sub "postgres://mandate:{{resolve:secretsmanager:${DbSecret}:SecretString:password}}@${Db.Endpoint.Address}:5432/mandate?sslmode=require"
+
+  # ---------- Network edge ----------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Mandate load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Mandate app tasks, reachable from the load balancer only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3000, ToPort: 3000, SourceSecurityGroupId: !Ref AlbSecurityGroup }
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Ref SubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroup]
+      LoadBalancerAttributes:
+        # The API proxy streams LLM responses for minutes; keep connections open.
+        - { Key: idle_timeout.timeout_seconds, Value: "600" }
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 3000
+      TargetType: ip
+      HealthCheckPath: /api/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates: [{ CertificateArn: !Ref CertificateArn }]
+      DefaultActions: [{ Type: forward, TargetGroupArn: !Ref TargetGroup }]
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig: { Protocol: HTTPS, Port: "443", StatusCode: HTTP_301 }
+
+  # ---------- Compute ----------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/mandate
+      RetentionInDays: 30
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+      Policies:
+        - PolicyName: read-mandate-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/*"
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: mandate
+      ClusterSettings: [{ Name: containerInsights, Value: enabled }]
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: mandate
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings: [{ ContainerPort: 3000, Protocol: tcp }]
+          Environment:
+            - { Name: NODE_ENV, Value: production }
+            - { Name: PORT, Value: "3000" }
+            - { Name: APP_URL, Value: !Sub "https://${Hostname}" }
+            - { Name: DATABASE_SSL_CA, Value: /app/certs/rds.pem }
+            - { Name: TRUST_PROXY, Value: "true" }
+            - { Name: TRUSTED_PROXIES, Value: !Ref VpcCidr }
+            - { Name: LEGAL_OPERATOR_NAME, Value: !Ref LegalOperatorName }
+            - { Name: LEGAL_CONTACT_EMAIL, Value: !Ref LegalContactEmail }
+            - { Name: OPERATOR_EMAILS, Value: !Ref OperatorEmails }
+            - { Name: STRIPE_ISSUING_REGION, Value: !Ref StripeIssuingRegion }
+          Secrets:
+            - { Name: DATABASE_URL, ValueFrom: !Ref DbUrlSecret }
+            - { Name: BETTER_AUTH_SECRET, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/BETTER_AUTH_SECRET" }
+            - { Name: NOTIFY_SECRET, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/NOTIFY_SECRET" }
+            - { Name: MANDATE_ENCRYPTION_KEY, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/MANDATE_ENCRYPTION_KEY" }
+            - { Name: RECEIPT_SIGNING_KEY, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/RECEIPT_SIGNING_KEY" }
+            - { Name: CRON_SECRET, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/CRON_SECRET" }
+            - { Name: SMTP_URL, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/SMTP_URL" }
+            - { Name: EMAIL_FROM, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/EMAIL_FROM" }
+            - { Name: GOOGLE_CLIENT_ID, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/GOOGLE_CLIENT_ID" }
+            - { Name: GOOGLE_CLIENT_SECRET, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/GOOGLE_CLIENT_SECRET" }
+            - { Name: SENTRY_DSN, ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretsPrefix}/SENTRY_DSN" }
+          HealthCheck:
+            Command: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 90
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: [HttpsListener, HttpListener]
+    Properties:
+      ServiceName: app
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      HealthCheckGracePeriodSeconds: 120
+      EnableExecuteCommand: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref AppSecurityGroup]
+      LoadBalancers:
+        - { ContainerName: app, ContainerPort: 3000, TargetGroupArn: !Ref TargetGroup }
+
+  # ---------- Daily cleanup ----------
+  CleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{ Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]
+  CleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt CleanupRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          URL: !Sub "https://${Hostname}/api/cron/cleanup"
+          CRON_SECRET: !Sub "{{resolve:secretsmanager:${SecretsPrefix}/CRON_SECRET}}"
+      Code:
+        ZipFile: |
+          exports.handler = async () => {
+            const r = await fetch(process.env.URL, { headers: { authorization: "Bearer " + process.env.CRON_SECRET } });
+            const body = await r.text();
+            console.log(r.status, body);
+            if (!r.ok) throw new Error("cleanup failed: " + r.status);
+            return body;
+          };
+  CleanupSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(17 3 * * ? *)
+      Targets: [{ Arn: !GetAtt CleanupFunction.Arn, Id: cleanup }]
+  CleanupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CleanupFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CleanupSchedule.Arn
+
+Outputs:
+  LoadBalancerDns:
+    Description: Point your hostname's CNAME (or Route 53 alias) here.
+    Value: !GetAtt Alb.DNSName
+  DatabaseEndpoint:
+    Value: !GetAtt Db.Endpoint.Address
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name

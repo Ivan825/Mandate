@@ -6,12 +6,13 @@ import { db, schema } from "./db";
 import { fmt } from "./policy";
 import type { Approval, Mandate } from "./schema";
 import { appUrl, isProduction } from "./env";
+import { sendMail } from "./mailer";
 
 // Notifications are fire-and-forget: they never delay or change a decision.
 //
 // Recipients: every member of the workspace whose role may decide requests
 // (owner, admin, approver), through the channels they set in Settings:
-//   email     — needs RESEND_API_KEY (else logged to the console)
+//   email     — Resend or SMTP (lib/mailer.ts); else logged to the console
 //   webhook   — POST JSON to any URL (n8n, Zapier, Make, your own service)
 // If nobody in the workspace has a channel, the deployment-level fallback
 // (NOTIFY_WEBHOOK_URL) is used, so a single-owner self-host works without
@@ -161,13 +162,8 @@ export async function deliver(channels: Channel[], msg: Message): Promise<Outcom
 function mask(t: string) { return t.length > 8 ? t.slice(0, 3) + "…" + t.slice(-3) : t; }
 
 async function sendEmail(to: string, subject: string, text: string, html: string, links: ReturnType<typeof decisionLinks>) {
-  const key = process.env.RESEND_API_KEY;
   const buttons = links ? `<p><a href="${links.approve}" style="background:#2F7A4C;color:#fff;padding:8px 14px;border-radius:3px;text-decoration:none">Approve once</a> &nbsp; <a href="${links.deny}" style="background:#9E2F2F;color:#fff;padding:8px 14px;border-radius:3px;text-decoration:none">Deny</a> &nbsp; <a href="${links.inbox}">Open inbox</a></p>` : "";
-  if (!key) { console.log(`\n[mandate] Email to ${to}: ${subject}\n${text}\n${links ? links.approve + "\n" + links.deny : ""}\n`); return; }
-  const { Resend } = await import("resend");
-  const resend = new Resend(key);
-  const { error } = await resend.emails.send({ from: process.env.EMAIL_FROM ?? "Mandate <alerts@mandate.local>", to, subject, text: text + (links ? `\n\nApprove: ${links.approve}\nDeny: ${links.deny}` : ""), html: `<p>${html.replace(/\n/g, "<br>")}</p>${buttons}` });
-  if (error) throw new Error(`Resend: ${error.message}`);
+  await sendMail({ to, subject, text: text + (links ? `\n\nApprove: ${links.approve}\nDeny: ${links.deny}` : ""), html: `<p>${html.replace(/\n/g, "<br>")}</p>${buttons}` }, text + (links ? `\n${links.approve}\n${links.deny}` : ""));
 }
 
 // ---------- Messages ----------

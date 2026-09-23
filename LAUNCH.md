@@ -10,7 +10,7 @@ Everything below is in order. Budget an afternoon for steps 1–7; step 8 (Strip
 | Vercel | hosting | vercel.com — sign in with GitHub |
 | Neon | Postgres | neon.tech — sign in with GitHub |
 | Resend | sign-in links, invitations, alerts | resend.com |
-| A domain | e.g. `getmandate.app` — buy anywhere; Cloudflare Registrar or Namecheap are fine | |
+| A domain | optional: `your-app.vercel.app` works for the beta; buy one (~$10/yr) when you want a real name and Resend | |
 | Google Cloud | "Sign in with Google" (optional but worth it) | console.cloud.google.com |
 | Sentry | error alerts | sentry.io |
 | Better Uptime / UptimeRobot | a ping every minute | betteruptime.com |
@@ -37,27 +37,38 @@ openssl rand -hex 32      # CRON_SECRET
    ```
    Repeat this command after any future change under `drizzle/`.
 
-## 3. Email (Resend)
+## 3. Email
 
+**Zero-cost option — Gmail SMTP.** Google Account → Security → 2-Step Verification → App passwords → create one for "Mandate". Then on Vercel set `SMTP_URL=smtps://you%40gmail.com:<app password without spaces>@smtp.gmail.com:465` (the `@` in your address is written `%40`). 500 messages a day, which is plenty for a beta; mail arrives "from" your Gmail address. Skip Resend entirely; you also don't need a domain for this, so the whole stack can run on `your-app.vercel.app` for free.
+
+**Resend (when you have a domain).**
 1. Add your domain, add the DNS records it shows (SPF, DKIM, MX for bounces), wait for "Verified".
 2. Create an API key → `RESEND_API_KEY`.
 3. `EMAIL_FROM="Mandate <hello@yourdomain>"` — must be on the verified domain.
 4. Send yourself a test from the Resend dashboard to confirm delivery.
 
-## 4. Deploy (Vercel)
+## 4. Deploy
 
-1. Add New → Project → import `Ivan825/Mandate`. Framework: Next.js. Leave build settings default.
+The supported path is **Vercel + Neon** (below). AWS alternatives live in `deploy/aws/README.md` (one EC2 box) and `deploy/ecs/README.md` (Fargate + RDS) for later; not Amplify — its 30-second request timeout cuts off the API proxy and MCP.
+
+### 4a. Vercel
+
+1. Add New → Project → import `Ivan825/Mandate`. Framework: Next.js is detected; leave build settings default. Set the environment variables *before* the first deploy (step 2), because production refuses to consider itself configured without them.
 2. Environment variables (Production). Paste every one:
    ```
    DATABASE_URL, BETTER_AUTH_SECRET, NOTIFY_SECRET, MANDATE_ENCRYPTION_KEY, RECEIPT_SIGNING_KEY,
    APP_URL=https://yourdomain            (the final domain, https, no trailing slash)
-   RESEND_API_KEY, EMAIL_FROM,
+   SMTP_URL  (Gmail, free)  — or RESEND_API_KEY + EMAIL_FROM with your own domain,
    LEGAL_OPERATOR_NAME="Your name or company", LEGAL_CONTACT_EMAIL=hello@yourdomain,
    OPERATOR_EMAILS=you@yourdomain, CRON_SECRET,
    SENTRY_DSN                            (from step 6; can be added later)
    ```
-3. Deploy. First build takes ~2 minutes.
-4. Settings → Domains → add your domain, set the DNS it asks for. Wait for the certificate.
+3. Before pressing Deploy, run the preflight from your Mac with the same values (it checks the database is migrated and every secret is well-formed):
+   ```bash
+   DATABASE_URL='…' APP_URL='https://<project>.vercel.app' BETTER_AUTH_SECRET='…' NOTIFY_SECRET='…' MANDATE_ENCRYPTION_KEY='…' RECEIPT_SIGNING_KEY='…' CRON_SECRET='…' SMTP_URL='…' LEGAL_CONTACT_EMAIL='…' OPERATOR_EMAILS='…' npm run preflight
+   ```
+   Then Deploy. First build takes ~2 minutes. The project URL is `https://<project>.vercel.app`.
+4. Domain (optional for the beta): Settings → Domains → add it, set the DNS it asks for, wait for the certificate, then update `APP_URL` to the new domain and redeploy. Do this before inviting anyone: passkeys and connected agents are bound to the hostname.
 5. Settings → Functions → enable **Fluid Compute** (lets the API proxy stream long responses).
 6. Settings → Deployment Protection → **off** for production (agents and Stripe can't pass a browser challenge). If you enable Attack Challenge Mode later, exclude `/api/*` and `/.well-known/*`.
 7. Cron is picked up from `vercel.json` automatically; check Settings → Cron Jobs shows `/api/cron/cleanup` daily.

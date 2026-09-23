@@ -1,0 +1,58 @@
+# Production overlay for a single server (EC2, Lightsail, any VPS):
+#   docker compose -f docker-compose.yml -f deploy/aws/docker-compose.prod.yml up -d --build
+# Adds Caddy (automatic HTTPS from Let's Encrypt), a nightly backup of the
+# database to ./backups, and the daily cleanup call. The app is no longer
+# published on :3000; Caddy is the only thing exposed.
+services:
+  app:
+    ports: !reset []
+    expose: ["3000"]
+    restart: unless-stopped
+    environment:
+      TRUST_PROXY: "true"
+      TRUSTED_PROXIES: "172.16.0.0/12"     # docker's bridge network, where Caddy lives
+      SMTP_URL: ${SMTP_URL:-}
+      OPERATOR_EMAILS: ${OPERATOR_EMAILS:-}
+      LEGAL_OPERATOR_NAME: ${LEGAL_OPERATOR_NAME:-}
+      LEGAL_CONTACT_EMAIL: ${LEGAL_CONTACT_EMAIL:-}
+      CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET in .env}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_ISSUING_REGION: ${STRIPE_ISSUING_REGION:-US}
+  db:
+    restart: unless-stopped
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env (the hostname in APP_URL)}
+    volumes:
+      - ./deploy/aws/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on: { db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes: ["./backups:/backups"]
+    # Nightly dump, 14 kept. Copy ./backups off the box (S3 sync) to survive the instance.
+    command: >-
+      sh -c 'while true; do
+        pg_dump -h db -U mandate -d mandate -Fc -f /backups/mandate-$$(date +%F).dump &&
+        ls -1t /backups/*.dump | tail -n +15 | xargs -r rm --;
+        sleep 86400; done'
+  cron:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      CRON_SECRET: ${CRON_SECRET}
+    command: >-
+      sh -c 'while true; do sleep 86400;
+        curl -fsS -H "authorization: Bearer $$CRON_SECRET" http://app:3000/api/cron/cleanup || true; done'
+volumes:
+  caddy-data: {}
+  caddy-config: {}
