@@ -64,7 +64,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <option value="webhook">Webhook (n8n, Zapier, Make, your own URL)</option>
             </select>
           </div>
-          <div className="field"><label htmlFor="target">Email address or webhook URL</label><input id="target" name="target" required placeholder={ctx.email} /></div>
+          <div className="field"><label htmlFor="target">Email address or webhook URL</label><input id="target" name="target" required defaultValue={channels.some((c) => c.type === "email" && c.target.toLowerCase() === ctx.email.toLowerCase()) ? "" : ctx.email} placeholder="you@example.com or https://…" /></div>
           <div className="field"><label htmlFor="label">Label (optional)</label><input id="label" name="label" placeholder="personal, ops automation…" /></div>
           <div className="actions"><button className="btn accent" type="submit">Add</button></div>
         </form>
