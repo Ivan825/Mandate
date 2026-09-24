@@ -9,6 +9,7 @@ import { auth } from "@/lib/auth";
 import { signOutAction, switchWorkspaceAction } from "./actions";
 import { WorkspaceSwitcher } from "./switcher";
 import { ThemeToggle, type Theme } from "./theme";
+import { LiveRefresh } from "./live";
 import { stripeEnabled } from "@/lib/stripe";
 import { isOperator } from "@/lib/env";
 import { cookies } from "next/headers";
@@ -68,6 +69,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <Link href="/sign-in" className="btn secondary sm">Sign in</Link>
             )}
             <ThemeToggle initial={theme} />
+            {ctx && <LiveRefresh />}
           </div>
         </div>
         <main className="main">
