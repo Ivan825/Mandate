@@ -43,4 +43,4 @@ One change per PR. The description should say what it fixes or adds, how you tes
 
 ## Licence
 
-By contributing you agree your work is released under the [MIT licence](LICENSE).
+By contributing you agree your work is released under the [AGPL-3.0 licence](LICENSE), and that the maintainers may also offer it under other terms (for example a commercial licence for a hosted deployment).

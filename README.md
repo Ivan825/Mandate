@@ -9,7 +9,7 @@ Give an agent a limit instead of a card. Every request is decided against the te
 
 <p align="center">
   <a href="https://github.com/Ivan825/Mandate/actions/workflows/ci.yml"><img src="https://github.com/Ivan825/Mandate/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licence"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="AGPL-3.0 licence"></a>
   <a href="https://mandate-ashen.vercel.app"><img src="https://img.shields.io/badge/beta-live-e8873a" alt="Beta live"></a>
   <img src="https://img.shields.io/badge/MCP-OAuth%202.1-4c7ef3" alt="MCP with OAuth 2.1">
   <img src="https://img.shields.io/badge/node-%E2%89%A522-339933" alt="Node 22+">
@@ -140,4 +140,4 @@ Issues and pull requests are welcome — [`CONTRIBUTING.md`](CONTRIBUTING.md) ha
 
 ## Licence
 
-[MIT](LICENSE). Self-host it, fork it, build on it.
+[AGPL-3.0](LICENSE). Self-host it, fork it, build on it. If you run a modified version as a service, publish your changes — that's the one thing the licence asks. Need different terms for a commercial deployment? Email the address in [`SECURITY.md`](SECURITY.md).

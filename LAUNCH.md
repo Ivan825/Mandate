@@ -106,7 +106,7 @@ See DEPLOY.md §5. Until then the card section is invisible to users.
 
 ## 9. The Reddit post — what to say and not say
 
-Say: control what your agents can spend on your existing accounts; works with Claude, ChatGPT, Cursor and anything that speaks MCP; meters OpenAI/Anthropic/Gemini spend through a proxy key the agent can't exceed; every decision in a signed ledger; free during the beta; open source (MIT).
+Say: control what your agents can spend on your existing accounts; works with Claude, ChatGPT, Cursor and anything that speaks MCP; meters OpenAI/Anthropic/Gemini spend through a proxy key the agent can't exceed; every decision in a signed ledger; free during the beta; open source (AGPL-3.0).
 
 Don't say yet: virtual cards (unless Issuing is approved), "bank-grade", "guaranteed", anything about custody of money.
 

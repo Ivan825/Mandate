@@ -81,6 +81,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <Link href="/privacy">Privacy</Link>
             <Link href="/docs">Connect agents</Link>
             {process.env.LEGAL_CONTACT_EMAIL && <a href={`mailto:${process.env.LEGAL_CONTACT_EMAIL}`}>Contact</a>}
+            <a href={process.env.SOURCE_URL ?? "https://github.com/Ivan825/Mandate"} rel="noopener">Source</a>
           </div>
         </footer>
       </body>

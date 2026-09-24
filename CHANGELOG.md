@@ -21,6 +21,9 @@ First public beta.
 - Health endpoint, daily cleanup cron, deployment preflight script.
 - Deployment paths: Vercel + Neon (primary), AWS EC2, AWS ECS Fargate, Docker.
 
+### Changed
+- Licence: AGPL-3.0 (was MIT during private development). Sole-author relicense before any external contribution.
+
 ### Fixed
 - Claude's client-metadata document could not be fetched on Node 20+ (Better Auth CIMD ≤ 1.7.2); upgraded to 1.7.5 with migration `0006`.
 - OAuth authorization-server metadata is also served at the bare `/.well-known/oauth-authorization-server` for clients that skip protected-resource discovery.

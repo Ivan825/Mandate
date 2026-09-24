@@ -49,7 +49,7 @@
   "engines": {
     "node": ">=22"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "description": "Scoped, revocable spending authority for AI agents: limits, approvals, a signed ledger, and revocation \u2014 over MCP, an API-key proxy, REST tokens or virtual cards.",
   "repository": {
     "type": "git",
