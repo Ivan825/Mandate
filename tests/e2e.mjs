@@ -81,7 +81,7 @@ try {
   const seed = await p.evaluate(async () => (await fetch("/api/dev/seed", { method: "POST" })).json());
   check("seed decisions", seed.decisions?.join(",") === "approved,approved,declined,pending,declined,approved,pending,approved,approved", seed.decisions?.join(","));
   await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
-  await p.locator(".approval", { hasText: "Anthropic" }).first().getByRole("button", { name: "Approve once" }).click();
+  await p.locator(".approval", { hasText: "Anthropic" }).first().getByRole("button", { name: "Approve once", exact: true }).click();
   await p.waitForURL(/\/approvals$/); await p.waitForTimeout(500);
   const retry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: { authorization: "Bearer " + seed.tokens.dev, "content-type": "application/json" }, body: JSON.stringify({ amount: 4500, merchant: "Anthropic", purpose: "Top-up before the demo" }) }).then((r) => r.json());
   check("agent retry approved by allowance", retry.rule === "allowance", retry.reason);
@@ -92,7 +92,7 @@ try {
   const a2 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
   check("pending is not cached as a replay", a1.status === 202 && a2.status === 202 && !a2.headers.get("idempotent-replayed"), `${a1.status} ${a2.status} ${JSON.stringify(await a2.clone().json())}`);
   await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
-  await p.locator(".approval", { hasText: "idempotent ask" }).first().getByRole("button", { name: "Approve once" }).click();
+  await p.locator(".approval", { hasText: "idempotent ask" }).first().getByRole("button", { name: "Approve once", exact: true }).click();
   await p.waitForURL(/\/approvals$/); await p.waitForTimeout(400);
   const a3 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
   const a4 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
@@ -205,6 +205,53 @@ try {
   check("one-tap API approves with the signed link", onetap.status === 200 && (await onetap.json()).decision === "approved");
   check("one-tap API refuses a replay", (await fetch(approveLink.replace("/a/", "/api/approvals/onetap/"), { method: "POST" })).status === 409);
   check("manifest and service worker are public", (await fetch(BASE + "/manifest.webmanifest")).status === 200 && (await fetch(BASE + "/sw.js")).status === 200);
+
+  // 2d″. veto windows, plans, shadow mode, time-travel, signing
+  // Issue a mandate with a veto window (above $10, ask above $40) and shadow mode off, through the form.
+  await p.goto(BASE + "/mandates/new?template=llm-dev", { waitUntil: "networkidle" });
+  await p.fill("#name", "Veto test"); await p.fill("#perTxnLimit", "50"); await p.fill("#dailyLimit", "200"); await p.fill("#totalLimit", "500"); await p.fill("#approvalAbove", "40"); await p.fill("#vetoAbove", "10"); await p.fill("#vetoMinutes", "1"); await p.fill("#allowedMerchants", "");
+  await Promise.all([p.waitForURL(/\/mandates\/[0-9a-f-]+\?new=1/), p.locator("form.form button.accent[type=submit]").click()]);
+  const vetoToken = (await p.locator(".token").textContent())?.trim();
+  const vetoMandateId = p.url().split("/mandates/")[1].split("?")[0];
+  check("veto mandate issued with a token", Boolean(vetoToken?.startsWith("mnd_")));
+  const vHdr = { authorization: "Bearer " + vetoToken, "content-type": "application/json" };
+  const vetoAsk = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: vHdr, body: JSON.stringify({ amount: 1500, merchant: "OpenAI", purpose: "veto test" }) }).then((r) => r.json());
+  check("veto window answers pending with a retry time and no human required", vetoAsk.decision === "pending" && vetoAsk.rule === "veto" && typeof vetoAsk.remedy?.retryAt === "string" && vetoAsk.remedy?.approvalRequired === false, JSON.stringify({ d: vetoAsk.decision, r: vetoAsk.rule }));
+  await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  check("inbox shows the veto window under 'going through unless you cancel'", (await p.locator(".approval.veto", { hasText: "veto test" }).count()) === 1 && (await p.locator("button", { hasText: "Cancel it" }).count()) >= 1);
+  // Plans over REST → inbox → approve → item passes.
+  const planRes = await fetch(BASE + "/api/agent/plans", { method: "POST", headers: vHdr, body: JSON.stringify({ title: "E2E shopping list", items: [{ merchant: "GitHub", amount: 4500, purpose: "seat" }, { merchant: "Vercel", amount: 900 }] }) });
+  const plan = await planRes.json();
+  check("plan proposed over REST", planRes.status === 202 && plan.status === "proposed" && plan.items.length === 2, JSON.stringify(plan));
+  await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  const planCard = p.locator(".approval", { hasText: "E2E shopping list" });
+  check("plan appears in the inbox with its items", (await planCard.count()) === 1 && (await planCard.locator("table.mini tr").count()) === 2);
+  await Promise.all([p.waitForURL(/\/approvals$/), planCard.getByRole("button", { name: "Approve plan" }).click()]);
+  await p.waitForLoadState("networkidle"); await p.waitForTimeout(300);
+  const planState = await fetch(BASE + "/api/agent/plans/" + plan.planId, { headers: vHdr }).then((r) => r.json());
+  check("plan approved from the inbox", planState.status === "approved");
+  const inPlan = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: vHdr, body: JSON.stringify({ amount: 4400, merchant: "GitHub" }) }).then((r) => r.json());
+  check("a purchase inside the approved plan passes without asking", inPlan.decision === "approved" && inPlan.rule === "plan", JSON.stringify({ d: inPlan.decision, r: inPlan.rule }));
+  const again = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: vHdr, body: JSON.stringify({ amount: 4400, merchant: "GitHub" }) }).then((r) => r.json());
+  check("the same item cannot be used twice", again.rule !== "plan");
+  // Shadow mode: switch from the mandate page, an out-of-scope request goes through, the report shows it.
+  await p.goto(BASE + "/mandates/" + vetoMandateId, { waitUntil: "networkidle" });
+  await Promise.all([p.waitForURL(/\/mandates\//), p.locator("button", { hasText: "observe instead" }).click()]);
+  await p.waitForLoadState("networkidle"); await p.waitForTimeout(300);
+  const shadowTry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: vHdr, body: JSON.stringify({ amount: 9900, merchant: "Namecheap" }) }).then((r) => r.json());
+  check("shadow mode lets a request the terms would decline through and says so", shadowTry.decision === "approved" && shadowTry.rule === "observe" && shadowTry.shadow?.decision === "declined", JSON.stringify({ d: shadowTry.decision, r: shadowTry.rule, s: shadowTry.shadow }));
+  await p.goto(BASE + "/mandates/" + vetoMandateId, { waitUntil: "networkidle" });
+  check("mandate page shows the shadow report", (await p.locator("text=Shadow mode: observing").count()) === 1 && (await p.locator("text=would have been declined").count()) === 1);
+  await Promise.all([p.waitForURL(/\/mandates\//), p.locator("button", { hasText: "Start enforcing" }).click()]);
+  await p.waitForLoadState("networkidle");
+  // Time-travel: tighter terms change past decisions.
+  const replay = await p.evaluate(async (id) => (await fetch(`/api/mandates/${id}/replay`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ perTxnLimit: 1000, approvalAbove: 500, vetoAbove: null }) })).json(), vetoMandateId);
+  check("what-if replay counts decisions that would change", replay.requests >= 3 && replay.changed >= 1 && replay.outcomes.some((o) => o.rule === "per_txn"), JSON.stringify({ requests: replay.requests, changed: replay.changed }));
+  // Signing: no passkey yet → 412 with a hint; the inbox offers the signed button.
+  const signOpts = await p.evaluate(async (id) => (await fetch(`/api/approvals/${id}/sign?d=approve`)).status, vetoAsk.approvalId);
+  check("signing endpoint asks for a passkey first", signOpts === 412);
+  await p.goto(BASE + "/p/" + plan.planId + "?d=approve&t=bad", { waitUntil: "networkidle" });
+  check("plan one-tap page renders and rejects a bad token", (await p.locator("h1").textContent())?.includes("E2E shopping list") && (await p.locator(".notice", { hasText: "already approved" }).count()) === 1);
 
   // 2e. event webhooks: settings page, private target refused
   await p.goto(BASE + "/settings/webhooks", { waitUntil: "networkidle" });

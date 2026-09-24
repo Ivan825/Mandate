@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
-import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings, pauseMandate, resumeMandate, raiseLimit, withdrawRaise, shareTransaction, unshareTransaction } from "@/lib/service";
+import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings, pauseMandate, resumeMandate, raiseLimit, withdrawRaise, shareTransaction, unshareTransaction, decidePlan, cancelPlan, setMandateMode, resetAutonomy } from "@/lib/service";
 import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization, cardholderProblem, ensureCardholder, issuingRegion, createTopupSession, freezeCard } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
 import { toMinor as toMinorIn } from "@/lib/money";
@@ -65,6 +65,12 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
     expiresAt: /^\d{4}-\d{2}-\d{2}$/.test(expiresRaw) ? endOfLocalDay(expiresRaw, timezone) : null,
     holdTtlHours: Math.floor(num(form.get("holdTtlHours"), 24)),
     holdPolicy: holdPolicyRaw === "release" ? "release" : "capture",
+    vetoAbove: String(form.get("vetoAbove") ?? "").trim() === "" ? null : minor(form.get("vetoAbove")),
+    vetoMinutes: Math.floor(num(form.get("vetoMinutes"), 15)),
+    autonomyStep: form.get("autonomyOn") === "on" ? minor(form.get("autonomyStep")) : 0,
+    autonomyEvery: Math.floor(num(form.get("autonomyEvery"), 10)),
+    autonomyCeiling: form.get("autonomyOn") === "on" && String(form.get("autonomyCeiling") ?? "").trim() !== "" ? minor(form.get("autonomyCeiling")) : null,
+    mode: form.get("mode") === "observe" ? "observe" : "enforce",
   });
   if (!res.ok) return { errors: res.errors, values };
   const m = res.mandate;
@@ -229,6 +235,44 @@ export async function saveWorkspaceSettingsAction(form: FormData) {
   catch (e) { redirect("/settings?error=" + encodeURIComponent((e as Error).message)); }
   revalidatePath("/settings");
   redirect("/settings?workspace=saved");
+}
+
+// ---------- Plans, shadow mode, autonomy ----------
+
+export async function decidePlanAction(form: FormData) {
+  const ctx = await requirePermission({ approval: ["decide"] }, "deciding plans");
+  const id = String(form.get("planId") ?? "");
+  if (!isUuid(id)) return;
+  await decidePlan(ctx.workspaceId, id, form.get("decision") === "approve" ? "approved" : "denied", ctx.email);
+  revalidatePath("/approvals"); revalidatePath("/");
+  redirect("/approvals");
+}
+
+export async function cancelPlanAction(form: FormData) {
+  const ctx = await requirePermission({ approval: ["decide"] }, "cancelling plans");
+  const id = String(form.get("planId") ?? ""); const back = String(form.get("back") ?? "/approvals");
+  if (!isUuid(id)) return;
+  await cancelPlan(ctx.workspaceId, id, ctx.email);
+  revalidatePath(back);
+  redirect(back);
+}
+
+export async function setModeAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["issue"] }, "changing a mandate's mode");
+  const id = String(form.get("mandateId") ?? "");
+  if (!isUuid(id)) return;
+  await setMandateMode(ctx.workspaceId, id, form.get("mode") === "observe" ? "observe" : "enforce", ctx.email);
+  revalidatePath(`/mandates/${id}`); revalidatePath("/");
+  redirect(`/mandates/${id}`);
+}
+
+export async function resetAutonomyAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["issue"] }, "resetting autonomy");
+  const id = String(form.get("mandateId") ?? "");
+  if (!isUuid(id)) return;
+  await resetAutonomy(ctx.workspaceId, id, ctx.email);
+  revalidatePath(`/mandates/${id}`);
+  redirect(`/mandates/${id}`);
 }
 
 // ---------- Public receipts ----------

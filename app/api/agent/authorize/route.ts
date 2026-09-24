@@ -71,7 +71,7 @@ export async function POST(req: NextRequest) {
   const responseBody: Record<string, unknown> = {
     decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
     settlement: r.settlement, holdExpiresAt: r.holdExpiresAt ? r.holdExpiresAt.toISOString() : null,
-    remedy: r.remedy ?? undefined,
+    remedy: r.remedy ?? undefined, shadow: r.shadow ?? undefined,
     next: r.decision === "pending" ? "The owner is being notified. Wait for approval, then retry the same request with the same Idempotency-Key."
       : r.decision === "approved" && r.settlement === "held" ? `Complete the purchase, then POST ${base}/api/agent/capture with this transactionId and the amount actually paid (or POST ${base}/api/agent/void if nothing was paid). Unsettled, the hold is ${m.holdPolicy === "release" ? "released" : "captured in full"} at holdExpiresAt.`
       : r.decision === "declined" ? r.remedy?.message : undefined,

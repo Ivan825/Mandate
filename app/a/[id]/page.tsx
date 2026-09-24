@@ -45,14 +45,15 @@ export default async function OneTapPage({ params, searchParams }: Params) {
           {a.purpose && <><dt>Purpose</dt><dd>“{a.purpose}”</dd></>}
           <dt>Status</dt><dd><span className={`pill ${a.status}`}>{a.status}</span></dd>
         </dl>
-        {done && <div className={`notice ${done === "approve" ? "ok" : "bad"}`}>{done === "approve" ? "Approved once. The agent can now retry this exact purchase within 24 hours." : "Denied. The agent cannot ask for this again for 6 hours."}</div>}
+        {a.kind === "veto" && a.status === "pending" && a.vetoUntil && <div className="notice">This is a veto window: it goes through by itself at {new Date(a.vetoUntil).toUTCString().replace(" GMT", " UTC")} unless you cancel it.</div>}
+        {done && <div className={`notice ${done === "approve" ? "ok" : "bad"}`}>{done === "approve" ? "Approved once. The agent can now retry this exact purchase within 24 hours." : a.kind === "veto" ? "Cancelled. The agent cannot ask for this again for 6 hours." : "Denied. The agent cannot ask for this again for 6 hours."}</div>}
         {!done && a.status !== "pending" && <div className="notice">This request is already {a.status}.</div>}
         {!done && a.status === "pending" && !valid && <div className="notice bad">This link is invalid or has expired. Decide from the inbox instead.</div>}
         {!done && a.status === "pending" && valid && decision && (
           <form action={decide} className="actions">
             <input type="hidden" name="d" value={decision} />
             <input type="hidden" name="t" value={t} />
-            <button className={`btn ${decision === "approve" ? "ok" : "danger"}`} type="submit">{decision === "approve" ? "Confirm: approve once" : "Confirm: deny"}</button>
+            <button className={`btn ${decision === "approve" ? "ok" : "danger"}`} type="submit">{decision === "approve" ? (a.kind === "veto" ? "Confirm: let it through now" : "Confirm: approve once") : (a.kind === "veto" ? "Confirm: cancel it" : "Confirm: deny")}</button>
           </form>
         )}
       </div>

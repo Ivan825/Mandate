@@ -130,6 +130,50 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
       </fieldset>
 
       <fieldset>
+        <legend>Escalation style</legend>
+        <div className="row">
+          <div className="field">
+            <label htmlFor="vetoAbove">Veto window above</label>
+            <input id="vetoAbove" name="vetoAbove" type="number" min="0" step={step} defaultValue={v("vetoAbove", "")} aria-invalid={Boolean(err("vetoAbove"))} placeholder="blank = off" />
+            <span className="hint" style={err("vetoAbove") ? { color: "var(--bad)" } : undefined}>{err("vetoAbove") ?? "Approval by silence: above this (and below “ask me above”) you are told and the purchase goes through after the window unless you cancel. Nobody is woken up; you keep the right to stop it."}</span>
+          </div>
+          <div className="field">
+            <label htmlFor="vetoMinutes">Veto window (minutes)</label>
+            <input id="vetoMinutes" name="vetoMinutes" type="number" min="1" max="1440" step="1" defaultValue={v("vetoMinutes", "15")} aria-invalid={Boolean(err("vetoMinutes"))} />
+            {err("vetoMinutes") && <span className="hint" style={{ color: "var(--bad)" }}>{err("vetoMinutes")}</span>}
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="mode">Mode</label>
+          <select id="mode" name="mode" defaultValue={v("mode", "enforce")}>
+            <option value="enforce">Enforce — decline and escalate according to the terms</option>
+            <option value="observe">Observe (shadow mode) — let everything through, record what the terms would have done</option>
+          </select>
+          <span className="hint">Observe for a few days to tune the terms against a working agent, then switch to enforce from the mandate page.</span>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Graduated autonomy</legend>
+        <label className="check"><input type="checkbox" name="autonomyOn" defaultChecked={v("autonomyOn") === "on"} /> Let this mandate earn its limits</label>
+        <div className="row-3">
+          <div className="field">
+            <label htmlFor="autonomyStep">Raise by ({currency})</label>
+            <input id="autonomyStep" name="autonomyStep" type="number" min="0" step={step} defaultValue={v("autonomyStep", scale("5"))} aria-invalid={Boolean(err("autonomyStep"))} />
+          </div>
+          <div className="field">
+            <label htmlFor="autonomyEvery">…every (clean decisions)</label>
+            <input id="autonomyEvery" name="autonomyEvery" type="number" min="1" max="1000" step="1" defaultValue={v("autonomyEvery", "10")} aria-invalid={Boolean(err("autonomyEvery"))} />
+          </div>
+          <div className="field">
+            <label htmlFor="autonomyCeiling">Up to a per-transaction limit of</label>
+            <input id="autonomyCeiling" name="autonomyCeiling" type="number" min="0" step={step} defaultValue={v("autonomyCeiling", scale("100"))} aria-invalid={Boolean(err("autonomyCeiling"))} />
+            <span className="hint" style={err("autonomyCeiling") ? { color: "var(--bad)" } : undefined}>{err("autonomyCeiling") ?? "The per-transaction limit and the ask-me-above threshold rise together; a denial or a decline burst steps them back."}</span>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>Holds</legend>
         <p className="muted" style={{ margin: "0 0 10px", fontSize: 13.5 }}>An approval is a hold, not a charge. After paying, the agent captures what it actually spent (less releases the difference) or voids the hold. If it does neither, the hold is closed for it when the time below runs out.</p>
         <div className="row">

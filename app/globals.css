@@ -223,3 +223,9 @@ table.mini td,table.mini th{padding:6px 8px}
 .rails{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
 .rails a{padding:6px 11px;border:1px solid var(--rule);border-radius:999px;font-size:13px;text-decoration:none;color:var(--ink-2);background:var(--surface)}
 .rails a.on{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
+.approval.veto{border-left:3px solid var(--warn)}
+.pill.proposed,.pill.observe{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
+.pill.completed{border-color:var(--ok);color:var(--ok)}
+.pill.cancelled{opacity:.7}
+.track{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin:6px 0}
+.track>div{height:100%;background:var(--ok)}

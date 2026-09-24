@@ -92,6 +92,12 @@ curl -X POST https://mandate-ashen.vercel.app/api/agent/capture \
 - **Terms, not trust.** Per-transaction, daily and lifetime limits; merchant allow-list; blocked categories; active hours in the agent's timezone; expiry; an "ask me above" threshold.
 - **Holds, not charges.** An approval is a hold; the agent captures what it actually paid (less releases the difference) or voids it, and an unsettled hold closes by the mandate's policy when its TTL runs out.
 - **A "no" the agent can act on.** Every decline says when the same request would pass, the most that would pass right now, and what to do instead — so agents plan instead of hammering.
+- **Veto windows.** "Above $50, tell me and go ahead in 15 minutes unless I cancel." Approval by silence for the amounts that shouldn't wake you up but that you want the right to stop.
+- **Pre-approved plans.** The agent lists what it intends to buy; you approve the list once; each item then passes without a prompt while anything outside it still asks.
+- **Shadow mode.** Run new terms without enforcing them: nothing is declined, and you get a report of what would have been — then switch to enforce.
+- **Policy time-travel.** Change the terms and replay the mandate's real history through the real engine to see which past decisions would have gone the other way.
+- **Graduated autonomy.** A mandate that earns its limits: every N clean decisions the per-transaction limit and the ask-me-above threshold step up toward a ceiling; a denial steps them back.
+- **Human-signed approvals.** Approve with your passkey and the receipt carries a WebAuthn signature over the exact decision — proof a person on a registered device decided, not a script with a cookie.
 - **Pause and temporary raises.** Freeze an agent for an hour or until you say so without killing its token; lift one limit for a window ("$150 today only") without editing the issued terms.
 - **Anomaly flags.** Unusual amount, first-time merchant, decline bursts and rapid repeats are flagged on the request itself — in the inbox, the feed, the email and the webhook.
 - **Approvals that agents can wait for.** Requests above the threshold park as *pending*; you approve once from email, a webhook (n8n, Zapier, Make, your own endpoint) or the inbox; the agent retries with the same idempotency key and goes through exactly once.
@@ -156,7 +162,7 @@ Found something? See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens and SDKs with holds and capture, approvals with push, event webhooks, the activity feed, public receipts, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
+Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens and SDKs with holds and capture, approvals with push, veto windows, plans, shadow mode, time-travel, graduated autonomy, passkey-signed approvals, event webhooks, the activity feed, public receipts, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Contributing
 

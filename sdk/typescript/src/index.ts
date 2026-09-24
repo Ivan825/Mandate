@@ -8,7 +8,7 @@
 // Amounts are integers in the mandate's minor unit (cents, paise). Uses the
 // global fetch; no dependencies.
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 export const DEFAULT_BASE_URL = "https://mandate-ashen.vercel.app";
 
 export type Remedy = { message: string; retryAt?: string; maxAmountNow?: number; approvalRequired?: boolean; allowedMerchants?: string[] };
@@ -19,6 +19,7 @@ export type Decision = {
   remaining?: { today: number; total: number; perTransaction: number; currency: string };
 };
 export type SettledState = { transactionId: string; settlement: Settlement | null; authorizedAmount: number; capturedAmount: number | null; released: number; currency: string; merchant: string; settledAt: string | null; settledBy: string | null; note: string | null };
+export type PlanState = { planId: string; title: string; status: "proposed" | "approved" | "denied" | "expired" | "completed" | "cancelled"; currency: string; totalMax: number; items: { index: number; merchant: string; amount: number; purpose: string; used: boolean; transactionId: string | null }[]; expiresAt: string | null };
 export type MandateInfo = { mandate: string; mandateId: string; status: string; currency: string; limits: { perTransaction: number; daily: number; total: number; approvalAbove: number | null }; remaining: { today: number; total: number }; scope: { allowedMerchants: string[]; blockedCategories: string[]; activeHours: [number, number]; timezone: string }; holds: { ttlHours: number; onExpiry: string; open: SettledState[] }; pendingApprovals: number; expiresAt: string | null };
 
 export class MandateError extends Error {
@@ -109,6 +110,25 @@ export class Mandate {
 
   async get(transactionId: string): Promise<SettledState> {
     const { status, body } = await this.request<SettledState>("GET", `/api/agent/transactions/${encodeURIComponent(transactionId)}`);
+    if (status !== 200) throw new MandateError(body.error ?? `HTTP ${status}`, status, body as Record<string, unknown>);
+    return body;
+  }
+
+  /** Propose a list of intended purchases for one-time approval. With waitForMs, polls until the owner decides. */
+  async proposePlan(input: { title: string; items: { merchant: string; amount: number; purpose?: string }[]; waitForMs?: number; pollEveryMs?: number }): Promise<PlanState> {
+    const { status, body } = await this.request<PlanState>("POST", "/api/agent/plans", { title: input.title, items: input.items });
+    if (status !== 200 && status !== 202) throw new MandateError(body.error ?? `HTTP ${status}`, status, body as Record<string, unknown>);
+    let plan = body as PlanState;
+    const deadline = Date.now() + (input.waitForMs ?? 0);
+    while (input.waitForMs && plan.status === "proposed" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, Math.min(input.pollEveryMs ?? 10_000, Math.max(0, deadline - Date.now()))));
+      plan = await this.getPlan(plan.planId);
+    }
+    return plan;
+  }
+
+  async getPlan(planId: string): Promise<PlanState> {
+    const { status, body } = await this.request<PlanState>("GET", `/api/agent/plans/${encodeURIComponent(planId)}`);
     if (status !== 200) throw new MandateError(body.error ?? `HTTP ${status}`, status, body as Record<string, unknown>);
     return body;
   }

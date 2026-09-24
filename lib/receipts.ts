@@ -87,6 +87,8 @@ export type TxReceipt = {
   signature: { alg: "Ed25519"; keyId: string; publicKeyPem: string; signedAt: string; coreHash: string; message: string; signature: string };
 };
 
+function safeJson(s: string): unknown { try { return JSON.parse(s); } catch { return null; } }
+
 export function txReceiptMessage(txId: string, coreHash: string, signedAt: string) { return `mandate-tx-receipt|${txId}|${coreHash}|${signedAt}`; }
 
 export async function buildTransactionReceipt(txId: string, shareToken: string, issuer: string): Promise<TxReceipt | null> {
@@ -109,7 +111,7 @@ export async function buildTransactionReceipt(txId: string, shareToken: string, 
     },
     mandate: m ? { id: m.id, name: m.name, currency: m.currency, perTxnLimit: m.perTxnLimit, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove, allowedMerchants: JSON.parse(m.allowedMerchants), blockedCategories: JSON.parse(m.blockedCategories), activeHours: [m.activeHoursStart, m.activeHoursEnd], timezone: m.timezone, issuedAt: new Date(m.createdAt).toISOString(), expiresAt: m.expiresAt ? new Date(m.expiresAt).toISOString() : null, status: m.status, tokenPrefix: m.tokenPrefix } : {},
     agent: { name: ag?.name ?? "Agent" },
-    approval: approval ? { id: approval.id, status: approval.status, requestedAt: new Date(approval.requestedAt).toISOString(), decidedAt: approval.decidedAt ? new Date(approval.decidedAt).toISOString() : null, decidedBy: approval.decidedBy, amount: approval.amount, merchant: approval.merchant, purpose: approval.purpose } : null,
+    approval: approval ? { id: approval.id, kind: approval.kind, status: approval.status, requestedAt: new Date(approval.requestedAt).toISOString(), decidedAt: approval.decidedAt ? new Date(approval.decidedAt).toISOString() : null, decidedBy: approval.decidedBy, amount: approval.amount, merchant: approval.merchant, purpose: approval.purpose, humanSignature: approval.signature ? safeJson(approval.signature) : null } : null,
     events: rows.map((r) => ({ seq: r.seq, type: r.type, createdAt: new Date(r.createdAt).toISOString(), prevHash: r.prevHash, hash: r.hash, payload: JSON.parse(r.payload) })),
     chain: { workspaceId: t.workspaceId, head: head ?? { seq: 0, hash: "0".repeat(64) }, verified: verification.ok },
   };

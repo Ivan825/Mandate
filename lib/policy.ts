@@ -4,7 +4,7 @@
 // officer would check them in — eligibility first, then scope, then limits,
 // then escalation.
 
-import type { Mandate, Approval, MandateOverride } from "./schema";
+import type { Mandate, Approval, MandateOverride, Plan } from "./schema";
 import { fmt } from "./money";
 
 export { fmt };
@@ -30,19 +30,28 @@ export type Facts = {
   availableBalance?: number | null;
   // Temporary raises in force right now (lib/service loads the live ones).
   overrides?: MandateOverride[];
+  // Approved, unexpired plans on this mandate (lib/service loads them).
+  plans?: Plan[];
 };
+
+export type PlanItem = { merchant: string; amount: number; purpose?: string; usedBy?: string | null };
+export function parsePlanItems(json: string): PlanItem[] {
+  try { const v = JSON.parse(json); return Array.isArray(v) ? v.filter((x) => x && typeof x.merchant === "string" && Number.isInteger(x.amount)) : []; } catch { return []; }
+}
 
 export type OverrideField = "per_txn" | "daily" | "total" | "approval_above";
 export const OVERRIDE_FIELDS: { key: OverrideField; label: string }[] = [
   { key: "per_txn", label: "Per transaction" }, { key: "daily", label: "Per day" }, { key: "total", label: "Total sanctioned" }, { key: "approval_above", label: "Ask me above" },
 ];
 
-export type EffectiveTerms = { perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove: number | null; raised: Partial<Record<OverrideField, MandateOverride>> };
+export type EffectiveTerms = { perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove: number | null; raised: Partial<Record<OverrideField, MandateOverride>>; autonomy: number };
 
-// The terms in force at `now`: the mandate's own, lifted by any active
-// temporary raise. A raise only ever goes up; the issued terms are the floor.
+// The terms in force at `now`: the mandate's own, lifted by earned autonomy
+// and by any active temporary raise. Both only ever go up; the issued terms
+// are the floor.
 export function effectiveTerms(m: Mandate, overrides: MandateOverride[] = [], now = new Date()): EffectiveTerms {
-  const t: EffectiveTerms = { perTxnLimit: m.perTxnLimit, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove, raised: {} };
+  const autonomy = m.autonomyStep > 0 ? Math.max(0, Math.min(m.autonomyLevel, (m.autonomyCeiling ?? m.perTxnLimit) - m.perTxnLimit)) : 0;
+  const t: EffectiveTerms = { perTxnLimit: m.perTxnLimit + autonomy, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove == null ? null : m.approvalAbove + autonomy, raised: {}, autonomy };
   for (const o of overrides) {
     if (o.revokedAt || new Date(o.startsAt) > now || new Date(o.endsAt) <= now) continue;
     const f = o.field as OverrideField;
@@ -73,7 +82,7 @@ export type Remedy = {
 };
 
 export type Decision =
-  | { decision: "approved"; reason: string; rule: string; allowanceId?: string; remedy?: undefined }
+  | { decision: "approved"; reason: string; rule: string; allowanceId?: string; planId?: string; planItem?: number; remedy?: undefined }
   | { decision: "declined"; reason: string; rule: string; remedy: Remedy }
   | { decision: "pending"; reason: string; rule: string; remedy: Remedy };
 
@@ -157,6 +166,27 @@ export function validateTerms(t: {
   if (!Number.isInteger(t.activeHoursEnd) || t.activeHoursEnd < 1 || t.activeHoursEnd > 24) errs.push({ field: "activeHoursEnd", message: "End hour must be 1–24." });
   if (t.activeHoursStart === t.activeHoursEnd) errs.push({ field: "activeHoursEnd", message: "Start and end hours cannot be equal (that window is empty)." });
   if (!isValidTimezone(t.timezone)) errs.push({ field: "timezone", message: "Unknown timezone." });
+  return errs;
+}
+
+export function validateVetoTerms(t: { vetoAbove: number | null; vetoMinutes: number; approvalAbove: number | null; perTxnLimit: number }): TermsError[] {
+  const errs: TermsError[] = [];
+  if (t.vetoAbove != null) {
+    if (!Number.isInteger(t.vetoAbove) || t.vetoAbove < 0) errs.push({ field: "vetoAbove", message: "The veto threshold must be zero or more." });
+    else if (t.vetoAbove >= t.perTxnLimit) errs.push({ field: "vetoAbove", message: "The veto threshold must be below the per-transaction limit." });
+    else if (t.approvalAbove != null && t.vetoAbove >= t.approvalAbove) errs.push({ field: "vetoAbove", message: "The veto threshold must be below the ask-me-above threshold (asking wins above it)." });
+  }
+  if (!Number.isInteger(t.vetoMinutes) || t.vetoMinutes < 1 || t.vetoMinutes > 24 * 60) errs.push({ field: "vetoMinutes", message: "The veto window is between 1 minute and 24 hours." });
+  return errs;
+}
+
+export function validateAutonomyTerms(t: { autonomyStep: number; autonomyEvery: number; autonomyCeiling: number | null; perTxnLimit: number }): TermsError[] {
+  const errs: TermsError[] = [];
+  if (!Number.isInteger(t.autonomyStep) || t.autonomyStep < 0) errs.push({ field: "autonomyStep", message: "The autonomy step must be zero (off) or more." });
+  if (t.autonomyStep > 0) {
+    if (!Number.isInteger(t.autonomyEvery) || t.autonomyEvery < 1 || t.autonomyEvery > 1000) errs.push({ field: "autonomyEvery", message: "Steps happen every 1–1000 clean decisions." });
+    if (t.autonomyCeiling == null || !Number.isInteger(t.autonomyCeiling) || t.autonomyCeiling <= t.perTxnLimit) errs.push({ field: "autonomyCeiling", message: "The autonomy ceiling must be above the per-transaction limit." });
+  }
   return errs;
 }
 
@@ -246,6 +276,16 @@ export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision 
     return declined("balance", `Prepaid balance too low: ${fmt(Math.max(0, facts.availableBalance), ccy)} available. Add funds to the workspace.`, { message: "The workspace's prepaid balance cannot cover this. The owner needs to add funds.", maxAmountNow: maxNow, approvalRequired: true });
   }
 
+  // A purchase inside an approved plan was pre-approved as part of the list:
+  // same merchant, at most the listed amount, item not yet used. It passes
+  // without asking (and without a veto wait); the limits above still apply.
+  for (const plan of facts.plans ?? []) {
+    if (plan.status !== "approved" || (plan.expiresAt && now > new Date(plan.expiresAt))) continue;
+    const items = parsePlanItems(plan.items);
+    const idx = items.findIndex((it) => !it.usedBy && merchantMatches(it.merchant, req.merchant) && amt <= it.amount);
+    if (idx >= 0) return { decision: "approved", reason: `Within limits; item ${idx + 1} of the approved plan “${plan.title}”.`, rule: "plan", planId: plan.id, planItem: idx };
+  }
+
   // Escalation. A human pre-approval (an "allowance") is for one specific
   // purchase: same amount, same merchant, not lapsed. It lets the request
   // through exactly once.
@@ -267,7 +307,48 @@ export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision 
     return { decision: "pending", reason: `Above the ${fmt(mandate.approvalAbove, ccy)} threshold — needs your approval before the agent can retry.`, rule: "approval", remedy: { message: `Amounts above ${fmt(mandate.approvalAbove, ccy)} need the owner's approval. They have been notified; retry the identical request (same idempotency key) once approved. Approvals lapse after ${ALLOWANCE_TTL_MS / 3600_000} hours. Up to ${fmt(Math.min(maxNow, mandate.approvalAbove), ccy)} passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.approvalAbove) } };
   }
 
+  // Veto window: announced, then goes through after the window unless the
+  // owner cancels. A matured window is an allowance like any other.
+  if (mandate.vetoAbove != null && amt > mandate.vetoAbove) {
+    const allowance = facts.approvedAllowances.find(
+      (a) => a.amount === amt && a.merchant.trim().toLowerCase() === req.merchant.trim().toLowerCase() && (!a.expiresAt || now <= new Date(a.expiresAt))
+    );
+    if (allowance) return { decision: "approved", reason: allowance.decidedBy === "silence" ? "Within limits; the veto window passed without objection." : `Within limits; covered by your approval ${allowance.id.slice(0, 8)}.`, rule: allowance.decidedBy === "silence" ? "veto_passed" : "allowance", allowanceId: allowance.id };
+    if (facts.recentlyDenied) {
+      const at = facts.recentlyDeniedAt ? new Date(new Date(facts.recentlyDeniedAt).getTime() + DENIAL_COOLOFF_MS) : null;
+      return declined("denied_recently", "You cancelled this same request recently; the agent may ask again after the cooling-off period.", { message: `The owner cancelled this exact request${at ? `; it may be asked again after ${at.toISOString()}` : " recently"}.`, retryAt: at?.toISOString(), maxAmountNow: Math.min(maxNow, mandate.vetoAbove) });
+    }
+    return { decision: "pending", reason: `Above the ${fmt(mandate.vetoAbove, ccy)} veto threshold — goes through in ${mandate.vetoMinutes} minutes unless the owner cancels.`, rule: "veto", remedy: { message: `Amounts above ${fmt(mandate.vetoAbove, ccy)} are announced to the owner and go through after ${mandate.vetoMinutes} minutes unless cancelled. Retry the identical request (same idempotency key) after retryAt.`, approvalRequired: false, maxAmountNow: Math.min(maxNow, mandate.vetoAbove) } };
+  }
+
   return { decision: "approved", reason: "Within all mandate limits.", rule: "limits" };
+}
+
+// ---------- Policy time-travel ----------
+//
+// Replay a mandate's history against different terms. Pure: the same engine,
+// fed facts rebuilt from the replay's own approvals, so "what if the daily
+// limit were 30" is answered by the code that would enforce it. Requests the
+// engine would have escalated stay "pending" (nobody can approve the past).
+
+export type ReplayRequest = { id: string; amount: number; merchant: string; category?: string; at: Date; actual: string };
+export type ReplayOutcome = { id: string; decision: string; rule: string; actual: string; changed: boolean };
+
+export function replayHistory(terms: Mandate, requests: ReplayRequest[]): { outcomes: ReplayOutcome[]; counts: Record<string, number>; changed: number } {
+  const sorted = [...requests].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const approvedRows: { amount: number; at: Date }[] = [];
+  const outcomes: ReplayOutcome[] = [];
+  const counts: Record<string, number> = { approved: 0, declined: 0, pending: 0 };
+  for (const r of sorted) {
+    const dayStart = localDayStart(r.at, terms.timezone);
+    const spentToday = approvedRows.filter((x) => x.at >= dayStart && x.at <= r.at).reduce((s, x) => s + x.amount, 0);
+    const spentTotal = approvedRows.reduce((s, x) => s + x.amount, 0);
+    const d = evaluate({ ...terms, status: "active", expiresAt: null, pausedUntil: null }, { amount: r.amount, merchant: r.merchant, category: r.category, now: r.at }, { spentToday, spentTotal, approvedAllowances: [], openPending: 0, recentlyDenied: false, availableBalance: null });
+    if (d.decision === "approved") approvedRows.push({ amount: r.amount, at: r.at });
+    counts[d.decision] = (counts[d.decision] ?? 0) + 1;
+    outcomes.push({ id: r.id, decision: d.decision, rule: d.rule, actual: r.actual, changed: d.decision !== r.actual });
+  }
+  return { outcomes, counts, changed: outcomes.filter((o) => o.changed).length };
 }
 
 function pad(n: number) { return String(n).padStart(2, "0"); }

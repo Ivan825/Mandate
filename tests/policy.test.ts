@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, merchantMatches, validateTerms, endOfLocalDay, localHour, effectiveTerms, type Facts } from "../lib/policy";
+import { evaluate, merchantMatches, validateTerms, validateVetoTerms, validateAutonomyTerms, endOfLocalDay, localHour, effectiveTerms, replayHistory, type Facts } from "../lib/policy";
 import type { Mandate, Approval } from "../lib/schema";
 
 const base: Mandate = {
   id: "m1", agentId: "a1", name: "t", status: "active", currency: "USD",
   perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
   allowedMerchants: JSON.stringify(["OpenAI", "Vercel*"]), blockedCategories: JSON.stringify(["gambling"]),
-  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null,
+  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null, vetoAbove: null, vetoMinutes: 15, mode: "enforce", autonomyStep: 0, autonomyEvery: 10, autonomyCeiling: null, autonomyLevel: 0, autonomyStreak: 0,
   workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null,
   createdAt: new Date(), revokedAt: null,
 };
@@ -32,7 +32,7 @@ test("rule order: scope before limits, limits before escalation", () => {
 });
 
 test("allowance must match exact amount and merchant and be unexpired", () => {
-  const mk = (o: Partial<Approval>): Approval => ({ id: "ap1", workspaceId: "ws1", mandateId: "m1", decidedBy: null, amount: 4500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", ...o });
+  const mk = (o: Partial<Approval>): Approval => ({ id: "ap1", workspaceId: "ws1", mandateId: "m1", decidedBy: null, amount: 4500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", kind: "ask", vetoUntil: null, signedWith: null, signature: null, ...o });
   assert.equal(evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts({ approvedAllowances: [mk({})] })).rule, "allowance");
   assert.equal(evaluate(base, { amount: 4400, merchant: "OpenAI" }, facts({ approvedAllowances: [mk({})] })).decision, "pending");
   assert.equal(evaluate(base, { amount: 4500, merchant: "openai" }, facts({ approvedAllowances: [mk({})] })).rule, "allowance");
@@ -133,4 +133,54 @@ test("prepaid balance caps card spend after the mandate's own limits", () => {
   assert.equal(evaluate(base, { amount: 1500, merchant: "OpenAI", now: new Date("2026-09-06T10:00:00Z") }, facts({ availableBalance: null })).decision, "approved");
   // Limits are checked first so the reason names the mandate, not the balance.
   assert.equal(evaluate(base, { amount: 999999, merchant: "OpenAI", now: new Date("2026-09-06T10:00:00Z") }, facts({ availableBalance: 0 })).rule, "per_txn");
+});
+
+test("veto window: pending with retry, matured veto passes, cancel blocks; ask wins above its own threshold", () => {
+  const m = { ...base, approvalAbove: 4000, vetoAbove: 1000 };
+  const v = evaluate(m, { amount: 1500, merchant: "OpenAI" }, facts());
+  assert.equal(v.decision, "pending"); assert.equal(v.rule, "veto"); assert.equal(v.remedy?.approvalRequired, false);
+  assert.equal(evaluate(m, { amount: 4500, merchant: "OpenAI" }, facts()).rule, "approval"); // above ask threshold: ask, not veto
+  assert.equal(evaluate(m, { amount: 900, merchant: "OpenAI" }, facts()).decision, "approved");
+  const matured = { id: "v1", workspaceId: "ws1", mandateId: "m1", decidedBy: "silence", amount: 1500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", kind: "veto", vetoUntil: new Date(), signedWith: null, signature: null };
+  const ok = evaluate(m, { amount: 1500, merchant: "OpenAI" }, facts({ approvedAllowances: [matured] }));
+  assert.equal(ok.decision, "approved"); assert.equal(ok.rule, "veto_passed"); assert.equal(ok.allowanceId, "v1");
+  assert.equal(evaluate(m, { amount: 1500, merchant: "OpenAI" }, facts({ recentlyDenied: true })).rule, "denied_recently");
+  assert.ok(validateVetoTerms({ vetoAbove: 5000, vetoMinutes: 15, approvalAbove: 4000, perTxnLimit: 5000 }).length > 0);
+  assert.ok(validateVetoTerms({ vetoAbove: 1000, vetoMinutes: 0, approvalAbove: null, perTxnLimit: 5000 }).some((e) => e.field === "vetoMinutes"));
+  assert.deepEqual(validateVetoTerms({ vetoAbove: 1000, vetoMinutes: 15, approvalAbove: 4000, perTxnLimit: 5000 }), []);
+});
+
+test("an approved plan item passes without asking, once, within the limits", () => {
+  const plan = { id: "p1", workspaceId: "ws1", mandateId: "m1", title: "Q4 tools", items: JSON.stringify([{ merchant: "OpenAI", amount: 3000 }, { merchant: "Vercel*", amount: 2500, usedBy: "t9" }]), totalMax: 5500, currency: "USD", status: "approved", proposedBy: "", source: "agent_api", flags: "[]", createdAt: new Date(), decidedAt: new Date(), decidedBy: "me", expiresAt: new Date(Date.now() + 86400e3) };
+  const d = evaluate(base, { amount: 2900, merchant: "OpenAI" }, facts({ plans: [plan] }));
+  assert.equal(d.decision, "approved"); assert.equal(d.rule, "plan"); assert.equal(d.planId, "p1"); assert.equal(d.planItem, 0);
+  assert.equal(evaluate(base, { amount: 3100, merchant: "OpenAI" }, facts({ plans: [plan] })).decision, "pending"); // over the item amount: back to the normal rules
+  assert.equal(evaluate(base, { amount: 2100, merchant: "Vercel Pro" }, facts({ plans: [plan] })).rule, "approval"); // used item: normal rules (above the 2000 threshold → ask)
+  assert.equal(evaluate(base, { amount: 2900, merchant: "OpenAI" }, facts({ plans: [{ ...plan, expiresAt: new Date(Date.now() - 1) }] })).decision, "pending");
+  assert.equal(evaluate(base, { amount: 9000, merchant: "OpenAI" }, facts({ plans: [{ ...plan, items: JSON.stringify([{ merchant: "OpenAI", amount: 9000 }]) }] })).rule, "per_txn"); // limits still apply
+});
+
+test("graduated autonomy lifts per-transaction and ask-me-above by the earned level, up to the ceiling", () => {
+  const m = { ...base, autonomyStep: 1000, autonomyEvery: 5, autonomyCeiling: 8000, autonomyLevel: 2000 };
+  const t = effectiveTerms(m, [], new Date());
+  assert.equal(t.perTxnLimit, 7000); assert.equal(t.approvalAbove, 4000); assert.equal(t.autonomy, 2000);
+  assert.equal(effectiveTerms({ ...m, autonomyLevel: 9000 }, [], new Date()).perTxnLimit, 8000); // capped at the ceiling
+  assert.equal(effectiveTerms({ ...m, autonomyStep: 0 }, [], new Date()).perTxnLimit, 5000); // off
+  assert.equal(evaluate(m, { amount: 3500, merchant: "OpenAI" }, facts()).decision, "approved"); // 3500 ≤ lifted threshold 4000
+  assert.ok(validateAutonomyTerms({ autonomyStep: 100, autonomyEvery: 5, autonomyCeiling: 4000, perTxnLimit: 5000 }).some((e) => e.field === "autonomyCeiling"));
+});
+
+test("policy time-travel replays history against hypothetical terms", () => {
+  const at = (h: number) => new Date(Date.UTC(2026, 8, 5, h));
+  const history = [
+    { id: "a", amount: 1500, merchant: "OpenAI", at: at(3), actual: "approved" },
+    { id: "b", amount: 1500, merchant: "OpenAI", at: at(4), actual: "approved" },
+    { id: "c", amount: 1500, merchant: "OpenAI", at: at(5), actual: "approved" },
+    { id: "d", amount: 4500, merchant: "Anthropic", at: at(6), actual: "declined" },
+  ];
+  const same = replayHistory({ ...base, allowedMerchants: "[]" }, history);
+  assert.deepEqual(same.outcomes.map((o) => o.decision), ["approved", "approved", "approved", "pending"]);
+  const tighter = replayHistory({ ...base, allowedMerchants: "[]", dailyLimit: 3000, totalLimit: 3000 }, history);
+  assert.deepEqual(tighter.outcomes.map((o) => o.decision), ["approved", "approved", "declined", "declined"]);
+  assert.equal(tighter.outcomes[2].rule, "daily"); assert.equal(tighter.changed, 1);
 });

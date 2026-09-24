@@ -64,6 +64,13 @@
       "when": 1790279669980,
       "tag": "0008_phase2_pause_overrides_flags_push_shares",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790285146182,
+      "tag": "0009_phase3_veto_plans_shadow_autonomy_signed",
+      "breakpoints": true
     }
   ]
 }

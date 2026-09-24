@@ -1,6 +1,6 @@
 {
   "name": "mandate-agent",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Give your AI agent a spending mandate, not a card: authorise, capture and void purchases against limits a human set, with a signed ledger.",
   "license": "AGPL-3.0-only",
   "type": "module",

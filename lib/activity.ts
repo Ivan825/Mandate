@@ -26,7 +26,7 @@ const money = (p: P, key = "amount") => { const a = n(p[key]); const c = s(p.cur
 
 export function groupOf(type: string): Group {
   if (type.startsWith("authorization.")) return "decisions";
-  if (type.startsWith("approval.")) return "approvals";
+  if (type.startsWith("approval.") || type.startsWith("plan.")) return "approvals";
   if (type.startsWith("mandate.card") || type.startsWith("stripe.") || type.startsWith("balance.")) return "cards";
   if (type.startsWith("mandate.")) return "mandates";
   if (type.startsWith("agent.")) return "agents";
@@ -55,16 +55,29 @@ function describe(type: string, p: P, names: { mandate?: string; agent?: string 
   const base: Described = { summary: type, group, tone: "", mandateId: s(p.mandateId) || undefined, agentId: s(p.agentId) || undefined, merchant: s(p.merchant) || undefined, amount: n(p.amount) ?? undefined, currency: s(p.currency) || undefined };
   const via = s(p.source) ? ` via ${s(p.source) === "agent_api" ? "the API" : s(p.source) === "mcp" ? `MCP${s(p.actor) ? ` (${s(p.actor)})` : ""}` : s(p.source)}` : "";
   switch (type) {
-    case "authorization.approved": return { ...base, outcome: "approved", tone: "ok", summary: `${who} was allowed ${money(p)} at ${s(p.merchant)}${m}${via}${p.settlement === "held" ? " — held until captured" : ""}.` };
+    case "authorization.approved": { const sh = p.shadow as { decision?: string; rule?: string } | undefined; return { ...base, outcome: "approved", tone: sh && sh.decision !== "approved" ? "warn" : "ok", summary: `${who} was allowed ${money(p)} at ${s(p.merchant)}${m}${via}${s(p.rule) === "plan" ? " — inside an approved plan" : s(p.rule) === "veto_passed" ? " — veto window passed" : ""}${p.settlement === "held" ? " — held until captured" : ""}${sh && sh.decision !== "approved" ? ` (shadow: would have ${sh.decision === "pending" ? "asked" : "declined"}, ${sh.rule})` : ""}.` }; }
     case "authorization.declined": return { ...base, outcome: "declined", tone: "bad", summary: `${who} was refused ${money(p)} at ${s(p.merchant)}${m}: ${s(p.reason)}` };
     case "authorization.pending": return { ...base, outcome: "pending", tone: "warn", summary: `${who} asked for ${money(p)} at ${s(p.merchant)}${m} — waiting for approval.` };
     case "authorization.captured": { const cap = n(p.capturedAmount), auth = n(p.authorizedAmount), rel = n(p.released) ?? 0; const c = s(p.currency); return { ...base, amount: cap ?? undefined, outcome: "captured", tone: "ok", summary: `${s(p.by) === "system" ? "Hold" : `${s(p.by) === "agent" ? who : s(p.by)} captured`}${s(p.by) === "system" ? " closed" : ""} ${cap != null && c ? fmt(cap, c) : ""} at ${s(p.merchant)}${rel > 0 && c ? ` (${fmt(rel, c)} of ${auth != null ? fmt(auth, c) : ""} released)` : ""}${s(p.reason) === "hold expired" ? " — hold expired, captured by policy" : ""}.` }; }
     case "authorization.voided": return { ...base, amount: n(p.authorizedAmount) ?? n(p.amount) ?? undefined, outcome: "voided", tone: "", summary: `${s(p.by) === "agent" ? who : s(p.by) || "Someone"} voided the ${n(p.authorizedAmount) != null && s(p.currency) ? fmt(n(p.authorizedAmount)!, s(p.currency)) : ""} hold at ${s(p.merchant)}${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
     case "authorization.released": return { ...base, amount: n(p.authorizedAmount) ?? undefined, outcome: "released", tone: "", summary: `Hold of ${n(p.authorizedAmount) != null && s(p.currency) ? fmt(n(p.authorizedAmount)!, s(p.currency)) : ""} at ${s(p.merchant)} expired unsettled and was released${m}.` };
     case "authorization.settled": return { ...base, amount: n(p.actualAmount) ?? undefined, outcome: "captured", tone: "ok", summary: `Proxy call to ${s(p.provider)} (${s(p.model)}) settled at ${n(p.actualAmount) != null ? fmt(n(p.actualAmount)!, "USD") : ""}${n(p.estimatedAmount) != null ? ` (estimated ${fmt(n(p.estimatedAmount)!, "USD")})` : ""}.` };
-    case "approval.requested": return { ...base, outcome: "pending", tone: "warn", summary: `${who} asked you to approve ${money(p)} at ${s(p.merchant)}${s(p.purpose) ? ` — “${s(p.purpose)}”` : ""}.` };
-    case "approval.approved": return { ...base, outcome: "approved", tone: "ok", summary: `${s(p.by) || "You"} approved ${money(p)} at ${s(p.merchant)}${m}.` };
-    case "approval.denied": return { ...base, outcome: "denied", tone: "bad", summary: `${s(p.by) || "You"} denied ${money(p)} at ${s(p.merchant)}${m}.` };
+    case "approval.requested": return s(p.kind) === "veto"
+      ? { ...base, outcome: "pending", tone: "warn", summary: `${who} announced ${money(p)} at ${s(p.merchant)} — goes through at ${s(p.vetoUntil)} unless cancelled${s(p.purpose) ? ` (“${s(p.purpose)}”)` : ""}.` }
+      : { ...base, outcome: "pending", tone: "warn", summary: `${who} asked you to approve ${money(p)} at ${s(p.merchant)}${s(p.purpose) ? ` — “${s(p.purpose)}”` : ""}.` };
+    case "approval.approved": return s(p.by) === "silence"
+      ? { ...base, outcome: "approved", tone: "ok", summary: `The veto window on ${money(p)} at ${s(p.merchant)} closed without objection.` }
+      : { ...base, outcome: "approved", tone: "ok", summary: `${s(p.by) || "You"} approved ${money(p)} at ${s(p.merchant)}${m}${p.humanSigned ? " — signed with a passkey" : ""}.` };
+    case "approval.denied": return { ...base, outcome: "denied", tone: "bad", summary: `${s(p.by) || "You"} ${s(p.kind) === "veto" ? "cancelled" : "denied"} ${money(p)} at ${s(p.merchant)}${m}${p.humanSigned ? " — signed with a passkey" : ""}.` };
+    case "plan.proposed": return { ...base, outcome: "pending", tone: "warn", amount: n(p.totalMax) ?? undefined, summary: `${who} proposed a plan “${s(p.title)}”: ${Array.isArray(p.items) ? (p.items as unknown[]).length : "?"} items, up to ${money(p, "totalMax")}.` };
+    case "plan.approved": return { ...base, outcome: "approved", tone: "ok", amount: n(p.totalMax) ?? undefined, summary: `${s(p.by) || "You"} approved the plan “${s(p.title)}” (up to ${money(p, "totalMax")}).` };
+    case "plan.denied": return { ...base, outcome: "denied", tone: "bad", summary: `${s(p.by) || "You"} denied the plan “${s(p.title)}”.` };
+    case "plan.completed": return { ...base, tone: "ok", summary: `Every item of the plan “${s(p.title)}” has been bought.` };
+    case "plan.cancelled": return { ...base, tone: "", summary: `${s(p.by)} cancelled the plan “${s(p.title)}”.` };
+    case "plan.expired": return { ...base, tone: "", summary: "A plan expired unused." };
+    case "mandate.mode_changed": return { ...base, tone: "warn", summary: s(p.mode) === "observe" ? `${s(p.by)} switched the mandate to shadow mode: nothing is declined, verdicts are recorded.` : `${s(p.by)} switched the mandate to enforcing.` };
+    case "mandate.autonomy_up": return { ...base, tone: "ok", summary: `Trust track: after ${n(p.after) ?? ""} clean decisions the per-transaction limit rose to ${n(p.perTxnNow) != null && s(p.currency) ? fmt(n(p.perTxnNow)!, s(p.currency)) : ""}.` };
+    case "mandate.autonomy_down": return { ...base, tone: "warn", summary: s(p.by) ? `${s(p.by)} reset the trust track to probation.` : `Trust track stepped down (${s(p.reason)}); per-transaction limit now ${n(p.perTxnNow) != null && s(p.currency) ? fmt(n(p.perTxnNow)!, s(p.currency)) : ""}.` };
     case "approval.expired": return { ...base, outcome: "expired", tone: "", summary: `Request for ${money(p)} at ${s(p.merchant)} expired (${s(p.reason)}).` };
     case "approval.notified": return { ...base, tone: "", summary: `Approvers were notified (${Array.isArray(p.channels) ? (p.channels as { channel: string; ok: boolean }[]).map((c) => `${c.channel} ${c.ok ? "✓" : "✗"}`).join(", ") : ""}).` };
     case "mandate.issued": return { ...base, tone: "ok", summary: `Mandate “${s(p.name)}” issued: ${money(p, "perTxnLimit")} per purchase, ${money(p, "dailyLimit")} a day, ${money(p, "totalLimit")} in total${n(p.approvalAbove) != null ? `, ask above ${money(p, "approvalAbove")}` : ""}.` };

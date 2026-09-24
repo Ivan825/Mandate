@@ -4,6 +4,25 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-25
+
+The ideas nobody else has shipped: approval by silence, plans approved once, terms you can rehearse, history you can replay, limits that are earned, and approvals a human provably signed.
+
+### Added
+- **Veto windows**: a second threshold below "ask me above". Requests above it are announced and go through after the window (default 15 min) unless the owner cancels — from the inbox, the email, or a push notification. Agents get `pending` with rule `veto` and a `retryAt`.
+- **Pre-approved plans**: `POST /api/agent/plans` and the MCP tools `propose_plan` / `get_plan` (also in both SDKs and the stdio server). The owner approves the list once from the inbox (or a one-tap link at `/p/:id`); each item then passes with rule `plan`, once, within the limits. Items above the per-transaction limit are refused up front.
+- **Shadow mode**: a mandate in `observe` lets everything through and records what the terms would have decided; the mandate page shows the report and a one-click switch to enforce. Selectable at issue time and on the mandate page.
+- **Policy time-travel**: the What-if panel on the mandate page (and `POST /api/mandates/:id/replay`) replays the real history through the real engine under different terms and lists the decisions that would have changed.
+- **Graduated autonomy**: optional per mandate — every N clean decisions the per-transaction limit and the ask-me-above threshold rise by a step toward a ceiling; a denial or a decline burst steps back; a trust track on the mandate page; owners can reset to probation.
+- **Human-signed approvals**: "Approve once · signed" in the inbox signs the exact decision with the approver's passkey (WebAuthn); the signature is stored with the approval, digested into the ledger event, carried on the public receipt and re-verified by the receipt verifier.
+
+### Changed
+- `mandates` gained `veto_above`, `veto_minutes`, `mode`, `autonomy_*`; `approvals` gained `kind`, `veto_until`, `signed_with`, `signature`; `transactions` gained `shadow_*`, `plan_id`; new table `plans` (migration `0009`).
+- `@simplewebauthn/server` is now a direct dependency (it was already pulled in by Better Auth's passkey plugin).
+
+### Migration
+`npm run db:migrate` (adds `0009`). No new environment variables.
+
 ## [0.5.0] — 2026-09-25
 
 Launch set: the things that make the demo good, give developers something to install, and give owners a reason to keep it on their phone.
@@ -69,7 +88,8 @@ First public beta.
 - Claude's client-metadata document could not be fetched on Node 20+ (Better Auth CIMD ≤ 1.7.2); upgraded to 1.7.5 with migration `0006`.
 - OAuth authorization-server metadata is also served at the bare `/.well-known/oauth-authorization-server` for clients that skip protected-resource discovery.
 
-[Unreleased]: https://github.com/Ivan825/Mandate/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Ivan825/Mandate/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Ivan825/Mandate/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Ivan825/Mandate/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Ivan825/Mandate/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Ivan825/Mandate/releases/tag/v0.3.0

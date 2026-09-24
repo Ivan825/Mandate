@@ -51,6 +51,21 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "propose_plan",
+        "description": "Before a multi-step task, list what you intend to buy (merchant, maximum amount in minor units, purpose) as one plan. The owner approves the list once; each purchase inside it then passes request_purchase without asking. Poll get_plan until status is approved.",
+        "parameters": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "items": {"type": "array", "items": {"type": "object", "properties": {"merchant": {"type": "string"}, "amount": {"type": "integer"}, "purpose": {"type": "string"}}, "required": ["merchant", "amount"]}}},
+            "required": ["title", "items"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_plan",
+        "description": "Read a plan's status and which items are still available.",
+        "parameters": {"type": "object", "properties": {"plan_id": {"type": "string"}}, "required": ["plan_id"], "additionalProperties": False},
+    },
+    {
         "name": "void_purchase",
         "description": "Nothing was paid: release the approved hold back to the limits.",
         "parameters": {"type": "object", "properties": {"transaction_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["transaction_id"], "additionalProperties": False},
@@ -75,6 +90,10 @@ def dispatch(m: Mandate, name: str, arguments: Any) -> Dict[str, Any]:
         return m.capture(str(args["transaction_id"]), args.get("amount"), args.get("note"))
     if name == "void_purchase":
         return m.void(str(args["transaction_id"]), args.get("reason"))
+    if name == "propose_plan":
+        return m.propose_plan(str(args["title"]), list(args["items"]))
+    if name == "get_plan":
+        return m.get_plan(str(args["plan_id"]))
     raise ValueError(f"Unknown tool {name}")
 
 
@@ -102,7 +121,17 @@ def agents_tools(m: Mandate) -> list:
         """Nothing was paid: release the hold."""
         return m.void(transaction_id, reason or None)
 
-    return [check_mandate, request_purchase, capture_purchase, void_purchase]
+    @function_tool
+    def propose_plan(title: str, items: list) -> dict:
+        """List intended purchases ([{merchant, amount(minor units), purpose}]) for one-time approval; poll get_plan until approved."""
+        return m.propose_plan(title, items)
+
+    @function_tool
+    def get_plan(plan_id: str) -> dict:
+        """Read a plan's status and remaining items."""
+        return m.get_plan(plan_id)
+
+    return [check_mandate, request_purchase, capture_purchase, void_purchase, propose_plan, get_plan]
 
 
 def langchain_tools(m: Mandate) -> list:
@@ -121,5 +150,11 @@ def langchain_tools(m: Mandate) -> list:
     def void_purchase(transaction_id: str, reason: str = "") -> dict:
         return m.void(transaction_id, reason or None)
 
+    def propose_plan(title: str, items: list) -> dict:
+        return m.propose_plan(title, items)
+
+    def get_plan(plan_id: str) -> dict:
+        return m.get_plan(plan_id)
+
     by_name = {s["name"]: s["description"] for s in TOOL_SCHEMAS}
-    return [StructuredTool.from_function(f, name=f.__name__, description=by_name[f.__name__]) for f in (check_mandate, request_purchase, capture_purchase, void_purchase)]
+    return [StructuredTool.from_function(f, name=f.__name__, description=by_name[f.__name__]) for f in (check_mandate, request_purchase, capture_purchase, void_purchase, propose_plan, get_plan)]

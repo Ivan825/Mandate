@@ -9,7 +9,9 @@ import { stripeEnabled } from "@/lib/stripe";
 import { Pill, Util, When, Flags } from "@/app/components";
 import { simulatePurchaseAction, revokeMandateAction, freezeCardAction, settleHoldAction, pauseMandateAction, resumeMandateAction, raiseLimitAction, withdrawRaiseAction, shareReceiptAction } from "@/app/actions";
 import { effectiveTerms, isPaused, OVERRIDE_FIELDS } from "@/lib/policy";
-import { listOverrides } from "@/lib/service";
+import { listOverrides, shadowReport, listPlans, planView } from "@/lib/service";
+import { setModeAction, resetAutonomyAction, cancelPlanAction } from "@/app/actions";
+import { WhatIf } from "./whatif";
 import { inputStep, toMajor } from "@/lib/money";
 import { stripePublishableKey } from "@/lib/stripe";
 import { availableBalance } from "@/lib/balance";
@@ -27,7 +29,8 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
   await sweepReveals();
   const revealed = isNew && grantValid(m.id, g) ? await revealToken(ctx.workspaceId, m.id) : null;
   const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
-  const [facts, txns, approvals, overrides] = await Promise.all([factsFor(m), recentTransactions(ctx.workspaceId, 50, m.id), listApprovals(ctx.workspaceId), listOverrides(ctx.workspaceId, m.id)]);
+  const [facts, txns, approvals, overrides, shadow, plans] = await Promise.all([factsFor(m), recentTransactions(ctx.workspaceId, 50, m.id), listApprovals(ctx.workspaceId), listOverrides(ctx.workspaceId, m.id), m.mode === "observe" ? shadowReport(ctx.workspaceId, m.id) : null, listPlans(ctx.workspaceId, { mandateId: m.id })]);
+  const autonomyMax = m.autonomyStep > 0 ? Math.max(0, (m.autonomyCeiling ?? m.perTxnLimit) - m.perTxnLimit) : 0;
   const now = new Date();
   const eff = effectiveTerms(m, overrides, now);
   const activeRaises = overrides.filter((o) => !o.revokedAt && new Date(o.startsAt) <= now && new Date(o.endsAt) > now);
@@ -49,7 +52,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
       <div className="page-head">
         <div>
           <div className="eyebrow">{agent?.name ?? "Agent"} · mandate</div>
-          <h1>{m.name} <Pill v={status} /></h1>
+          <h1>{m.name} <Pill v={status} />{m.mode === "observe" && <> <Pill v="observe" /></>}</h1>
           <p className="muted">{m.currency} · issued <When d={m.createdAt} />{m.expiresAt && <> · valid to end of {new Date(m.expiresAt).toLocaleDateString("en-GB", { timeZone: m.timezone, day: "2-digit", month: "short", year: "numeric" })} ({m.timezone})</>}{m.revokedAt && <> · revoked <When d={m.revokedAt} /></>}</p>
         </div>
         <div className="actions">
@@ -91,6 +94,15 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         <div className="notice bad" style={{ marginBottom: 20 }}><strong>Card not issued.</strong> {m.cardError} The mandate works through the API and MCP; fix this in <Link href="/settings">Settings</Link> and issue a new mandate for a card.</div>
       )}
       {actionError && <div className="notice bad" style={{ marginBottom: 20 }}>{actionError}</div>}
+      {m.mode === "observe" && shadow && (
+        <div className="notice" style={{ marginBottom: 20 }}>
+          <div className="page-head" style={{ marginBottom: 0 }}>
+            <div><strong>Shadow mode: observing, not enforcing.</strong> Every request goes through; the terms' verdict is recorded. So far: {shadow.total} request{shadow.total === 1 ? "" : "s"} seen, <strong>{shadow.wouldDecline}</strong> would have been declined, <strong>{shadow.wouldAsk}</strong> would have asked you{shadow.byRule.length > 0 && <> ({shadow.byRule.map((r) => `${r.rule} ×${r.count}`).join(", ")})</>}.</div>
+            {mayIssue && <form action={setModeAction}><input type="hidden" name="mandateId" value={m.id} /><input type="hidden" name="mode" value="enforce" /><button className="btn accent sm" type="submit">Start enforcing</button></form>}
+          </div>
+          {shadow.rows.length > 0 && <table className="mini" style={{ marginTop: 8 }}><tbody>{shadow.rows.slice(0, 8).map((r) => <tr key={r.id}><td><When d={r.createdAt} /></td><td>{fmt(r.authorizedAmount ?? r.amount, r.currency)} at {r.merchant}</td><td><span className={`pill ${r.shadowDecision}`}>{r.shadowDecision === "pending" ? "would ask" : "would decline"}</span> <span className="faint">{r.shadowReason}</span></td></tr>)}</tbody></table>}
+        </div>
+      )}
       {raised && <div className="notice ok" style={{ marginBottom: 20 }}>Temporary raise in force. The mandate's own terms are unchanged and come back when it ends.</div>}
       {paused && <div className="notice" style={{ marginBottom: 20 }}><strong>Paused{m.pausedBy ? ` by ${m.pausedBy}` : ""}.</strong> Every request declines with a resume time; the token still works once it resumes{m.pausedUntil ? <> at <When d={m.pausedUntil} /></> : " — press Resume when ready"}.</div>}
       {m.stripeCardId && (
@@ -130,6 +142,8 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
             <dt>Merchants</dt><dd>{allowed.length ? allowed.join(", ") : <span className="faint">any</span>}</dd>
             <dt>Blocked</dt><dd>{blocked.length ? blocked.join(", ") : <span className="faint">none</span>}</dd>
             <dt>Active hours</dt><dd className="num">{m.activeHoursStart === 0 && m.activeHoursEnd === 24 ? "all day" : `${String(m.activeHoursStart).padStart(2, "0")}:00–${String(m.activeHoursEnd).padStart(2, "0")}:00`} {m.timezone}</dd>
+            {m.vetoAbove != null && <><dt>Veto window</dt><dd>above {fmt(m.vetoAbove, m.currency)}: announced, goes through after {m.vetoMinutes} min unless you cancel</dd></>}
+            <dt>Mode</dt><dd>{m.mode === "observe" ? <>observing (nothing declined){mayIssue && <form action={setModeAction} style={{ display: "inline", marginLeft: 8 }}><input type="hidden" name="mandateId" value={m.id} /><input type="hidden" name="mode" value="enforce" /><button className="btn secondary sm" type="submit">enforce</button></form>}</> : <>enforcing{mayIssue && status === "active" && <form action={setModeAction} style={{ display: "inline", marginLeft: 8 }}><input type="hidden" name="mandateId" value={m.id} /><input type="hidden" name="mode" value="observe" /><button className="btn secondary sm" type="submit" title="Let everything through and only record what the terms would have done">observe instead</button></form>}</>}</dd>
             <dt>Holds</dt><dd>{m.holdTtlHours === 0 ? "settle at once" : <>open {m.holdTtlHours} h, then {m.holdPolicy === "release" ? "released" : "captured in full"}</>}{heldCount > 0 && <> · <strong className="num">{heldCount}</strong> open now</>}</dd>
             <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}{m.cardStatus && m.cardStatus !== "active" ? ` (${m.cardStatus === "inactive" ? "frozen" : m.cardStatus})` : ""}</span> : <span className="faint">none (API and MCP only)</span>}</dd>
             <dt>Token</dt><dd><span className="mono">{m.tokenPrefix}…</span> <span className="faint">(stored hashed; shown once at issue)</span></dd>
@@ -187,6 +201,38 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         </div>
       </div>
 
+      {m.autonomyStep > 0 && (
+        <div className="card" style={{ marginBottom: 28 }}>
+          <div className="page-head" style={{ marginBottom: 6 }}>
+            <div><div className="eyebrow">Trust track (graduated autonomy)</div><p className="muted" style={{ fontSize: 13.5, margin: "4px 0 0" }}>Every {m.autonomyEvery} clean decisions the per-transaction limit and the ask-me-above threshold rise by {fmt(m.autonomyStep, m.currency)}, up to {fmt(m.autonomyCeiling ?? m.perTxnLimit, m.currency)}. A denial or a decline burst steps it back down.</p></div>
+            {mayIssue && m.autonomyLevel > 0 && <form action={resetAutonomyAction}><input type="hidden" name="mandateId" value={m.id} /><button className="btn secondary sm" type="submit">Reset to probation</button></form>}
+          </div>
+          <div className="grid-2">
+            <div><div className="faint" style={{ fontSize: 12.5 }}>Earned so far</div><div className="num" style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 600 }}>{fmt(m.autonomyLevel, m.currency)} <span className="faint" style={{ fontSize: 13, fontFamily: "var(--sans)", fontWeight: 400 }}>of {fmt(autonomyMax, m.currency)}</span></div><div className="track"><div style={{ width: `${autonomyMax > 0 ? Math.min(100, Math.round((m.autonomyLevel / autonomyMax) * 100)) : 0}%` }} /></div><div className="faint" style={{ fontSize: 12.5 }}>per transaction now {fmt(eff.perTxnLimit, m.currency)}{eff.approvalAbove != null && <> · asks above {fmt(eff.approvalAbove, m.currency)}</>}</div></div>
+            <div><div className="faint" style={{ fontSize: 12.5 }}>Clean streak</div><div className="num" style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 600 }}>{m.autonomyStreak} <span className="faint" style={{ fontSize: 13, fontFamily: "var(--sans)", fontWeight: 400 }}>of {m.autonomyEvery}</span></div><div className="track"><div style={{ width: `${Math.min(100, Math.round((m.autonomyStreak / m.autonomyEvery) * 100))}%`, background: "var(--accent)" }} /></div><div className="faint" style={{ fontSize: 12.5 }}>{m.autonomyLevel >= autonomyMax ? "At the ceiling." : `${Math.max(0, m.autonomyEvery - m.autonomyStreak)} more clean decision${m.autonomyEvery - m.autonomyStreak === 1 ? "" : "s"} to the next step.`}</div></div>
+          </div>
+        </div>
+      )}
+
+      {plans.length > 0 && (
+        <>
+          <h2 style={{ marginBottom: 10 }}>Plans</h2>
+          <div className="tbl" style={{ marginBottom: 28 }}>
+            <table>
+              <thead><tr><th>Proposed</th><th>Plan</th><th>Items</th><th>Status</th><th>Decided</th><th></th></tr></thead>
+              <tbody>
+                {plans.map(({ p }) => { const v = planView(p); return (
+                  <tr key={p.id}><td><When d={p.createdAt} /></td><td>{v.title}<div className="faint" style={{ fontSize: 12 }}>up to {fmt(v.totalMax, v.currency)}</div></td><td style={{ fontSize: 12.5 }}>{v.items.map((it) => <div key={it.index} style={it.used ? { textDecoration: "line-through", opacity: .6 } : undefined}>{fmt(it.amount, v.currency)} at {it.merchant}</div>)}</td><td><Pill v={p.status} /></td><td><When d={p.decidedAt} />{p.decidedBy && <div className="faint" style={{ fontSize: 11.5 }}>{p.decidedBy}</div>}</td>
+                    <td>{(p.status === "proposed" || p.status === "approved") && mayRevoke && <form action={cancelPlanAction}><input type="hidden" name="planId" value={p.id} /><input type="hidden" name="back" value={`/mandates/${m.id}`} /><button className="btn secondary sm" type="submit">Cancel</button></form>}</td></tr>
+                ); })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <div style={{ marginBottom: 28 }}><WhatIf mandateId={m.id} currency={m.currency} initial={{ perTxnLimit: m.perTxnLimit, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove, allowedMerchants: allowed }} /></div>
+
       {mine.length > 0 && (
         <>
           <h2 style={{ marginBottom: 10 }}>Approvals on this mandate</h2>
@@ -195,7 +241,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
               <thead><tr><th>Requested</th><th>Merchant</th><th className="r">Amount</th><th>Status</th><th>Decided</th><th>Valid until</th></tr></thead>
               <tbody>
                 {mine.map(({ a }) => (
-                  <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{a.merchant}{a.purpose && <div className="faint" style={{ fontSize: 12 }}>{a.purpose}</div>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td><td><When d={a.status === "approved" ? a.expiresAt : null} /></td></tr>
+                  <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{a.merchant}{a.kind === "veto" && <span className="faint"> · veto window</span>}{a.purpose && <div className="faint" style={{ fontSize: 12 }}>{a.purpose}</div>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} />{a.signedWith && <span className="pill ok" style={{ marginLeft: 6 }}>signed</span>}</td><td><When d={a.decidedAt} />{a.decidedBy === "silence" && <div className="faint" style={{ fontSize: 11.5 }}>no objection</div>}</td><td><When d={a.status === "approved" ? a.expiresAt : a.status === "pending" && a.vetoUntil ? a.vetoUntil : null} /></td></tr>
                 ))}
               </tbody>
             </table>
@@ -217,7 +263,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
                 <td><When d={t.createdAt} /></td>
                 <td>{t.merchant}{t.purpose && <div className="faint" style={{ fontSize: 12 }}>{t.purpose}</div>}<Flags json={t.flags} small /></td>
                 <td className="r num">{t.settlement && t.settlement !== "held" && authorized !== t.amount ? <><s className="faint">{fmt(authorized, t.currency)}</s> {fmt(t.amount, t.currency)}</> : fmt(t.amount, t.currency)}</td>
-                <td><Pill v={t.decision} /></td>
+                <td><Pill v={t.decision} />{t.shadowDecision && t.shadowDecision !== "approved" && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }} title={t.shadowReason ?? ""}>would {t.shadowDecision === "pending" ? "ask" : "decline"} ({t.shadowRule})</div>}</td>
                 <td>
                   {t.settlement && <Pill v={t.settlement} />}
                   {t.settlement === "held" && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>{t.holdExpiresAt ? <>{m.holdPolicy === "release" ? "releases" : "captures"} <When d={t.holdExpiresAt} /></> : "until the card network settles"}</div>}

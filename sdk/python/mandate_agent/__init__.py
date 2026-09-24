@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 __all__ = ["Mandate", "Hold", "Decision", "Remedy", "MandateError", "MandateDeclined", "MandatePending", "MandateAuthError"]
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 DEFAULT_BASE_URL = "https://mandate-ashen.vercel.app"
 
@@ -193,6 +193,24 @@ class Mandate:
     def mandate(self) -> Dict[str, Any]:
         """Limits, what is left, open holds — so the agent can plan."""
         status, payload, _ = self._request("GET", "/api/agent/mandate")
+        if status != 200:
+            raise MandateError(payload.get("error", f"HTTP {status}"), status, payload)
+        return payload
+
+    def propose_plan(self, title: str, items: list, wait_for: float = 0, poll_every: float = 10.0) -> Dict[str, Any]:
+        """Propose a list of intended purchases for one-time approval. items: [{"merchant", "amount", "purpose"?}].
+        With wait_for > 0, polls until the owner decides (status leaves 'proposed') or time runs out."""
+        status, payload, _ = self._request("POST", "/api/agent/plans", {"title": title, "items": items})
+        if status not in (200, 202):
+            raise MandateError(payload.get("error", f"HTTP {status}"), status, payload)
+        deadline = time.monotonic() + wait_for
+        while wait_for > 0 and payload.get("status") == "proposed" and time.monotonic() < deadline:
+            time.sleep(min(poll_every, max(0.0, deadline - time.monotonic())))
+            payload = self.get_plan(payload["planId"])
+        return payload
+
+    def get_plan(self, plan_id: str) -> Dict[str, Any]:
+        status, payload, _ = self._request("GET", f"/api/agent/plans/{plan_id}")
         if status != 200:
             raise MandateError(payload.get("error", f"HTTP {status}"), status, payload)
         return payload

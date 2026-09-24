@@ -5,7 +5,8 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "./db";
 import { fmt } from "./policy";
 import { FLAG_LABELS, parseFlags } from "./anomaly";
-import type { Approval, Mandate } from "./schema";
+import type { Approval, Mandate, Plan } from "./schema";
+import { parsePlanItems } from "./policy";
 import { appUrl, isProduction } from "./env";
 import { sendMail } from "./mailer";
 
@@ -184,21 +185,57 @@ export function approvalMessage(n: ApprovalNotice): Message {
   const links = decisionLinks(n.approval.id);
   const amount = fmt(n.approval.amount, n.approval.currency);
   const flags = parseFlags(n.approval.flags);
-  const html = `<b>${esc(n.agentName)}</b> wants to spend <b>${esc(amount)}</b> at <b>${esc(n.approval.merchant)}</b>` +
+  const veto = n.approval.kind === "veto" && n.approval.vetoUntil ? new Date(n.approval.vetoUntil) : null;
+  const html = `<b>${esc(n.agentName)}</b> ${veto ? "will spend" : "wants to spend"} <b>${esc(amount)}</b> at <b>${esc(n.approval.merchant)}</b>` +
+    (veto ? ` at <b>${veto.toISOString().slice(11, 16)} UTC</b> unless you cancel` : "") +
     (n.approval.purpose ? `\n“${esc(n.approval.purpose)}”` : "") +
     (flags.length ? `\n⚑ ${esc(flags.map((f) => `${FLAG_LABELS[f].label}: ${FLAG_LABELS[f].hint}`).join(" · "))}` : "") +
-    `\nMandate: ${esc(n.mandate.name)} · above your ${esc(fmt(n.mandate.approvalAbove ?? 0, n.mandate.currency))} threshold` +
+    `\nMandate: ${esc(n.mandate.name)} · ${veto ? `above your ${esc(fmt(n.mandate.vetoAbove ?? 0, n.mandate.currency))} veto threshold — no action means yes` : `above your ${esc(fmt(n.mandate.approvalAbove ?? 0, n.mandate.currency))} threshold`}` +
     (links ? "" : `\nOpen the inbox to decide: ${baseUrl()}/approvals`);
   const text = html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   return {
-    title: `${n.agentName} asks to spend ${amount} at ${n.approval.merchant}`,
+    title: veto ? `${n.agentName} will spend ${amount} at ${n.approval.merchant} in ${n.mandate.vetoMinutes} min unless you cancel` : `${n.agentName} asks to spend ${amount} at ${n.approval.merchant}`,
     html, text, links,
     payload: {
-      event: "approval.requested", approvalId: n.approval.id, mandateId: n.mandate.id, mandateName: n.mandate.name, agentName: n.agentName,
+      event: "approval.requested", kind: n.approval.kind, approvalId: n.approval.id, mandateId: n.mandate.id, mandateName: n.mandate.name, agentName: n.agentName,
       amount: n.approval.amount, currency: n.approval.currency, amountDisplay: amount, merchant: n.approval.merchant, purpose: n.approval.purpose, flags,
-      requestedAt: new Date(n.approval.requestedAt).toISOString(), links,
+      requestedAt: new Date(n.approval.requestedAt).toISOString(), vetoUntil: veto ? veto.toISOString() : null, links,
     },
   };
+}
+
+// ---------- Plans ----------
+
+export function planLinks(planId: string) {
+  const exp = Date.now() + LINK_TTL_MS;
+  const a = signLink("plan:" + planId, "approve", exp);
+  const d = signLink("plan:" + planId, "deny", exp);
+  if (!a || !d) return null;
+  return { approve: `${baseUrl()}/p/${planId}?d=approve&t=${a}`, deny: `${baseUrl()}/p/${planId}?d=deny&t=${d}`, inbox: `${baseUrl()}/approvals` };
+}
+export function verifyPlanLink(planId: string, decision: "approve" | "deny", token: string): boolean { return verifyLink("plan:" + planId, decision, token); }
+
+export async function sendPlanProposed(plan: Plan): Promise<Outcome[]> {
+  const [m] = await db.select({ name: schema.mandates.name, agentId: schema.mandates.agentId, workspaceId: schema.mandates.workspaceId }).from(schema.mandates).where(eq(schema.mandates.id, plan.mandateId)).limit(1);
+  if (!m) return [];
+  const [ag] = await db.select({ name: schema.agents.name }).from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
+  const agentName = ag?.name ?? "An agent";
+  let channels = await recipientsFor(m.workspaceId);
+  if (channels.length === 0) channels = fallbackChannels();
+  const items = parsePlanItems(plan.items);
+  const links = planLinks(plan.id);
+  const total = fmt(plan.totalMax, plan.currency);
+  const html = `<b>${esc(agentName)}</b> proposes a plan: <b>${esc(plan.title)}</b> — ${items.length} item${items.length === 1 ? "" : "s"}, up to <b>${esc(total)}</b>\n` +
+    items.map((it) => `• ${esc(fmt(it.amount, plan.currency))} at ${esc(it.merchant)}${it.purpose ? ` — ${esc(it.purpose)}` : ""}`).join("\n") +
+    `\nMandate: ${esc(m.name)}. Approve the plan once and each purchase inside it goes through without asking; anything outside it still asks.`;
+  const text = html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const msg: Message = { title: `${agentName} proposes a plan: ${plan.title} (${items.length} items, up to ${total})`, html, text, links, payload: { event: "plan.proposed", planId: plan.id, mandateId: plan.mandateId, mandateName: m.name, agentName, title: plan.title, totalMax: plan.totalMax, currency: plan.currency, items, links } };
+  const out = channels.length ? await deliver(channels, msg) : [];
+  try {
+    const { pushEnabled, sendPush } = await import("./push");
+    if (pushEnabled()) { const ids = await deciderUserIds(m.workspaceId); const r = await sendPush(ids, { title: msg.title, body: items.slice(0, 3).map((it) => `${fmt(it.amount, plan.currency)} at ${it.merchant}`).join(" · "), tag: `plan:${plan.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: links?.approve, denyUrl: links?.deny }); if (r.devices) out.push({ channel: "push", target: `${r.devices} devices`, ok: r.sent > 0 }); }
+  } catch { /* push is optional */ }
+  return out;
 }
 
 export async function sendApprovalRequested(n: ApprovalNotice): Promise<Outcome[]> {

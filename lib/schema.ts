@@ -42,6 +42,21 @@ export const mandates = pgTable("mandates", {
   // until a time (auto-resume) or until someone resumes it (null).
   pausedUntil: timestamp("paused_until", { withTimezone: true }),
   pausedBy: text("paused_by"),
+  // Veto window: above this amount (and below approvalAbove) a request is
+  // announced and executes after vetoMinutes unless the owner cancels.
+  vetoAbove: integer("veto_above"),
+  vetoMinutes: integer("veto_minutes").notNull().default(15),
+  // enforce = normal; observe = nothing is declined or escalated, but the
+  // decision the terms WOULD have made is recorded (shadow mode).
+  mode: text("mode").notNull().default("enforce"),
+  // Graduated autonomy: after `autonomyEvery` clean decisions the per-transaction
+  // limit and the ask-me-above threshold rise by `autonomyStep`, up to
+  // `autonomyCeiling`; a denial or a decline burst steps back down.
+  autonomyStep: integer("autonomy_step").notNull().default(0), // 0 = off
+  autonomyEvery: integer("autonomy_every").notNull().default(10),
+  autonomyCeiling: integer("autonomy_ceiling"),
+  autonomyLevel: integer("autonomy_level").notNull().default(0), // earned so far, minor units
+  autonomyStreak: integer("autonomy_streak").notNull().default(0),
   // The agent's credential is never stored in clear. tokenHash is what we
   // look up by; tokenPrefix is shown so the owner can recognise it;
   // tokenReveal holds the plaintext until it has been shown exactly once.
@@ -93,6 +108,11 @@ export const transactions = pgTable("transactions", {
   // Set when the owner shares this decision's receipt publicly; the token
   // is the capability, and clearing it un-shares.
   shareToken: text("share_token"),
+  // Shadow mode: what the terms would have decided, when the mandate was observing.
+  shadowDecision: text("shadow_decision"),
+  shadowRule: text("shadow_rule"),
+  shadowReason: text("shadow_reason"),
+  planId: text("plan_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 }, (t) => [uniqueIndex("txn_share_token_idx").on(t.shareToken), index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
 
@@ -111,6 +131,14 @@ export const approvals = pgTable("approvals", {
   expiresAt: timestamp("expires_at", { withTimezone: true }), // an approved allowance lapses after this
   usedAt: timestamp("used_at", { withTimezone: true }),
   flags: text("flags").notNull().default("[]"),
+  // ask = the owner must act; veto = goes through at vetoUntil unless the owner cancels
+  kind: text("kind").notNull().default("ask"),
+  vetoUntil: timestamp("veto_until", { withTimezone: true }),
+  // A WebAuthn assertion the approver made over this decision (JSON), when
+  // they approved with a passkey; the receipt carries it as proof a human
+  // on a registered device decided.
+  signedWith: text("signed_with"), // passkey credential id
+  signature: text("signature"),
 }, (t) => [index("approvals_mandate_status_idx").on(t.mandateId, t.status), index("approvals_ws_status_idx").on(t.workspaceId, t.status)]);
 
 // Append-only, hash-chained log, one chain per workspace. Each hash covers
@@ -327,6 +355,27 @@ export const notes = pgTable("notes", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 }, (t) => [index("notes_target_idx").on(t.workspaceId, t.targetType, t.targetId)]);
 
+// A pre-approved plan: the agent lists what it intends to buy, the owner
+// approves the list once, and each purchase inside it passes without a
+// prompt while anything outside it still asks.
+export const plans = pgTable("plans", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  mandateId: text("mandate_id").notNull().references(() => mandates.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  items: text("items").notNull(), // JSON [{ merchant, amount, purpose, usedBy? }]
+  totalMax: integer("total_max").notNull(),
+  currency: text("currency").notNull(),
+  status: text("status").notNull().default("proposed"), // proposed | approved | denied | expired | completed | cancelled
+  proposedBy: text("proposed_by").notNull().default(""),
+  source: text("source").notNull().default("agent_api"),
+  flags: text("flags").notNull().default("[]"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  decidedBy: text("decided_by"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+}, (t) => [index("plans_mandate_status_idx").on(t.mandateId, t.status), index("plans_ws_status_idx").on(t.workspaceId, t.status)]);
+
 // A temporary raise: for a window, one of the mandate's limits is read as
 // this amount instead of its own (only ever upward — the base terms are
 // the floor). Expires on its own; can be withdrawn early.
@@ -373,4 +422,5 @@ export type WebhookEndpoint = typeof webhookEndpoints.$inferSelect;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type Note = typeof notes.$inferSelect;
 export type MandateOverride = typeof mandateOverrides.$inferSelect;
+export type Plan = typeof plans.$inferSelect;
 export type PushSubscription = typeof pushSubscriptions.$inferSelect;

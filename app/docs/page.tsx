@@ -18,7 +18,7 @@ export default async function DocsPage() {
           <h3>1. Connect with one click (MCP + OAuth) — Claude, ChatGPT, Cursor, and any MCP client</h3>
           <p className="muted" style={{ marginTop: 8 }}>Mandate is a remote MCP server. Add it in your agent's connectors or MCP settings using this URL; the agent will send you here to sign in and approve, and receives a scoped token automatically. Nothing to copy.</p>
           <pre>{MCP_RESOURCE}</pre>
-          <p className="muted">The agent gets six tools: <code>list_mandates</code>, <code>check_mandate</code>, <code>request_purchase</code>, then <code>capture_purchase</code> / <code>void_purchase</code> to settle what it actually paid, and <code>get_purchase</code>. Scopes: <code>mandate:read</code> to see limits, <code>mandate:spend</code> to ask to spend. You can disconnect any agent from Settings.</p>
+          <p className="muted">The agent gets eight tools: <code>list_mandates</code>, <code>check_mandate</code>, <code>request_purchase</code>, then <code>capture_purchase</code> / <code>void_purchase</code> to settle what it actually paid, <code>get_purchase</code>, and <code>propose_plan</code> / <code>get_plan</code> to get a whole shopping list approved once. Scopes: <code>mandate:read</code> to see limits, <code>mandate:spend</code> to ask to spend. You can disconnect any agent from Settings.</p>
           <pre>{`# Claude Code
 claude mcp add --transport http mandate ${MCP_RESOURCE}
 
@@ -39,7 +39,10 @@ Content-Type: application/json
 { "amount": 1299, "merchant": "OpenAI", "purpose": "API credits", "category": "computer_software_stores" }`}</pre>
           <p className="muted" style={{ marginTop: 10 }}>Amounts are integers in minor units. <code>200</code> approved, <code>403</code> declined with the rule, <code>202</code> pending — you've been notified; the agent retries the identical request after you approve. Repeating an <code>Idempotency-Key</code> returns the stored answer instead of deciding twice. Every non-approval carries a <code>remedy</code>: when the same request would pass (<code>retryAt</code>, also sent as <code>x-mandate-retry-at</code>), the most that would pass right now (<code>maxAmountNow</code>), and one sentence of advice.</p>
           <p className="muted" style={{ marginTop: 10 }}><strong>An approval is a hold.</strong> Once the purchase completes, tell Mandate what was actually paid; paying less gives the difference back to the limits. A hold nobody settles is closed by the mandate's policy (captured in full, or released) when its TTL runs out — 24 hours by default.</p>
-          <pre>{`POST ${base}/api/agent/capture     { "transactionId": "…", "amount": 940, "note": "order #1234" }
+          <p className="muted" style={{ marginTop: 10 }}><strong>Two more answers an agent can get.</strong> A pending with rule <code>veto</code> means the owner set a veto window: the purchase goes through by itself at <code>remedy.retryAt</code> unless they cancel — retry then. And for a multi-step task, propose a <strong>plan</strong> first: <code>POST /api/agent/plans</code> with the list of intended purchases; once the owner approves it, each item passes without asking.</p>
+          <pre>{`POST ${base}/api/agent/plans       { "title": "Q4 tooling", "items": [{ "merchant": "OpenAI", "amount": 2000, "purpose": "credits" }] }
+GET  ${base}/api/agent/plans/:id   # proposed | approved | denied | completed …
+POST ${base}/api/agent/capture     { "transactionId": "…", "amount": 940, "note": "order #1234" }
 POST ${base}/api/agent/void        { "transactionId": "…", "reason": "checkout failed" }
 GET  ${base}/api/agent/transactions/:id                  # held | captured | voided | released
 GET  ${base}/api/agent/mandate                           # limits, what's left, open holds`}</pre>

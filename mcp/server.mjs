@@ -61,6 +61,16 @@ const TOOLS = [
     },
   },
   {
+    name: "propose_plan",
+    description: "Before a multi-step task, list what you intend to buy (merchant, maximum amount in minor units, purpose) as one plan. The owner approves the list once; each purchase inside it then passes request_purchase without asking. Poll get_plan until status is approved.",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, items: { type: "array", items: { type: "object", properties: { merchant: { type: "string" }, amount: { type: "integer" }, purpose: { type: "string" } }, required: ["merchant", "amount"] } } }, required: ["title", "items"], additionalProperties: false },
+  },
+  {
+    name: "get_plan",
+    description: "Read a plan's status and which items are still available.",
+    inputSchema: { type: "object", properties: { planId: { type: "string" } }, required: ["planId"], additionalProperties: false },
+  },
+  {
     name: "get_purchase",
     description: "Current state of one purchase authorisation: held, captured, voided or released.",
     inputSchema: { type: "object", properties: { transactionId: { type: "string" } }, required: ["transactionId"], additionalProperties: false },
@@ -79,7 +89,7 @@ async function handle(msg) {
   const fail = (code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
   switch (method) {
     case "initialize":
-      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.5.0" } });
+      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.6.0" } });
     case "notifications/initialized":
       return null;
     case "ping":
@@ -103,6 +113,14 @@ async function handle(msg) {
         if (name === "capture_purchase" || name === "void_purchase") {
           const r = await call(name === "capture_purchase" ? "/api/agent/capture" : "/api/agent/void", { method: "POST", body: JSON.stringify(args ?? {}) });
           return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 && r.status !== 409 });
+        }
+        if (name === "propose_plan") {
+          const r = await call("/api/agent/plans", { method: "POST", body: JSON.stringify(args ?? {}) });
+          return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
+        }
+        if (name === "get_plan") {
+          const r = await call(`/api/agent/plans/${encodeURIComponent(String(args?.planId ?? ""))}`, { method: "GET" });
+          return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
         }
         if (name === "get_purchase") {
           const r = await call(`/api/agent/transactions/${encodeURIComponent(String(args?.transactionId ?? ""))}`, { method: "GET" });

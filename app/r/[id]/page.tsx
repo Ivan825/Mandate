@@ -35,7 +35,7 @@ export default async function PublicReceiptPage(props: Props) {
   const r = l.r;
   const t = r.transaction as { id: string; createdAt: string; decision: string; reason: string; source: string; actor: string; amount: number; authorizedAmount: number; currency: string; merchant: string; category: string; purpose: string; settlement: string | null; settledAt: string | null; settledBy: string | null; settlementNote: string | null; flags: Flag[] };
   const m = r.mandate as { name: string; currency: string; perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove: number | null; allowedMerchants: string[]; activeHours: [number, number]; timezone: string; issuedAt: string };
-  const a = r.approval as { status: string; decidedAt: string | null; decidedBy: string | null } | null;
+  const a = r.approval as { status: string; kind?: string; decidedAt: string | null; decidedBy: string | null; humanSignature?: { credentialId: string; alg: number; verifiedAt: string } | null } | null;
   const base = appUrl();
   const jsonUrl = `${base}/api/receipts/tx/${l.id}?k=${l.k}`;
   const when = (iso: string | null | undefined) => (iso ? new Date(iso).toUTCString().replace(" GMT", " UTC") : "—");
@@ -54,7 +54,7 @@ export default async function PublicReceiptPage(props: Props) {
             {t.settlement && t.settlement !== "held" && <><dt>{t.settlement === "captured" ? "Captured" : t.settlement === "voided" ? "Voided" : "Released"}</dt><dd className="num">{t.settlement === "captured" ? fmt(t.amount, t.currency) : fmt(t.authorizedAmount, t.currency)}{t.settledBy && <span className="faint"> · by {t.settledBy}</span>}{t.settledAt && <div className="faint" style={{ fontSize: 12 }}>{when(t.settledAt)}</div>}</dd></>}
             {t.settlement === "held" && <><dt>Hold</dt><dd>open — not yet settled</dd></>}
             <dt>Via</dt><dd className="mono">{t.source}{t.actor && ` · ${t.actor}`}</dd>
-            {a && <><dt>Human approval</dt><dd>{a.status}{a.decidedBy && <> by {a.decidedBy}</>}{a.decidedAt && <div className="faint" style={{ fontSize: 12 }}>{when(a.decidedAt)}</div>}</dd></>}
+            {a && <><dt>Human approval</dt><dd>{a.kind === "veto" && a.decidedBy === "silence" ? "veto window passed without objection" : a.status}{a.decidedBy && a.decidedBy !== "silence" && <> by {a.decidedBy}</>}{a.decidedAt && <div className="faint" style={{ fontSize: 12 }}>{when(a.decidedAt)}</div>}{a.humanSignature && <div style={{ fontSize: 12.5, marginTop: 4 }}><span className="pill ok">passkey-signed</span> <span className="faint">credential {a.humanSignature.credentialId.slice(0, 10)}… · the WebAuthn assertion is in the JSON and is re-checked by the verifier</span></div>}</dd></>}
             <dt>Transaction</dt><dd className="mono" style={{ fontSize: 12 }}>{t.id}</dd>
           </dl>
         </div>

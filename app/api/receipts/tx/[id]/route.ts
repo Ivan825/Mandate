@@ -21,5 +21,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   let r: TxReceipt;
   try { r = await req.json(); } catch { return NextResponse.json({ error: "Body must be a receipt JSON." }, { status: 400 }); }
   if (!r || r.kind !== "mandate-transaction-receipt" || String(r.transaction?.id) !== id) return NextResponse.json({ error: "Not a transaction receipt for this id." }, { status: 400 });
-  return NextResponse.json(verifyTransactionReceipt(r));
+  const base = verifyTransactionReceipt(r);
+  const hs = (r.approval as { humanSignature?: unknown } | null)?.humanSignature;
+  let humanSignatureValid: boolean | null = null;
+  if (hs && typeof hs === "object") { const { recheckHumanSignature } = await import("@/lib/human-sign"); humanSignatureValid = await recheckHumanSignature(hs as Parameters<typeof recheckHumanSignature>[0]); }
+  return NextResponse.json({ ...base, humanSignatureValid });
 }

@@ -5,7 +5,8 @@ import { requireMcpAuth } from "@better-auth/mcp";
 import { and, eq } from "drizzle-orm";
 import { auth, MCP_RESOURCE } from "@/lib/auth";
 import { db, schema } from "@/lib/db";
-import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, MAX_AMOUNT } from "@/lib/service";
+import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, proposePlan, getPlan, listPlans, planView, MAX_AMOUNT } from "@/lib/service";
+import { sendPlanProposed } from "@/lib/notify";
 import { grantedWorkspace, isTokenRevoked } from "@/lib/connections";
 import { fmt, parseList } from "@/lib/policy";
 
@@ -50,7 +51,7 @@ function text(obj: unknown) {
 }
 
 function buildServer(p: Principal) {
-  const server = new McpServer({ name: "mandate", version: "0.5.0" });
+  const server = new McpServer({ name: "mandate", version: "0.6.0" });
 
   server.registerTool("list_mandates", {
     description: "List the active spending mandates in the connected workspace: each mandate's limits, what is left today and overall, allowed merchants and hours. Call this first to pick the mandate a purchase should go under.",
@@ -89,7 +90,7 @@ function buildServer(p: Principal) {
   });
 
   server.registerTool("request_purchase", {
-    description: "Ask for authorisation to spend under a mandate BEFORE paying. amount is an integer in minor units (1299 = $12.99). Returns approved, declined (with the rule, reason and a remedy: when to retry or the most that would pass now), or pending — pending means the owner has been notified and must approve; tell the user, wait, then retry the identical request with the same idempotencyKey. An approval is a hold: after paying, call capture_purchase with the amount actually paid, or void_purchase if nothing was paid.",
+    description: "Ask for authorisation to spend under a mandate BEFORE paying. amount is an integer in minor units (1299 = $12.99). Returns approved, declined (with the rule, reason and a remedy: when to retry or the most that would pass now), or pending — pending means the owner has been notified and must approve; tell the user, wait, then retry the identical request with the same idempotencyKey. An approval is a hold: after paying, call capture_purchase with the amount actually paid, or void_purchase if nothing was paid. A pending answer with rule 'veto' goes through by itself after remedy.retryAt unless the owner cancels — retry then. For multi-step tasks, propose_plan first so the owner approves the whole list once.",
     inputSchema: z.object({
       mandateId: z.string(),
       amount: z.number().int().positive(),
@@ -119,7 +120,7 @@ function buildServer(p: Principal) {
     }
     const body: Record<string, unknown> = {
       decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
-      settlement: r.settlement, holdExpiresAt: r.holdExpiresAt ? r.holdExpiresAt.toISOString() : null, remedy: r.remedy ?? undefined,
+      settlement: r.settlement, holdExpiresAt: r.holdExpiresAt ? r.holdExpiresAt.toISOString() : null, remedy: r.remedy ?? undefined, shadow: r.shadow ?? undefined,
       next: r.decision === "pending" ? "Tell the user their approval is needed, wait, then call request_purchase again with the same arguments."
         : r.decision === "approved" && r.settlement === "held" ? `Complete the purchase, then call capture_purchase with this transactionId and the amount actually paid, or void_purchase if nothing was paid. Unsettled, the hold is ${m.holdPolicy === "release" ? "released" : "captured in full"} at holdExpiresAt.`
         : r.decision === "declined" ? r.remedy?.message : undefined,
@@ -167,6 +168,31 @@ function buildServer(p: Principal) {
     const r = await voidTransaction({ mandateId: m.id }, transactionId, { by: p.clientName, reason });
     if (!r.ok) return { ...text({ error: r.message, code: r.code, state: r.transaction ? settlementView(r.transaction) : undefined }), isError: r.code !== "not_held" };
     return text({ ...settlementView(r.transaction), note: "Voided. Nothing counts against the mandate for this purchase." });
+  });
+
+  server.registerTool("propose_plan", {
+    description: "Before a multi-step task, list what you intend to buy — merchant, maximum amount (minor units) and purpose per item — as one plan. The owner approves the list once; each purchase inside it then passes request_purchase without asking, while anything outside it still asks. Returns the plan with status 'proposed'; poll get_plan until 'approved'. Items cannot exceed the mandate's per-transaction limit.",
+    inputSchema: z.object({ mandateId: z.string(), title: z.string().min(1).max(120).describe("What the plan is for, in the owner's words"), items: z.array(z.object({ merchant: z.string().min(1).max(120), amount: z.number().int().positive(), purpose: z.string().max(200).optional() })).min(1).max(25) }),
+  }, async ({ mandateId, title, items }) => {
+    const g = spendGuard(); if (g) return g;
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    const r = await proposePlan(m, { title, items, proposedBy: p.clientName, source: "mcp" });
+    if (!r.ok) return { ...text({ error: r.error }), isError: true };
+    after(() => sendPlanProposed(r.plan).catch((e) => console.error("plan notify:", (e as Error).message)));
+    return text({ ...planView(r.plan), next: "Tell the user the owner must approve the plan; poll get_plan until status is approved, then request each purchase normally." });
+  });
+
+  server.registerTool("get_plan", {
+    description: "Read a plan's status and which items are still available. Omit planId to list this mandate's plans.",
+    inputSchema: z.object({ mandateId: z.string(), planId: z.string().optional() }),
+  }, async ({ mandateId, planId }) => {
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    if (!planId) return text({ plans: (await listPlans(p.workspaceId, { mandateId: m.id })).map((r) => planView(r.p)) });
+    const pl = await getPlan({ mandateId: m.id }, planId);
+    if (!pl) return { ...text({ error: "No such plan under this mandate." }), isError: true };
+    return text(planView(pl));
   });
 
   server.registerTool("get_purchase", {

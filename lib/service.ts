@@ -2,10 +2,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
 import { appendEvent, recordEvent } from "./ledger";
-import { evaluate, localDayStart, validateTerms, validateHoldTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError } from "./policy";
+import { evaluate, localDayStart, validateTerms, validateHoldTerms, validateVetoTerms, validateAutonomyTerms, parsePlanItems, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError, type PlanItem } from "./policy";
 import { isCurrencyCode } from "./money";
 import { computeFlags, type Flag } from "./anomaly";
-import type { MandateOverride } from "./schema";
+import type { MandateOverride, Plan } from "./schema";
 import { sendApprovalRequested } from "./notify";
 import { checkWarnings } from "./warnings";
 import { sweepReveals } from "./reveal";
@@ -31,11 +31,18 @@ export function hashToken(token: string): string { return createHash("sha256").u
 export async function expireStale(tx: Tx, workspaceId: string, now = new Date()) {
   const cutoff = new Date(now.getTime() - PENDING_TTL_MS);
   const stale = await tx.update(approvals).set({ status: "expired", decidedAt: now, decidedBy: "system" })
-    .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "pending"), sql`${approvals.requestedAt} < ${cutoff}`)).returning();
+    .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "pending"), sql`${approvals.kind} <> 'veto'`, sql`${approvals.requestedAt} < ${cutoff}`)).returning();
   for (const a of stale) await appendEvent(tx, workspaceId, "approval.expired", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, reason: "unanswered" });
   const lapsed = await tx.update(approvals).set({ status: "expired" })
     .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "approved"), sql`${approvals.expiresAt} is not null and ${approvals.expiresAt} < ${now}`)).returning();
   for (const a of lapsed) await appendEvent(tx, workspaceId, "approval.expired", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, reason: "allowance lapsed unused" });
+  // Veto windows that closed without objection become allowances (24 h).
+  const matured = await tx.update(approvals).set({ status: "approved", decidedAt: now, decidedBy: "silence", expiresAt: new Date(now.getTime() + ALLOWANCE_TTL_MS) })
+    .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "pending"), eq(approvals.kind, "veto"), sql`${approvals.vetoUntil} is not null and ${approvals.vetoUntil} <= ${now}`)).returning();
+  for (const a of matured) await appendEvent(tx, workspaceId, "approval.approved", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, by: "silence", validForMs: ALLOWANCE_TTL_MS, kind: "veto" });
+  const lapsedPlans = await tx.update(schema.plans).set({ status: "expired" })
+    .where(and(eq(schema.plans.workspaceId, workspaceId), sql`${schema.plans.status} in ('proposed','approved')`, sql`${schema.plans.expiresAt} is not null and ${schema.plans.expiresAt} < ${now}`)).returning({ id: schema.plans.id, mandateId: schema.plans.mandateId });
+  for (const pl of lapsedPlans) await appendEvent(tx, workspaceId, "plan.expired", { planId: pl.id, mandateId: pl.mandateId });
   await closeExpiredHolds(tx, now, workspaceId);
   // Pauses that have run their course.
   const resumed = await tx.update(mandates).set({ status: "active", pausedUntil: null, pausedBy: null })
@@ -96,6 +103,9 @@ export type MandateInput = {
   allowedMerchants: string[]; blockedCategories: string[];
   activeHoursStart: number; activeHoursEnd: number; timezone: string; expiresAt: Date | null;
   holdTtlHours?: number; holdPolicy?: "capture" | "release";
+  vetoAbove?: number | null; vetoMinutes?: number;
+  autonomyStep?: number; autonomyEvery?: number; autonomyCeiling?: number | null;
+  mode?: "enforce" | "observe";
 };
 
 export type CreateResult = { ok: true; mandate: Mandate; token: string } | { ok: false; errors: TermsError[] };
@@ -104,7 +114,13 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
   const currency = input.currency.toUpperCase();
   const holdTtlHours = input.holdTtlHours ?? 24;
   const holdPolicy = input.holdPolicy ?? "capture";
-  const errors = [...validateTerms({ ...input, currency }), ...validateHoldTerms({ holdTtlHours, holdPolicy })];
+  const vetoAbove = input.vetoAbove ?? null;
+  const vetoMinutes = input.vetoMinutes ?? 15;
+  const autonomyStep = input.autonomyStep ?? 0;
+  const autonomyEvery = input.autonomyEvery ?? 10;
+  const autonomyCeiling = autonomyStep > 0 ? input.autonomyCeiling ?? null : null;
+  const mode = input.mode === "observe" ? "observe" : "enforce";
+  const errors = [...validateTerms({ ...input, currency }), ...validateHoldTerms({ holdTtlHours, holdPolicy }), ...validateVetoTerms({ vetoAbove, vetoMinutes, approvalAbove: input.approvalAbove, perTxnLimit: input.perTxnLimit }), ...validateAutonomyTerms({ autonomyStep, autonomyEvery, autonomyCeiling, perTxnLimit: input.perTxnLimit })];
   if (!isCurrencyCode(currency)) errors.push({ field: "currency", message: "Currency must be a 3-letter ISO code." });
   const [agent] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, workspaceId))).limit(1);
   if (!agent) errors.push({ field: "agentId", message: "Pick an agent in this workspace." });
@@ -117,6 +133,7 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
     blockedCategories: JSON.stringify(input.blockedCategories.map((s) => s.trim().slice(0, 64)).filter(Boolean).slice(0, 50)),
     activeHoursStart: input.activeHoursStart, activeHoursEnd: input.activeHoursEnd, timezone: input.timezone, expiresAt: input.expiresAt,
     holdTtlHours, holdPolicy, pausedUntil: null, pausedBy: null,
+    vetoAbove, vetoMinutes, mode, autonomyStep, autonomyEvery, autonomyCeiling, autonomyLevel: 0, autonomyStreak: 0,
     tokenHash: hashToken(token), tokenPrefix: token.slice(0, 10), tokenReveal: token,
     stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null, createdAt: new Date(), revokedAt: null,
   };
@@ -128,7 +145,8 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
       allowedMerchants: JSON.parse(row.allowedMerchants), blockedCategories: JSON.parse(row.blockedCategories),
       activeHours: [row.activeHoursStart, row.activeHoursEnd], timezone: row.timezone,
       expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null, tokenPrefix: row.tokenPrefix,
-      holdTtlHours: row.holdTtlHours, holdPolicy: row.holdPolicy,
+      holdTtlHours: row.holdTtlHours, holdPolicy: row.holdPolicy, vetoAbove: row.vetoAbove, vetoMinutes: row.vetoMinutes, mode: row.mode,
+      autonomy: row.autonomyStep > 0 ? { step: row.autonomyStep, every: row.autonomyEvery, ceiling: row.autonomyCeiling } : null,
     });
   });
   // Any plaintext older than the reveal window is cleared right now, not
@@ -303,7 +321,8 @@ export async function factsFor(m: Mandate, now = new Date(), conn: Q = db, req?:
     recentlyDenied = recentlyDeniedAt !== null;
   }
   const overrides = await activeOverrides(m.id, now, conn);
-  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null, overrides };
+  const plans = await conn.select().from(schema.plans).where(and(eq(schema.plans.mandateId, m.id), eq(schema.plans.status, "approved")));
+  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null, overrides, plans };
   return facts;
 }
 
@@ -351,7 +370,7 @@ export async function countPending(workspaceId: string): Promise<number> {
 
 export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy";
 export type Settlement = "held" | "captured" | "voided" | "released";
-export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean; settlement: Settlement | null; holdExpiresAt: Date | null; flags: Flag[] };
+export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean; settlement: Settlement | null; holdExpiresAt: Date | null; flags: Flag[]; shadow: { decision: string; rule: string; reason: string } | null };
 // Postgres int4; also a sanity ceiling no mandate should ever reach.
 export const MAX_AMOUNT = 2_147_483_647;
 
@@ -384,25 +403,56 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
     let d = evaluate(mandate, { amount, merchant, category, purpose, now }, facts);
     const flags: Flag[] = source === "simulation" ? [] : await computeFlags(tx, mandate.id, { amount, merchant }, now).catch(() => []);
 
+    // Shadow mode: the terms are consulted, their verdict is recorded, and
+    // the request goes through regardless. Escalations don't happen (nobody
+    // is asked), which is the point of observing before enforcing.
+    let shadow: { decision: string; rule: string; reason: string } | null = null;
+    if (mandate.mode === "observe" && d.decision !== "approved") {
+      shadow = { decision: d.decision, rule: d.rule, reason: d.reason };
+      d = { decision: "approved", reason: `Observing: the terms would have ${d.decision === "pending" ? "asked you" : "declined"} (${d.rule}). Let through unenforced.`, rule: "observe" };
+    } else if (mandate.mode === "observe") {
+      shadow = { decision: "approved", rule: d.rule, reason: d.reason };
+    }
+
     let approvalId: string | undefined;
+    let planId: string | null = null;
     if (d.decision === "approved" && d.allowanceId) {
       const r = await tx.update(approvals).set({ status: "used", usedAt: now })
         .where(and(eq(approvals.id, d.allowanceId), eq(approvals.status, "approved"))).returning({ id: approvals.id });
       if (r.length === 1) approvalId = d.allowanceId;
       else d = evaluate(mandate, { amount, merchant, category, purpose, now }, { ...facts, approvedAllowances: [] });
     }
+    if (d.decision === "approved" && d.planId != null && d.planItem != null) {
+      // Consume the plan item under the row lock; a plan whose items are all used is complete.
+      const [pl] = await tx.select().from(schema.plans).where(eq(schema.plans.id, d.planId)).for("update").limit(1);
+      const items = pl ? parsePlanItems(pl.items) : [];
+      if (pl && pl.status === "approved" && items[d.planItem] && !items[d.planItem].usedBy) {
+        items[d.planItem].usedBy = "pending"; // replaced with the transaction id below
+        planId = pl.id;
+      } else {
+        d = evaluate(mandate, { amount, merchant, category, purpose, now }, { ...facts, plans: [] });
+      }
+      if (planId && pl) {
+        const complete = items.every((it) => it.usedBy);
+        await tx.update(schema.plans).set({ items: JSON.stringify(items), status: complete ? "completed" : "approved" }).where(eq(schema.plans.id, pl.id));
+        if (complete) await appendEvent(tx, ws, "plan.completed", { planId: pl.id, mandateId: mandate.id, title: pl.title });
+      }
+    }
     if (d.decision === "pending") {
+      const veto = d.rule === "veto";
       const [existing] = await tx.select().from(approvals).where(and(
         eq(approvals.mandateId, mandate.id), eq(approvals.status, "pending"),
         eq(approvals.amount, amount), sql`lower(${approvals.merchant}) = lower(${merchant})`,
       )).limit(1);
-      if (existing) approvalId = existing.id;
+      if (existing) { approvalId = existing.id; if (existing.vetoUntil) d.remedy.retryAt = new Date(existing.vetoUntil).toISOString(); }
       else {
-        const a: Approval = { id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, decidedBy: null, expiresAt: null, usedAt: null, flags: JSON.stringify(flags) };
+        const vetoUntil = veto ? new Date(now.getTime() + mandate.vetoMinutes * 60_000) : null;
+        const a: Approval = { id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, decidedBy: null, expiresAt: null, usedAt: null, flags: JSON.stringify(flags), kind: veto ? "veto" : "ask", vetoUntil, signedWith: null, signature: null };
         await tx.insert(approvals).values(a);
         approvalId = a.id;
         newApproval = a;
-        await appendEvent(tx, ws, "approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source, actor, flags });
+        if (vetoUntil) d.remedy.retryAt = vetoUntil.toISOString();
+        await appendEvent(tx, ws, "approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source, actor, flags, kind: a.kind, vetoUntil: vetoUntil ? vetoUntil.toISOString() : null });
       }
     }
 
@@ -427,15 +477,24 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       settledAt: settlement === "captured" ? now : null, settledBy: settlement === "captured" ? "system" : null,
       settlementNote: settlement === "captured" ? (source === "simulation" ? "Simulated purchase; settled at once." : "Mandate settles at once (hold TTL 0).") : null,
       flags: JSON.stringify(flags), shareToken: null,
+      shadowDecision: shadow?.decision ?? null, shadowRule: shadow?.rule ?? null, shadowReason: shadow?.reason ?? null, planId,
       createdAt: now,
     };
     await tx.insert(transactions).values(t);
+    if (planId) {
+      const [pl] = await tx.select({ items: schema.plans.items }).from(schema.plans).where(eq(schema.plans.id, planId)).limit(1);
+      if (pl) { const items = parsePlanItems(pl.items); for (const it of items) if (it.usedBy === "pending") it.usedBy = t.id; await tx.update(schema.plans).set({ items: JSON.stringify(items) }).where(eq(schema.plans.id, planId)); }
+    }
     await appendEvent(tx, ws, `authorization.${d.decision}`, {
       transactionId: t.id, mandateId: mandate.id, agentId: mandate.agentId, amount, currency: t.currency, merchant, purpose, category,
       rule: d.rule, reason: d.reason, source, actor, approvalId: approvalId ?? null, stripeAuthorizationId: t.stripeAuthorizationId,
       settlement, holdExpiresAt: holdExpiresAt ? holdExpiresAt.toISOString() : null, flags,
+      shadow: shadow ? { decision: shadow.decision, rule: shadow.rule } : undefined, planId: planId ?? undefined,
     });
-    return { ...d, transactionId: t.id, approvalId, mandate, settlement, holdExpiresAt, flags };
+    // Graduated autonomy: a clean, enforced approval advances the streak; a
+    // decline burst (the agent thrashing) steps the earned level back down.
+    if (mandate.autonomyStep > 0 && source !== "simulation" && mandate.mode === "enforce") await autonomyTick(tx, mandate, d.decision === "approved" && flags.length === 0, flags.includes("decline_burst"), now);
+    return { ...d, transactionId: t.id, approvalId, mandate, settlement, holdExpiresAt, flags, shadow };
   });
 
   // Notify only once the request is durably recorded. Callers with a hard
@@ -606,18 +665,146 @@ export async function getApproval(id: string) {
   return row ?? null;
 }
 
-export async function decideApproval(workspaceId: string | null, id: string, decision: "approved" | "denied", by: string) {
+export type HumanSignature = { credentialId: string; alg: number; challenge: string; clientDataJSON: string; authenticatorData: string; signature: string; publicKey: string; userId: string; verifiedAt: string };
+
+export async function decideApproval(workspaceId: string | null, id: string, decision: "approved" | "denied", by: string, signed?: HumanSignature) {
   const now = new Date();
   return db.transaction(async (tx) => {
     const [a] = await tx.select().from(approvals).where(eq(approvals.id, id)).for("update").limit(1);
     if (!a || (workspaceId && a.workspaceId !== workspaceId)) return null;
     const r = await tx.update(approvals)
-      .set({ status: decision, decidedAt: now, decidedBy: by, expiresAt: decision === "approved" ? new Date(now.getTime() + ALLOWANCE_TTL_MS) : null })
+      .set({ status: decision, decidedAt: now, decidedBy: by, expiresAt: decision === "approved" ? new Date(now.getTime() + ALLOWANCE_TTL_MS) : null, signedWith: signed?.credentialId ?? null, signature: signed ? JSON.stringify(signed) : null })
       .where(and(eq(approvals.id, id), eq(approvals.status, "pending"))).returning({ id: approvals.id });
     if (r.length === 0) return null;
-    await appendEvent(tx, a.workspaceId, `approval.${decision}`, { approvalId: id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, by, validForMs: decision === "approved" ? ALLOWANCE_TTL_MS : null });
+    await appendEvent(tx, a.workspaceId, `approval.${decision}`, {
+      approvalId: id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, by, validForMs: decision === "approved" ? ALLOWANCE_TTL_MS : null, kind: a.kind,
+      humanSigned: signed ? { credentialId: signed.credentialId, alg: signed.alg, challenge: signed.challenge, signatureSha256: createHash("sha256").update(signed.signature).digest("hex") } : undefined,
+    });
+    // A denial is the owner saying "no": earned autonomy steps back down.
+    if (decision === "denied") {
+      const [m] = await tx.select().from(mandates).where(eq(mandates.id, a.mandateId)).for("update").limit(1);
+      if (m && m.autonomyStep > 0) await autonomyTick(tx, m, false, true, now);
+    }
     return { ...a, status: decision };
   });
+}
+
+// ---------- Graduated autonomy ----------
+
+// Clean decision → streak; streak reaches `every` → level += step (up to the
+// ceiling). Anything that looks like trouble (a denial, a decline burst)
+// → level −= step, streak reset. Every change is a ledger event.
+async function autonomyTick(tx: Tx, m: Mandate, clean: boolean, trouble: boolean, now: Date) {
+  const maxLevel = Math.max(0, (m.autonomyCeiling ?? m.perTxnLimit) - m.perTxnLimit);
+  if (trouble) {
+    if (m.autonomyLevel === 0 && m.autonomyStreak === 0) return;
+    const level = Math.max(0, m.autonomyLevel - m.autonomyStep);
+    await tx.update(mandates).set({ autonomyLevel: level, autonomyStreak: 0 }).where(eq(mandates.id, m.id));
+    await appendEvent(tx, m.workspaceId, "mandate.autonomy_down", { mandateId: m.id, from: m.autonomyLevel, to: level, currency: m.currency, perTxnNow: m.perTxnLimit + level, reason: "denial or decline burst", at: now.toISOString() });
+    return;
+  }
+  if (!clean) return;
+  const streak = m.autonomyStreak + 1;
+  if (streak >= m.autonomyEvery && m.autonomyLevel < maxLevel) {
+    const level = Math.min(maxLevel, m.autonomyLevel + m.autonomyStep);
+    await tx.update(mandates).set({ autonomyLevel: level, autonomyStreak: 0 }).where(eq(mandates.id, m.id));
+    await appendEvent(tx, m.workspaceId, "mandate.autonomy_up", { mandateId: m.id, from: m.autonomyLevel, to: level, currency: m.currency, perTxnNow: m.perTxnLimit + level, ceiling: m.autonomyCeiling, after: m.autonomyEvery });
+  } else {
+    await tx.update(mandates).set({ autonomyStreak: m.autonomyLevel >= maxLevel ? 0 : streak }).where(eq(mandates.id, m.id));
+  }
+}
+
+export async function resetAutonomy(workspaceId: string, id: string, by: string) {
+  await db.transaction(async (tx) => {
+    const r = await tx.update(mandates).set({ autonomyLevel: 0, autonomyStreak: 0 }).where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId))).returning({ id: mandates.id });
+    if (r.length) await appendEvent(tx, workspaceId, "mandate.autonomy_down", { mandateId: id, to: 0, reason: "reset by " + by, by });
+  });
+}
+
+// ---------- Shadow mode ----------
+
+export async function setMandateMode(workspaceId: string, id: string, mode: "enforce" | "observe", by: string) {
+  await db.transaction(async (tx) => {
+    const r = await tx.update(mandates).set({ mode }).where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId), sql`${mandates.mode} <> ${mode}`)).returning({ id: mandates.id });
+    if (r.length) await appendEvent(tx, workspaceId, "mandate.mode_changed", { mandateId: id, mode, by });
+  });
+}
+
+export type ShadowReport = { total: number; wouldDecline: number; wouldAsk: number; byRule: { rule: string; count: number }[]; rows: Transaction[] };
+
+// What the terms would have done while the mandate was observing.
+export async function shadowReport(workspaceId: string, mandateId: string, limit = 200): Promise<ShadowReport> {
+  const rows = await db.select().from(transactions).where(and(eq(transactions.workspaceId, workspaceId), eq(transactions.mandateId, mandateId), sql`${transactions.shadowDecision} is not null`)).orderBy(desc(transactions.createdAt)).limit(limit);
+  const byRule = new Map<string, number>();
+  for (const r of rows) if (r.shadowDecision !== "approved") byRule.set(r.shadowRule ?? "?", (byRule.get(r.shadowRule ?? "?") ?? 0) + 1);
+  return { total: rows.length, wouldDecline: rows.filter((r) => r.shadowDecision === "declined").length, wouldAsk: rows.filter((r) => r.shadowDecision === "pending").length, byRule: [...byRule].map(([rule, count]) => ({ rule, count })).sort((a, b) => b.count - a.count), rows: rows.filter((r) => r.shadowDecision !== "approved") };
+}
+
+// ---------- Plans ----------
+
+export const PLAN_TTL_MS = 7 * 24 * 3600_000;
+export const PLAN_MAX_ITEMS = 25;
+
+export type PlanInput = { title: string; items: { merchant: string; amount: number; purpose?: string }[]; proposedBy?: string; source?: Source };
+export type PlanResult = { ok: true; plan: Plan } | { ok: false; error: string };
+
+export async function proposePlan(m: Mandate, input: PlanInput): Promise<PlanResult> {
+  const title = input.title.trim().slice(0, 120);
+  if (!title) return { ok: false, error: "Give the plan a title the owner will understand." };
+  if (!Array.isArray(input.items) || input.items.length === 0 || input.items.length > PLAN_MAX_ITEMS) return { ok: false, error: `A plan lists 1–${PLAN_MAX_ITEMS} items.` };
+  const items: PlanItem[] = [];
+  for (const it of input.items) {
+    const merchant = String(it.merchant ?? "").trim().slice(0, 120);
+    if (!merchant || !Number.isInteger(it.amount) || it.amount <= 0 || it.amount > MAX_AMOUNT) return { ok: false, error: "Each item needs a merchant and a positive integer amount in minor units." };
+    if (it.amount > m.perTxnLimit) return { ok: false, error: `Item at ${merchant}: ${it.amount} exceeds the mandate's per-transaction limit of ${m.perTxnLimit}. A plan cannot pre-approve what the terms forbid.` };
+    items.push({ merchant, amount: it.amount, purpose: String(it.purpose ?? "").trim().slice(0, 200) || undefined, usedBy: null });
+  }
+  const totalMax = items.reduce((s, it) => s + it.amount, 0);
+  const [open] = await db.select({ c: sql<number>`count(*)::int` }).from(schema.plans).where(and(eq(schema.plans.mandateId, m.id), eq(schema.plans.status, "proposed")));
+  if (Number(open?.c ?? 0) >= 3) return { ok: false, error: "Three plans are already waiting for the owner on this mandate." };
+  const now = new Date();
+  const row: Plan = { id: randomUUID(), workspaceId: m.workspaceId, mandateId: m.id, title, items: JSON.stringify(items), totalMax, currency: m.currency, status: "proposed", proposedBy: (input.proposedBy ?? "").slice(0, 120), source: input.source ?? "agent_api", flags: "[]", createdAt: now, decidedAt: null, decidedBy: null, expiresAt: new Date(now.getTime() + PLAN_TTL_MS) };
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.plans).values(row);
+    await appendEvent(tx, m.workspaceId, "plan.proposed", { planId: row.id, mandateId: m.id, title, items: items.map((it) => ({ merchant: it.merchant, amount: it.amount, purpose: it.purpose })), totalMax, currency: m.currency, proposedBy: row.proposedBy, source: row.source });
+  });
+  return { ok: true, plan: row };
+}
+
+export async function decidePlan(workspaceId: string | null, id: string, decision: "approved" | "denied", by: string) {
+  const now = new Date();
+  return db.transaction(async (tx) => {
+    const [p] = await tx.select().from(schema.plans).where(eq(schema.plans.id, id)).for("update").limit(1);
+    if (!p || (workspaceId && p.workspaceId !== workspaceId) || p.status !== "proposed") return null;
+    await tx.update(schema.plans).set({ status: decision, decidedAt: now, decidedBy: by, expiresAt: decision === "approved" ? new Date(now.getTime() + PLAN_TTL_MS) : p.expiresAt }).where(eq(schema.plans.id, id));
+    await appendEvent(tx, p.workspaceId, `plan.${decision}`, { planId: id, mandateId: p.mandateId, title: p.title, totalMax: p.totalMax, currency: p.currency, by, validForMs: decision === "approved" ? PLAN_TTL_MS : null });
+    return { ...p, status: decision };
+  });
+}
+
+export async function cancelPlan(workspaceId: string, id: string, by: string) {
+  await db.transaction(async (tx) => {
+    const r = await tx.update(schema.plans).set({ status: "cancelled", decidedAt: new Date(), decidedBy: by }).where(and(eq(schema.plans.id, id), eq(schema.plans.workspaceId, workspaceId), sql`${schema.plans.status} in ('proposed','approved')`)).returning({ mandateId: schema.plans.mandateId, title: schema.plans.title });
+    if (r.length) await appendEvent(tx, workspaceId, "plan.cancelled", { planId: id, mandateId: r[0].mandateId, title: r[0].title, by });
+  });
+}
+
+export async function getPlan(scope: { mandateId?: string; workspaceId?: string }, id: string): Promise<Plan | null> {
+  const [p] = await db.select().from(schema.plans).where(and(eq(schema.plans.id, id), scope.mandateId ? eq(schema.plans.mandateId, scope.mandateId) : undefined, scope.workspaceId ? eq(schema.plans.workspaceId, scope.workspaceId) : undefined)).limit(1);
+  return p ?? null;
+}
+
+export async function listPlans(workspaceId: string, opts: { mandateId?: string; status?: string } = {}) {
+  await sweep(workspaceId);
+  return db.select({ p: schema.plans, mandateName: mandates.name, agentName: agents.name }).from(schema.plans)
+    .innerJoin(mandates, eq(mandates.id, schema.plans.mandateId)).innerJoin(agents, eq(agents.id, mandates.agentId))
+    .where(and(eq(schema.plans.workspaceId, workspaceId), opts.mandateId ? eq(schema.plans.mandateId, opts.mandateId) : undefined, opts.status ? eq(schema.plans.status, opts.status) : undefined))
+    .orderBy(desc(schema.plans.createdAt)).limit(100);
+}
+
+export function planView(p: Plan) {
+  const items = parsePlanItems(p.items);
+  return { planId: p.id, title: p.title, status: p.status, currency: p.currency, totalMax: p.totalMax, items: items.map((it, i) => ({ index: i, merchant: it.merchant, amount: it.amount, purpose: it.purpose ?? "", used: Boolean(it.usedBy), transactionId: it.usedBy && it.usedBy !== "pending" ? it.usedBy : null })), createdAt: new Date(p.createdAt).toISOString(), decidedAt: p.decidedAt ? new Date(p.decidedAt).toISOString() : null, decidedBy: p.decidedBy, expiresAt: p.expiresAt ? new Date(p.expiresAt).toISOString() : null };
 }
 
 // ---------- Activity ----------

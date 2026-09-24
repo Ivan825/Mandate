@@ -20,6 +20,8 @@ const srv = createServer((req, res) => {
     }
     if (req.url === "/api/agent/capture") return send(200, { transactionId: body.transactionId, settlement: "captured", capturedAmount: body.amount ?? 1000, released: 0 });
     if (req.url === "/api/agent/void") return send(200, { transactionId: body.transactionId, settlement: "voided" });
+    if (req.url === "/api/agent/plans") return send(202, { planId: "p1", status: "proposed", items: body.items });
+    if (req.url?.startsWith("/api/agent/plans/")) return send(200, { planId: "p1", status: "approved", items: [] });
     send(404, { error: "no" });
   });
 });
@@ -65,8 +67,13 @@ test("pending is polled with waitForMs, then throws from mustAuthorize when it n
   await assert.rejects(m.mustAuthorize({ amount: 100, merchant: "Slow" }), MandatePending);
 });
 
+test("plans propose and poll", async () => {
+  const p = await m.proposePlan({ title: "Q4", items: [{ merchant: "OpenAI", amount: 100 }], waitForMs: 1000, pollEveryMs: 5 });
+  assert.equal(p.status, "approved");
+});
+
 test("openai tools dispatch", async () => {
-  assert.deepEqual(openaiTools().map((t) => t.function.name), ["check_mandate", "request_purchase", "capture_purchase", "void_purchase"]);
+  assert.deepEqual(openaiTools().map((t) => t.function.name), ["check_mandate", "request_purchase", "capture_purchase", "propose_plan", "get_plan", "void_purchase"]);
   const r = (await dispatch(m, "request_purchase", JSON.stringify({ amount: 100, merchant: "OpenAI" }))) as { decision: string };
   assert.equal(r.decision, "approved");
   srv.close();

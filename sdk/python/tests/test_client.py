@@ -28,6 +28,8 @@ class Stub(BaseHTTPRequestHandler):
             return self._send(401, {"error": "Unknown mandate token."})
         if self.path == "/api/agent/mandate":
             return self._send(200, {"mandate": "M", "remaining": {"today": 5000}})
+        if self.path.startswith("/api/agent/plans/"):
+            return self._send(200, {"planId": "p1", "status": "approved"})
         return self._send(200, {"transactionId": self.path.rsplit("/", 1)[-1], "settlement": "captured"})
 
     def do_POST(self):
@@ -49,6 +51,8 @@ class Stub(BaseHTTPRequestHandler):
             return self._send(200, {"transactionId": body["transactionId"], "settlement": "captured", "capturedAmount": body.get("amount", 1000), "released": 0})
         if self.path == "/api/agent/void":
             return self._send(200, {"transactionId": body["transactionId"], "settlement": "voided"})
+        if self.path == "/api/agent/plans":
+            return self._send(202, {"planId": "p1", "status": "proposed", "items": body["items"]})
         return self._send(404, {"error": "no"})
 
 
@@ -116,10 +120,14 @@ class ClientTests(unittest.TestCase):
 
     def test_tools(self):
         names = [t["function"]["name"] for t in openai_tools()]
-        self.assertEqual(names, ["check_mandate", "request_purchase", "capture_purchase", "void_purchase"])
+        self.assertEqual(names, ["check_mandate", "request_purchase", "capture_purchase", "propose_plan", "get_plan", "void_purchase"])
         r = dispatch(self.m, "request_purchase", json.dumps({"amount": 100, "merchant": "OpenAI"}))
         self.assertEqual(r["decision"], "approved")
         self.assertEqual(dispatch(self.m, "check_mandate", "{}")["mandate"], "M")
+
+    def test_plan(self):
+        p = self.m.propose_plan("Q4", [{"merchant": "OpenAI", "amount": 100}], wait_for=1, poll_every=0.01)
+        self.assertEqual(p["status"], "approved")
 
 
 if __name__ == "__main__":

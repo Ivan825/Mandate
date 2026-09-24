@@ -20,6 +20,12 @@ export function mandateTools(m: Mandate) {
       inputSchema: z.object({ transactionId: z.string(), amount: z.number().int().positive().optional(), note: z.string().optional() }),
       execute: async ({ transactionId, ...rest }) => m.capture(transactionId, rest),
     }),
+    propose_plan: tool({
+      description: "Before a multi-step task, list what you intend to buy (merchant, maximum amount in minor units, purpose) as one plan. The owner approves the list once; each purchase inside it then passes request_purchase without asking. Poll get_plan until status is approved.",
+      inputSchema: z.object({ title: z.string().min(1), items: z.array(z.object({ merchant: z.string(), amount: z.number().int().positive(), purpose: z.string().optional() })).min(1) }),
+      execute: async (input) => m.proposePlan(input),
+    }),
+    get_plan: tool({ description: "Read a plan's status and which items are still available.", inputSchema: z.object({ planId: z.string() }), execute: async ({ planId }) => m.getPlan(planId) }),
     void_purchase: tool({
       description: "Nothing was paid: release the approved hold back to the limits.",
       inputSchema: z.object({ transactionId: z.string(), reason: z.string().optional() }),

@@ -371,3 +371,124 @@ test("anomaly flags: unusual amount, new merchant, decline burst, rapid repeat",
   const [ap] = await db.select({ flags: schema.approvals.flags }).from(schema.approvals).where(eq(schema.approvals.id, p.approvalId!));
   assert.equal(ap.flags, '["unusual_amount","new_merchant"]');
 });
+
+test("veto window: announced, pending with retryAt, matures into an allowance, cancel blocks it", async () => {
+  const { expireStale, decideApproval } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  const r = await mandate({ approvalAbove: 4000, vetoAbove: 1000, vetoMinutes: 1, allowedMerchants: [] });
+  const v = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api");
+  assert.equal(v.decision, "pending"); assert.equal(v.rule, "veto"); assert.ok(v.remedy?.retryAt);
+  const [row] = await db.select().from(schema.approvals).where(eq(schema.approvals.id, v.approvalId!));
+  assert.equal(row.kind, "veto"); assert.ok(row.vetoUntil);
+  // Same ask before the window closes: still pending, same row.
+  assert.equal((await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api")).approvalId, v.approvalId);
+  // Time passes.
+  await db.update(schema.approvals).set({ vetoUntil: new Date(Date.now() - 1000) }).where(eq(schema.approvals.id, v.approvalId!));
+  await db.transaction((tx) => expireStale(tx, ws));
+  const [matured] = await db.select().from(schema.approvals).where(eq(schema.approvals.id, v.approvalId!));
+  assert.equal(matured.status, "approved"); assert.equal(matured.decidedBy, "silence");
+  const through = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api");
+  assert.equal(through.decision, "approved"); assert.equal(through.rule, "veto_passed");
+  // A cancelled one is blocked for the cooling-off period.
+  const v2 = await authorize(r.mandate, { amount: 1600, merchant: "OpenAI" }, "agent_api");
+  await decideApproval(ws, v2.approvalId!, "denied", "owner");
+  assert.equal((await authorize(r.mandate, { amount: 1600, merchant: "OpenAI" }, "agent_api")).rule, "denied_recently");
+  // Asking wins above its own threshold.
+  assert.equal((await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api")).rule, "approval");
+});
+
+test("plans: proposed → approved → items pass once without asking → completed; over-limit items refused", async () => {
+  const { proposePlan, decidePlan, getPlan } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: 500, perTxnLimit: 5000, allowedMerchants: [] });
+  const bad = await proposePlan(r.mandate, { title: "Too big", items: [{ merchant: "OpenAI", amount: 9000 }] });
+  assert.equal(bad.ok, false);
+  const p = await proposePlan(r.mandate, { title: "Q4 tools", items: [{ merchant: "OpenAI", amount: 3000, purpose: "credits" }, { merchant: "Vercel*", amount: 2000 }], proposedBy: "Claude", source: "mcp" });
+  assert.ok(p.ok); if (!p.ok) return;
+  assert.equal((await authorize(r.mandate, { amount: 2900, merchant: "OpenAI" }, "agent_api")).decision, "pending"); // not approved yet: normal rules
+  assert.ok(await decidePlan(ws, p.plan.id, "approved", "owner"));
+  const a = await authorize(r.mandate, { amount: 2900, merchant: "OpenAI" }, "agent_api");
+  assert.equal(a.decision, "approved"); assert.equal(a.rule, "plan");
+  assert.equal((await authorize(r.mandate, { amount: 2900, merchant: "OpenAI" }, "agent_api")).decision, "pending"); // item used up
+  const plan = (await getPlan({ workspaceId: ws }, p.plan.id))!;
+  assert.equal(plan.status, "approved"); assert.equal(JSON.parse(plan.items)[0].usedBy, a.transactionId);
+  const b = await authorize(r.mandate, { amount: 1999, merchant: "Vercel Pro" }, "agent_api");
+  assert.equal(b.rule, "plan");
+  assert.equal((await getPlan({ workspaceId: ws }, p.plan.id))!.status, "completed");
+});
+
+test("shadow mode: nothing declined, verdicts recorded, report counts them", async () => {
+  const { setMandateMode, shadowReport } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  const r = await mandate({ approvalAbove: 2000, perTxnLimit: 5000, dailyLimit: 6000, allowedMerchants: ["OpenAI"] });
+  await setMandateMode(ws, r.mandate.id, "observe", "owner");
+  const m = (await db.select().from(schema.mandates).where(eq(schema.mandates.id, r.mandate.id)))[0];
+  const a = await authorize(m, { amount: 100, merchant: "Namecheap" }, "agent_api");  // would decline: merchant
+  const b = await authorize(m, { amount: 3000, merchant: "OpenAI" }, "agent_api");    // would ask
+  const c = await authorize(m, { amount: 100, merchant: "OpenAI" }, "agent_api");     // fine either way
+  assert.deepEqual([a.decision, b.decision, c.decision], ["approved", "approved", "approved"]);
+  assert.equal(a.rule, "observe"); assert.equal(a.shadow?.rule, "merchant"); assert.equal(b.shadow?.decision, "pending"); assert.equal(c.shadow?.decision, "approved");
+  const rep = await shadowReport(ws, r.mandate.id);
+  assert.equal(rep.total, 3); assert.equal(rep.wouldDecline, 1); assert.equal(rep.wouldAsk, 1);
+  assert.equal((await db.select().from(schema.approvals).where(eq(schema.approvals.mandateId, r.mandate.id))).length, 0, "no approval rows while observing");
+  await setMandateMode(ws, r.mandate.id, "enforce", "owner");
+  const m2 = (await db.select().from(schema.mandates).where(eq(schema.mandates.id, r.mandate.id)))[0];
+  assert.equal((await authorize(m2, { amount: 100, merchant: "Namecheap" }, "agent_api")).decision, "declined");
+});
+
+test("graduated autonomy: clean decisions raise the limits step by step; a denial steps back", async () => {
+  const { getMandate, decideApproval } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: 1000, perTxnLimit: 2000, dailyLimit: 100000, totalLimit: 500000, autonomyStep: 500, autonomyEvery: 3, autonomyCeiling: 3000, allowedMerchants: [] });
+  for (let i = 0; i < 3; i++) await authorize(r.mandate, { amount: 100 + i, merchant: "OpenAI" }, "agent_api");
+  let m = (await getMandate(ws, r.mandate.id))!;
+  assert.equal(m.autonomyLevel, 500); assert.equal(m.autonomyStreak, 0);
+  assert.equal((await authorize(m, { amount: 1400, merchant: "OpenAI" }, "agent_api")).decision, "approved"); // lifted threshold 1500
+  assert.equal((await authorize(m, { amount: 2400, merchant: "OpenAI" }, "agent_api")).rule, "approval"); // per-txn lifted to 2500, but above the lifted threshold
+  for (let i = 0; i < 6; i++) await authorize((await getMandate(ws, r.mandate.id))!, { amount: 200 + i, merchant: "OpenAI" }, "agent_api");
+  m = (await getMandate(ws, r.mandate.id))!;
+  assert.equal(m.autonomyLevel, 1000); // ceiling 3000 − 2000
+  const p = await authorize(m, { amount: 2900, merchant: "OpenAI" }, "agent_api");
+  assert.equal(p.decision, "pending");
+  await decideApproval(ws, p.approvalId!, "denied", "owner");
+  m = (await getMandate(ws, r.mandate.id))!;
+  assert.equal(m.autonomyLevel, 500);
+});
+
+test("human-signed approval: a real ES256 passkey assertion verifies and is recorded; a wrong decision is refused", async () => {
+  const { generateKeyPairSync, createSign, createHash } = await import("node:crypto");
+  const { challengeFor, verifyHumanSignature, rpId } = await import("../lib/human-sign");
+  const { base64 } = await import("@better-auth/utils/base64");
+  const { appUrl } = await import("../lib/env");
+  const { decideApproval, getApproval } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  // Register a passkey for the test user: a P-256 key in COSE form, as the Better Auth plugin stores it.
+  const [u] = await db.select({ id: schema.user.id }).from(schema.user).limit(1);
+  const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
+  const x = Buffer.from(jwk.x, "base64url"), y = Buffer.from(jwk.y, "base64url");
+  const cose = Buffer.concat([Buffer.from([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]), x, Buffer.from([0x22, 0x58, 0x20]), y]);
+  const credentialID = "cred-" + randomUUID();
+  await db.insert(schema.passkey).values({ id: randomUUID(), name: "test", publicKey: base64.encode(cose), userId: u.id, credentialID, counter: 0, deviceType: "singleDevice", backedUp: false, transports: "internal", createdAt: new Date() });
+  const r = await mandate();
+  const ask = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
+  const challenge = challengeFor(ask.approvalId!, "approve", u.id);
+  const sign = (chal: string) => {
+    const clientData = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: chal, origin: appUrl(), crossOrigin: false }));
+    const authData = Buffer.concat([createHash("sha256").update(rpId()).digest(), Buffer.from([0x01]), Buffer.from([0, 0, 0, 1])]);
+    const sig = createSign("sha256").update(Buffer.concat([authData, createHash("sha256").update(clientData).digest()])).sign(privateKey);
+    return { id: credentialID, rawId: credentialID, type: "public-key" as const, clientExtensionResults: {}, response: { clientDataJSON: clientData.toString("base64url"), authenticatorData: authData.toString("base64url"), signature: sig.toString("base64url") } };
+  };
+  const wrong = await verifyHumanSignature(u.id, ask.approvalId!, "deny", sign(challenge));
+  assert.equal(wrong.ok, false); // the challenge commits to "approve"
+  const ok = await verifyHumanSignature(u.id, ask.approvalId!, "approve", sign(challenge));
+  assert.ok(ok.ok, (ok as { error?: string }).error); if (!ok.ok) return;
+  assert.equal(ok.signature.alg, -7);
+  await decideApproval(ws, ask.approvalId!, "approved", "owner (passkey)", ok.signature);
+  const row = (await getApproval(ask.approvalId!))!.a;
+  assert.equal(row.signedWith, credentialID); assert.ok(row.signature);
+  const [ev] = await db.select({ payload: schema.ledger.payload }).from(schema.ledger).where(eq(schema.ledger.type, "approval.approved")).then((rows) => rows.filter((e) => e.payload.includes(ask.approvalId!)));
+  assert.ok(ev.payload.includes("humanSigned"));
+  const { recheckHumanSignature } = await import("../lib/human-sign");
+  assert.equal(await recheckHumanSignature(JSON.parse(row.signature!)), true);
+  const tampered = { ...JSON.parse(row.signature!), signature: Buffer.from("nope").toString("base64url") };
+  assert.equal(await recheckHumanSignature(tampered), false);
+});
