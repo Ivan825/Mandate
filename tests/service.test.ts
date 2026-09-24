@@ -320,3 +320,54 @@ test("activity feed: events read as sentences, filter by group and mandate, note
   assert.ok(withNotes.rows.find((x) => x.e.type === "authorization.pending")?.notes.some((n) => n.body.includes("vendor")));
   assert.equal(describeEvent("mandate.revoked", { by: "me" }).tone, "bad");
 });
+
+test("pause freezes the token, auto-resumes on time; raises lift a limit and can be withdrawn", async () => {
+  const { pauseMandate, resumeMandate, raiseLimit, withdrawRaise, getMandate } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  const r = await mandate({ approvalAbove: null, perTxnLimit: 1000, dailyLimit: 3000 });
+  assert.equal(await pauseMandate(ws, r.mandate.id, { until: null, by: "owner" }), true);
+  const m1 = (await getMandate(ws, r.mandate.id))!;
+  const d = await authorize(m1, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  assert.equal(d.rule, "paused"); assert.equal(d.remedy?.approvalRequired, true);
+  assert.equal(await resumeMandate(ws, r.mandate.id, "owner"), true);
+  assert.equal((await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  // A timed pause that has already run out resumes itself on the next request.
+  await pauseMandate(ws, r.mandate.id, { until: new Date(Date.now() - 1000), by: "owner" });
+  const woke = await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  assert.equal(woke.decision, "approved");
+  assert.equal((await getMandate(ws, r.mandate.id))!.status, "active");
+  // Raise: 1500 fails per-txn (1000) until raised.
+  const m = (await getMandate(ws, r.mandate.id))!;
+  assert.equal((await authorize(m, { amount: 1500, merchant: "OpenAI" }, "agent_api")).rule, "per_txn");
+  assert.equal((await raiseLimit(ws, m.id, { field: "per_txn", amount: 500, endsAt: new Date(Date.now() + 3600_000), by: "owner" })).ok, false); // not above base
+  const raised = await raiseLimit(ws, m.id, { field: "per_txn", amount: 2000, endsAt: new Date(Date.now() + 3600_000), by: "owner", reason: "launch" });
+  assert.ok(raised.ok);
+  assert.equal((await authorize(m, { amount: 1500, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  if (raised.ok) assert.equal(await withdrawRaise(ws, m.id, raised.override.id, "owner"), true);
+  assert.equal((await authorize(m, { amount: 1500, merchant: "OpenAI" }, "agent_api")).rule, "per_txn");
+  const events = await db.select({ type: schema.ledger.type }).from(schema.ledger).where(eq(schema.ledger.workspaceId, ws));
+  for (const t of ["mandate.paused", "mandate.resumed", "mandate.raised", "mandate.raise_withdrawn"]) assert.ok(events.some((e) => e.type === t), t);
+});
+
+test("anomaly flags: unusual amount, new merchant, decline burst, rapid repeat", async () => {
+  const { computeFlags } = await import("../lib/anomaly");
+  const { eq } = await import("drizzle-orm");
+  const r = await mandate({ approvalAbove: null, perTxnLimit: 5000, dailyLimit: 100000, totalLimit: 500000, allowedMerchants: [] });
+  for (let i = 0; i < 6; i++) await authorize(r.mandate, { amount: 200, merchant: "OpenAI" }, "agent_api");
+  assert.deepEqual(await computeFlags(db, r.mandate.id, { amount: 200, merchant: "OpenAI" }), ["rapid_repeat"]);
+  assert.deepEqual(await computeFlags(db, r.mandate.id, { amount: 900, merchant: "OpenAI" }), ["unusual_amount"]);
+  assert.deepEqual(await computeFlags(db, r.mandate.id, { amount: 200, merchant: "Namecheap" }), ["new_merchant"]);
+  const big = await authorize(r.mandate, { amount: 4000, merchant: "Vercel" }, "agent_api");
+  assert.deepEqual(big.flags, ["unusual_amount", "new_merchant"]);
+  const [row] = await db.select({ flags: schema.transactions.flags }).from(schema.transactions).where(eq(schema.transactions.id, big.transactionId));
+  assert.equal(row.flags, '["unusual_amount","new_merchant"]');
+  for (let i = 0; i < 3; i++) await authorize(r.mandate, { amount: 9000, merchant: "OpenAI" }, "agent_api"); // per_txn declines
+  assert.ok((await computeFlags(db, r.mandate.id, { amount: 100, merchant: "OpenAI" })).includes("decline_burst"));
+  // A request that escalates carries its flags on the approval row too.
+  const ask = await mandate({ approvalAbove: 100, perTxnLimit: 5000, allowedMerchants: [] });
+  for (let i = 0; i < 5; i++) await authorize(ask.mandate, { amount: 50, merchant: "OpenAI" }, "agent_api");
+  const p = await authorize(ask.mandate, { amount: 3000, merchant: "Stripe" }, "agent_api");
+  assert.equal(p.decision, "pending");
+  const [ap] = await db.select({ flags: schema.approvals.flags }).from(schema.approvals).where(eq(schema.approvals.id, p.approvalId!));
+  assert.equal(ap.flags, '["unusual_amount","new_merchant"]');
+});

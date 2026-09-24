@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, merchantMatches, validateTerms, endOfLocalDay, localHour, type Facts } from "../lib/policy";
+import { evaluate, merchantMatches, validateTerms, endOfLocalDay, localHour, effectiveTerms, type Facts } from "../lib/policy";
 import type { Mandate, Approval } from "../lib/schema";
 
 const base: Mandate = {
   id: "m1", agentId: "a1", name: "t", status: "active", currency: "USD",
   perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
   allowedMerchants: JSON.stringify(["OpenAI", "Vercel*"]), blockedCategories: JSON.stringify(["gambling"]),
-  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture",
+  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null,
   workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null,
   createdAt: new Date(), revokedAt: null,
 };
@@ -32,7 +32,7 @@ test("rule order: scope before limits, limits before escalation", () => {
 });
 
 test("allowance must match exact amount and merchant and be unexpired", () => {
-  const mk = (o: Partial<Approval>): Approval => ({ id: "ap1", workspaceId: "ws1", mandateId: "m1", decidedBy: null, amount: 4500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, ...o });
+  const mk = (o: Partial<Approval>): Approval => ({ id: "ap1", workspaceId: "ws1", mandateId: "m1", decidedBy: null, amount: 4500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", ...o });
   assert.equal(evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts({ approvedAllowances: [mk({})] })).rule, "allowance");
   assert.equal(evaluate(base, { amount: 4400, merchant: "OpenAI" }, facts({ approvedAllowances: [mk({})] })).decision, "pending");
   assert.equal(evaluate(base, { amount: 4500, merchant: "openai" }, facts({ approvedAllowances: [mk({})] })).rule, "allowance");
@@ -102,6 +102,25 @@ test("every non-approval carries a remedy the agent can act on", () => {
   const total = evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts({ spentTotal: 50000 }));
   assert.equal(total.remedy?.approvalRequired, true);
   assert.equal(evaluate(base, { amount: 1500, merchant: "OpenAI" }, facts()).remedy, undefined);
+});
+
+test("pause declines with a resume time and lifts itself; raises lift one limit for a window", () => {
+  const until = at("2026-09-06T12:00:00Z");
+  const paused = { ...base, status: "paused", pausedUntil: until };
+  const r = evaluate(paused, { amount: 100, merchant: "OpenAI", now: at("2026-09-06T10:00:00Z") }, facts());
+  assert.equal(r.rule, "paused"); assert.equal(r.remedy?.retryAt, until.toISOString());
+  assert.equal(evaluate(paused, { amount: 100, merchant: "OpenAI", now: at("2026-09-06T12:00:01Z") }, facts()).decision, "approved"); // pause ran out
+  const forever = evaluate({ ...base, status: "paused", pausedUntil: null }, { amount: 100, merchant: "OpenAI" }, facts());
+  assert.equal(forever.rule, "paused"); assert.equal(forever.remedy?.approvalRequired, true);
+  const raise = (field: string, amount: number, endsAt: Date) => ({ id: "o1", workspaceId: "ws1", mandateId: "m1", field, amount, startsAt: at("2026-09-06T00:00:00Z"), endsAt, reason: "", createdBy: "me", createdAt: new Date(), revokedAt: null });
+  const now = at("2026-09-06T10:00:00Z");
+  // 9900 fails per-txn (5000) unless raised to 10000 — and the raise has to be in force.
+  assert.equal(evaluate(base, { amount: 4900, merchant: "OpenAI", now }, facts({ overrides: [raise("per_txn", 10000, at("2026-09-07T00:00:00Z"))] })).decision, "pending");
+  assert.equal(evaluate(base, { amount: 9900, merchant: "OpenAI", now }, facts({ overrides: [raise("per_txn", 10000, at("2026-09-07T00:00:00Z"))] })).decision, "pending"); // passes per_txn, escalates
+  assert.equal(evaluate(base, { amount: 9900, merchant: "OpenAI", now }, facts({ overrides: [raise("per_txn", 10000, at("2026-09-06T09:00:00Z"))] })).rule, "per_txn"); // expired raise
+  assert.equal(evaluate(base, { amount: 9900, merchant: "OpenAI", now }, facts({ overrides: [{ ...raise("per_txn", 10000, at("2026-09-07T00:00:00Z")), revokedAt: now }] })).rule, "per_txn"); // withdrawn
+  assert.equal(evaluate(base, { amount: 4900, merchant: "OpenAI", now }, facts({ overrides: [raise("approval_above", 5000, at("2026-09-07T00:00:00Z"))] })).decision, "approved"); // threshold raised: no ask
+  assert.equal(effectiveTerms(base, [raise("daily", 1000, at("2026-09-07T00:00:00Z"))], now).dailyLimit, 10000); // a "raise" below the base is ignored
 });
 
 test("prepaid balance caps card spend after the mandate's own limits", () => {

@@ -4,6 +4,27 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-25
+
+Launch set: the things that make the demo good, give developers something to install, and give owners a reason to keep it on their phone.
+
+### Added
+- **Connect wizard** (`/connect`): one page per rail — Claude Desktop, Claude Code, Cursor/any MCP client, Python, TypeScript, curl, LLM-SDK proxy — with the mandate token filled into the snippets while the show-once window is open, and a live check that lights up when the first call lands.
+- **SDKs**: `sdk/python` (`pip install mandate-agent`) and `sdk/typescript` (`npm install mandate-agent`), zero dependencies, with `authorize`/`capture`/`void`, a hold helper that voids on error, polling for pending approvals, and tools for the OpenAI Agents SDK, LangChain, the OpenAI SDK and the Vercel AI SDK.
+- **Push approvals + PWA**: installable manifest and service worker; approval requests as notifications with Approve / Deny buttons that decide through the signed one-tap endpoint (`POST /api/approvals/onetap/:id`). Per-device subscriptions in Settings. Needs VAPID keys.
+- **Public receipts**: share any decision as `/r/:id?k=…` — a signed page with the request, the answer, the terms, the human approval and the ledger rows, verifiable in the reader's browser with WebCrypto; JSON at `/api/receipts/tx/:id`. Un-share at any time.
+- **Templates and duplicate**: six presets scaled to the workspace currency on the issue page; "Duplicate" on any mandate.
+- **Pause / resume** (timed or until further notice) and **temporary raises** of one limit for a window, both without editing the issued terms; agents get `paused` with a resume time.
+- **Anomaly flags** on decisions and requests: unusual amount, new merchant, decline burst, rapid repeat — shown in the inbox, mandate page, feed, email, push and webhooks.
+
+### Changed
+- `mandates` gained `paused_until`, `paused_by`; `transactions` gained `flags`, `share_token`; `approvals` gained `flags`; new tables `mandate_overrides`, `push_subscriptions` (migration `0008`).
+- Canonical JSON now drops keys whose value is undefined (no existing hashes change).
+- The topbar's "Connect agents" now opens the wizard; `/docs` remains the reference.
+
+### Migration
+`npm run db:migrate` (adds `0008`). Optional new env: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` for push.
+
 ## [0.4.0] — 2026-09-25
 
 The money layer grows up: approvals become holds, agents are told what to do about a "no", every event can be pushed to your own systems, and the ledger reads as sentences.
@@ -48,6 +69,7 @@ First public beta.
 - Claude's client-metadata document could not be fetched on Node 20+ (Better Auth CIMD ≤ 1.7.2); upgraded to 1.7.5 with migration `0006`.
 - OAuth authorization-server metadata is also served at the bare `/.well-known/oauth-authorization-server` for clients that skip protected-resource discovery.
 
-[Unreleased]: https://github.com/Ivan825/Mandate/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Ivan825/Mandate/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Ivan825/Mandate/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Ivan825/Mandate/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Ivan825/Mandate/releases/tag/v0.3.0

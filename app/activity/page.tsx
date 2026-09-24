@@ -68,7 +68,7 @@ export default async function ActivityPage({ searchParams }: { searchParams: Pro
           const aid = typeof payload.approvalId === "string" ? payload.approvalId : null;
           const target = tid ? { type: "transaction", id: tid } : aid ? { type: "approval", id: aid } : { type: "event", id: e.id };
           return (
-            <article key={e.id} className="card" style={{ padding: "12px 16px", borderLeft: `3px solid ${d.tone === "ok" ? "var(--ok)" : d.tone === "bad" ? "var(--bad)" : d.tone === "warn" ? "var(--warn)" : "var(--line)"}` }}>
+            <article key={e.id} className="card" style={{ padding: "12px 16px", borderLeft: `3px solid ${d.tone === "ok" ? "var(--ok)" : d.tone === "bad" ? "var(--bad)" : d.tone === "warn" ? "var(--warn)" : "var(--rule)"}` }}>
               <div style={{ display: "flex", gap: 12, alignItems: "baseline", flexWrap: "wrap" }}>
                 <span className="faint mono" style={{ fontSize: 11.5, minWidth: 34 }}>#{e.seq}</span>
                 <span style={{ flex: 1, minWidth: 240 }}>{d.summary}</span>
@@ -84,7 +84,7 @@ export default async function ActivityPage({ searchParams }: { searchParams: Pro
                 <details style={{ display: "inline" }}><summary style={{ cursor: "pointer", display: "inline" }}>payload</summary><pre style={{ fontSize: 11, marginTop: 6, maxWidth: "100%", overflowX: "auto" }}>{JSON.stringify(payload, null, 2)}</pre></details>
               </div>
               {(notes.length > 0 || canNote) && (
-                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed var(--line)" }}>
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px dashed var(--rule)" }}>
                   {notes.map((n) => (
                     <div key={n.id} style={{ fontSize: 13, display: "flex", gap: 8, alignItems: "baseline" }}>
                       <span style={{ flex: 1 }}>{n.body} <span className="faint" style={{ fontSize: 11.5 }}>— {n.authorEmail}, <When d={n.createdAt} /></span></span>

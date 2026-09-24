@@ -4,6 +4,8 @@ import { db, schema, type Tx } from "./db";
 import { appendEvent, recordEvent } from "./ledger";
 import { evaluate, localDayStart, validateTerms, validateHoldTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError } from "./policy";
 import { isCurrencyCode } from "./money";
+import { computeFlags, type Flag } from "./anomaly";
+import type { MandateOverride } from "./schema";
 import { sendApprovalRequested } from "./notify";
 import { checkWarnings } from "./warnings";
 import { sweepReveals } from "./reveal";
@@ -35,6 +37,10 @@ export async function expireStale(tx: Tx, workspaceId: string, now = new Date())
     .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "approved"), sql`${approvals.expiresAt} is not null and ${approvals.expiresAt} < ${now}`)).returning();
   for (const a of lapsed) await appendEvent(tx, workspaceId, "approval.expired", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, reason: "allowance lapsed unused" });
   await closeExpiredHolds(tx, now, workspaceId);
+  // Pauses that have run their course.
+  const resumed = await tx.update(mandates).set({ status: "active", pausedUntil: null, pausedBy: null })
+    .where(and(eq(mandates.workspaceId, workspaceId), eq(mandates.status, "paused"), sql`${mandates.pausedUntil} is not null and ${mandates.pausedUntil} <= ${now}`)).returning({ id: mandates.id });
+  for (const r of resumed) await appendEvent(tx, workspaceId, "mandate.resumed", { mandateId: r.id, by: "system", reason: "pause ended" });
 }
 
 export async function sweep(workspaceId: string) {
@@ -110,7 +116,7 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
     allowedMerchants: JSON.stringify(input.allowedMerchants.map((s) => s.trim().slice(0, 80)).filter(Boolean).slice(0, 50)),
     blockedCategories: JSON.stringify(input.blockedCategories.map((s) => s.trim().slice(0, 64)).filter(Boolean).slice(0, 50)),
     activeHoursStart: input.activeHoursStart, activeHoursEnd: input.activeHoursEnd, timezone: input.timezone, expiresAt: input.expiresAt,
-    holdTtlHours, holdPolicy,
+    holdTtlHours, holdPolicy, pausedUntil: null, pausedBy: null,
     tokenHash: hashToken(token), tokenPrefix: token.slice(0, 10), tokenReveal: token,
     stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null, createdAt: new Date(), revokedAt: null,
   };
@@ -196,10 +202,80 @@ export async function listMandates(workspaceId: string, onlyActive = false) {
 export async function revokeMandate(workspaceId: string, id: string, by: string) {
   await db.transaction(async (tx) => {
     const r = await tx.update(mandates).set({ status: "revoked", revokedAt: new Date(), tokenReveal: null })
-      .where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId), eq(mandates.status, "active"))).returning({ id: mandates.id });
+      .where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId), sql`${mandates.status} in ('active','paused')`)).returning({ id: mandates.id });
     if (r.length === 0) return;
     await tx.update(approvals).set({ status: "expired" }).where(and(eq(approvals.mandateId, id), sql`${approvals.status} in ('pending','approved')`));
     await appendEvent(tx, workspaceId, "mandate.revoked", { mandateId: id, by });
+  });
+}
+
+// ---------- Pause, resume, temporary raises ----------
+
+// A pause is a freeze, not a revocation: the token survives, every request
+// declines with "paused" and a resume time, and the mandate wakes itself
+// up when the time comes (or when someone presses Resume).
+export async function pauseMandate(workspaceId: string, id: string, opts: { until: Date | null; by: string; reason?: string }) {
+  return db.transaction(async (tx) => {
+    const r = await tx.update(mandates).set({ status: "paused", pausedUntil: opts.until, pausedBy: opts.by.slice(0, 120) })
+      .where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId), sql`${mandates.status} in ('active','paused')`)).returning({ id: mandates.id });
+    if (!r.length) return false;
+    await appendEvent(tx, workspaceId, "mandate.paused", { mandateId: id, by: opts.by, until: opts.until ? opts.until.toISOString() : null, reason: (opts.reason ?? "").slice(0, 300) });
+    return true;
+  });
+}
+
+export async function resumeMandate(workspaceId: string, id: string, by: string) {
+  return db.transaction(async (tx) => {
+    const r = await tx.update(mandates).set({ status: "active", pausedUntil: null, pausedBy: null })
+      .where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId), eq(mandates.status, "paused"))).returning({ id: mandates.id });
+    if (!r.length) return false;
+    await appendEvent(tx, workspaceId, "mandate.resumed", { mandateId: id, by, reason: "resumed" });
+    return true;
+  });
+}
+
+export async function activeOverrides(mandateId: string, now = new Date(), conn: Q = db): Promise<MandateOverride[]> {
+  return conn.select().from(schema.mandateOverrides).where(and(eq(schema.mandateOverrides.mandateId, mandateId), sql`${schema.mandateOverrides.revokedAt} is null`, sql`${schema.mandateOverrides.startsAt} <= ${now}`, sql`${schema.mandateOverrides.endsAt} > ${now}`));
+}
+
+export async function listOverrides(workspaceId: string, mandateId: string): Promise<MandateOverride[]> {
+  return db.select().from(schema.mandateOverrides).where(and(eq(schema.mandateOverrides.workspaceId, workspaceId), eq(schema.mandateOverrides.mandateId, mandateId))).orderBy(desc(schema.mandateOverrides.createdAt)).limit(50);
+}
+
+export const RAISE_MAX_HOURS = 24 * 30;
+
+// "Let it spend up to X today": a raise on one limit for a window. It has to
+// be above the issued term (otherwise it changes nothing) and it ends on
+// its own — the base terms are never edited in place, so the ledger's
+// record of what was granted stays true.
+export async function raiseLimit(workspaceId: string, id: string, input: { field: string; amount: number; endsAt: Date; reason?: string; by: string }): Promise<{ ok: true; override: MandateOverride } | { ok: false; error: string }> {
+  const m = await getMandate(workspaceId, id);
+  if (!m) return { ok: false, error: "No such mandate." };
+  if (m.status !== "active" && m.status !== "paused") return { ok: false, error: `The mandate is ${m.status}.` };
+  const field = input.field;
+  if (!["per_txn", "daily", "total", "approval_above"].includes(field)) return { ok: false, error: "Pick a limit to raise." };
+  if (!Number.isInteger(input.amount) || input.amount <= 0 || input.amount > MAX_AMOUNT) return { ok: false, error: "Enter a positive amount." };
+  const base = field === "per_txn" ? m.perTxnLimit : field === "daily" ? m.dailyLimit : field === "total" ? m.totalLimit : m.approvalAbove;
+  if (base == null) return { ok: false, error: "This mandate never asks for approval, so there is no threshold to raise." };
+  if (input.amount <= base) return { ok: false, error: `That is not above the mandate's own ${field.replace("_", " ")} of ${base}; a raise only goes up.` };
+  const now = new Date();
+  if (input.endsAt.getTime() <= now.getTime() + 60_000) return { ok: false, error: "The raise must end at least a minute from now." };
+  if (input.endsAt.getTime() > now.getTime() + RAISE_MAX_HOURS * 3600_000) return { ok: false, error: "A temporary raise can last at most 30 days; change the mandate's terms by issuing a new one instead." };
+  const row: MandateOverride = { id: randomUUID(), workspaceId, mandateId: id, field, amount: input.amount, startsAt: now, endsAt: input.endsAt, reason: (input.reason ?? "").trim().slice(0, 300), createdBy: input.by.slice(0, 120), createdAt: now, revokedAt: null };
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.mandateOverrides).values(row);
+    await appendEvent(tx, workspaceId, "mandate.raised", { mandateId: id, overrideId: row.id, field, amount: input.amount, currency: m.currency, base, endsAt: input.endsAt.toISOString(), reason: row.reason, by: input.by });
+  });
+  return { ok: true, override: row };
+}
+
+export async function withdrawRaise(workspaceId: string, mandateId: string, overrideId: string, by: string) {
+  return db.transaction(async (tx) => {
+    const r = await tx.update(schema.mandateOverrides).set({ revokedAt: new Date() })
+      .where(and(eq(schema.mandateOverrides.id, overrideId), eq(schema.mandateOverrides.workspaceId, workspaceId), eq(schema.mandateOverrides.mandateId, mandateId), sql`${schema.mandateOverrides.revokedAt} is null`)).returning({ field: schema.mandateOverrides.field });
+    if (!r.length) return false;
+    await appendEvent(tx, workspaceId, "mandate.raise_withdrawn", { mandateId, overrideId, field: r[0].field, by });
+    return true;
   });
 }
 
@@ -226,7 +302,8 @@ export async function factsFor(m: Mandate, now = new Date(), conn: Q = db, req?:
     recentlyDeniedAt = d?.at ? new Date(d.at) : null;
     recentlyDenied = recentlyDeniedAt !== null;
   }
-  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null };
+  const overrides = await activeOverrides(m.id, now, conn);
+  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null, overrides };
   return facts;
 }
 
@@ -258,7 +335,7 @@ export async function exposureBook(workspaceId: string): Promise<Exposure[]> {
     const mine = totals.filter((t) => t.mandateId === m.id);
     const spentTotal = Number(mine.find((t) => t.decision === "approved")?.sum ?? 0);
     const last = mine.reduce<Date | null>((acc, t) => (t.last && (!acc || new Date(t.last) > acc) ? new Date(t.last) : acc), null);
-    const effectiveStatus = m.status === "active" && m.expiresAt && now > new Date(m.expiresAt) ? "expired" : m.status;
+    const effectiveStatus = m.status === "active" && m.expiresAt && now > new Date(m.expiresAt) ? "expired" : m.status === "paused" && m.pausedUntil && now >= new Date(m.pausedUntil) ? "active" : m.status;
     out.push({ mandate: m, agentName, effectiveStatus, spentToday: Number(today?.s ?? 0), spentTotal, pendingApprovals: pendingBy.get(m.id) ?? 0, declinedToday: Number(declToday?.c ?? 0), lastActivity: last, openHolds: holdsBy.get(m.id) ?? 0 });
   }
   return out;
@@ -274,7 +351,7 @@ export async function countPending(workspaceId: string): Promise<number> {
 
 export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy";
 export type Settlement = "held" | "captured" | "voided" | "released";
-export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean; settlement: Settlement | null; holdExpiresAt: Date | null };
+export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean; settlement: Settlement | null; holdExpiresAt: Date | null; flags: Flag[] };
 // Postgres int4; also a sanity ceiling no mandate should ever reach.
 export const MAX_AMOUNT = 2_147_483_647;
 
@@ -305,6 +382,7 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       facts.availableBalance = await availableBalance(ws, mandate.currency, tx);
     }
     let d = evaluate(mandate, { amount, merchant, category, purpose, now }, facts);
+    const flags: Flag[] = source === "simulation" ? [] : await computeFlags(tx, mandate.id, { amount, merchant }, now).catch(() => []);
 
     let approvalId: string | undefined;
     if (d.decision === "approved" && d.allowanceId) {
@@ -320,11 +398,11 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       )).limit(1);
       if (existing) approvalId = existing.id;
       else {
-        const a: Approval = { id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, decidedBy: null, expiresAt: null, usedAt: null };
+        const a: Approval = { id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, decidedBy: null, expiresAt: null, usedAt: null, flags: JSON.stringify(flags) };
         await tx.insert(approvals).values(a);
         approvalId = a.id;
         newApproval = a;
-        await appendEvent(tx, ws, "approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source, actor });
+        await appendEvent(tx, ws, "approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source, actor, flags });
       }
     }
 
@@ -348,15 +426,16 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       authorizedAmount: approved ? amount : null, settlement, holdExpiresAt,
       settledAt: settlement === "captured" ? now : null, settledBy: settlement === "captured" ? "system" : null,
       settlementNote: settlement === "captured" ? (source === "simulation" ? "Simulated purchase; settled at once." : "Mandate settles at once (hold TTL 0).") : null,
+      flags: JSON.stringify(flags), shareToken: null,
       createdAt: now,
     };
     await tx.insert(transactions).values(t);
     await appendEvent(tx, ws, `authorization.${d.decision}`, {
       transactionId: t.id, mandateId: mandate.id, agentId: mandate.agentId, amount, currency: t.currency, merchant, purpose, category,
       rule: d.rule, reason: d.reason, source, actor, approvalId: approvalId ?? null, stripeAuthorizationId: t.stripeAuthorizationId,
-      settlement, holdExpiresAt: holdExpiresAt ? holdExpiresAt.toISOString() : null,
+      settlement, holdExpiresAt: holdExpiresAt ? holdExpiresAt.toISOString() : null, flags,
     });
-    return { ...d, transactionId: t.id, approvalId, mandate, settlement, holdExpiresAt };
+    return { ...d, transactionId: t.id, approvalId, mandate, settlement, holdExpiresAt, flags };
   });
 
   // Notify only once the request is durably recorded. Callers with a hard
@@ -610,6 +689,27 @@ export async function cancelWorkspaceCards(workspaceId: string) {
   if (!stripeEnabled()) return;
   const rows = await db.select({ id: mandates.id, cardId: mandates.stripeCardId }).from(mandates).where(and(eq(mandates.workspaceId, workspaceId), sql`${mandates.stripeCardId} is not null`));
   for (const r of rows) { try { await deactivateCard(r.cardId!); } catch (e) { console.error(`could not cancel card ${r.cardId}: ${(e as Error).message}`); } }
+}
+
+// ---------- Sharing a decision's receipt ----------
+
+export async function shareTransaction(workspaceId: string, transactionId: string, by: string): Promise<string | null> {
+  const token = randomBytes(18).toString("base64url");
+  return db.transaction(async (tx) => {
+    const [t] = await tx.select({ id: transactions.id, mandateId: transactions.mandateId, shareToken: transactions.shareToken }).from(transactions).where(and(eq(transactions.id, transactionId), eq(transactions.workspaceId, workspaceId))).limit(1);
+    if (!t) return null;
+    if (t.shareToken) return t.shareToken;
+    await tx.update(transactions).set({ shareToken: token }).where(eq(transactions.id, t.id));
+    await appendEvent(tx, workspaceId, "receipt.shared", { transactionId: t.id, mandateId: t.mandateId, by });
+    return token;
+  });
+}
+
+export async function unshareTransaction(workspaceId: string, transactionId: string, by: string) {
+  await db.transaction(async (tx) => {
+    const r = await tx.update(transactions).set({ shareToken: null }).where(and(eq(transactions.id, transactionId), eq(transactions.workspaceId, workspaceId), sql`${transactions.shareToken} is not null`)).returning({ mandateId: transactions.mandateId });
+    if (r.length) await appendEvent(tx, workspaceId, "receipt.unshared", { transactionId, mandateId: r[0].mandateId, by });
+  });
 }
 
 // ---------- Workspace settings ----------

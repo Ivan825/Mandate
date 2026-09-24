@@ -65,8 +65,11 @@ try {
   await p.goto(BASE + "/activity", { waitUntil: "load" });
   await p.screenshot({ path: `${OUT}/activity.png` });
 
+  await p.goto(BASE + "/connect?rail=python", { waitUntil: "load" });
+  await p.screenshot({ path: `${OUT}/connect.png` });
+
   await b.close();
-  console.log(`wrote ${OUT}/{landing,exposure,mandate,stats,approvals,activity}.png`);
+  console.log(`wrote ${OUT}/{landing,exposure,mandate,stats,approvals,activity,connect}.png`);
 } finally {
   app.kill("SIGTERM");
 }

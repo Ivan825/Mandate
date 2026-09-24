@@ -7,10 +7,12 @@ import { CURRENCIES, inputStep, minorUnits } from "@/lib/money";
 
 type AgentOpt = { id: string; name: string };
 
-export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardCurrency, defaultCurrency }: { agents: AgentOpt[]; defaultAgent: string; stripeOn: boolean; cardProblem: string | null; cardCurrency: string; defaultCurrency: string }) {
+export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardCurrency, defaultCurrency, initial, initialLabel, next }: { agents: AgentOpt[]; defaultAgent: string; stripeOn: boolean; cardProblem: string | null; cardCurrency: string; defaultCurrency: string; initial?: Record<string, string>; initialLabel?: string; next?: { next: string; rail: string } }) {
   const [state, action, pending] = useActionState<MandateFormState, FormData>(createMandateAction, undefined);
   const err = (field: string) => state?.errors?.find((e) => e.field === field)?.message;
-  const v = (field: string, fallback = "") => state?.values?.[field] ?? fallback;
+  // Values come back from a failed submit first, then from a template or a
+  // mandate being duplicated, then the plain defaults.
+  const v = (field: string, fallback = "") => state?.values?.[field] ?? initial?.[field] ?? fallback;
   // Amount inputs step in the chosen currency's minor unit (0.01, 1 or 0.001).
   const [currency, setCurrency] = useState(v("currency", defaultCurrency));
   const step = inputStep(currency);
@@ -33,6 +35,8 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
 
   return (
     <form action={action} className="form" key={state?.errors ? JSON.stringify(state.values) : "fresh"}>
+      {next && <><input type="hidden" name="next" value={next.next} /><input type="hidden" name="rail" value={next.rail} /></>}
+      {initialLabel && !state?.errors && <div className="notice" style={{ marginBottom: 4 }}>Pre-filled from <strong>{initialLabel}</strong>. Change anything before issuing.</div>}
       {state?.errors?.length ? (
         <div className="notice bad">Check the highlighted terms: {state.errors.map((e) => e.message).join(" ")}</div>
       ) : null}

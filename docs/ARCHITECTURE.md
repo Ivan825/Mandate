@@ -71,6 +71,18 @@ An escalation creates an approval row and notifies every approver in the workspa
 
 `lib/ledger.ts` appends one row per event (grant, decision, approval, revocation, top-up …) to a per-workspace chain: each row's hash covers the previous row's hash and the event payload. Verification is incremental from a checkpoint or full from genesis. Exports (`/api/ledger/export`) carry an Ed25519 signature over the chain head using `RECEIPT_SIGNING_KEY`; the public key is served at `/.well-known/mandate-receipt-key`, and `/api/receipts/verify` checks any receipt without a session — chain integrity, signature validity, and whether *this* server signed it. A receipt that carries its own public key is rejected: verification is always against the server's key.
 
+## Pause, temporary raises and anomaly flags
+
+A **pause** is `status = paused` with an optional `pausedUntil`; the engine declines with rule `paused` and a `retryAt`, and the mandate wakes itself on the next authorisation once the time passes (`expireStale` also writes the resume back). A **temporary raise** is a `mandate_overrides` row — one field, one amount, a window; `effectiveTerms()` reads the mandate's limits through any raise in force, only ever upward, so the issued terms recorded in the ledger stay true and the raise is its own ledger event. **Anomaly flags** (`lib/anomaly.ts`) are computed inside the authorisation transaction from the mandate's own recent history — unusual amount vs the median, first-time merchant, decline burst, rapid repeat — stored on the transaction and the approval row, and carried in the ledger payload, the inbox, the email, the push and the webhook. They never change a decision.
+
+## Public receipts
+
+`shareTransaction` mints a share token (the capability) for one decision; `/r/:id?k=…` renders it and `/api/receipts/tx/:id?k=…` serves the signed JSON: the request and answer, the money lifecycle, the terms, the human approval, and the ledger rows that mention it with their hashes and the chain head. The signature is Ed25519 over `mandate-tx-receipt|<id>|sha256(canonical(core))|<signedAt>`, so the page's own JavaScript verifies it with WebCrypto against the key at `/.well-known/mandate-receipt-key` (or falls back to the server's verifier on browsers without Ed25519) — the page is not trusted, the bytes and the key are. Un-sharing clears the token and the link 404s.
+
+## Push and the PWA
+
+`public/sw.js` is a service worker that caches nothing; it exists to show push notifications with Approve / Deny actions. The action buttons call `POST /api/approvals/onetap/:id?d=…&t=…` with the same signed token the email links carry, so a decision from the lock screen has exactly the authority of a one-tap link and needs no cookie. Subscriptions live in `push_subscriptions` (per person, per device, max ten); `lib/push.ts` sends with VAPID via `web-push` and drops endpoints the browser reports gone.
+
 ## Activity feed and notes
 
 `lib/activity.ts` reads the ledger as sentences: `describeEvent(type, payload)` gives every event a one-line summary, a group (decisions, approvals, mandates, cards …), a tone and the ids to filter by. `/activity` filters by kind, outcome, agent, mandate, date and free text (ILIKE over the canonical payload — adequate at beta scale; a tsvector column is the obvious upgrade), pages by ledger sequence, and lets members attach **notes** to a decision, an approval or an event. Notes are their own table, deliberately outside the hash chain: the chain records what happened, notes record what people think about it. The same `describeEvent` summary goes into webhook envelopes, so a Slack message built from a webhook reads exactly like the feed.

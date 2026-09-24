@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
-import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings } from "@/lib/service";
+import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings, pauseMandate, resumeMandate, raiseLimit, withdrawRaise, shareTransaction, unshareTransaction } from "@/lib/service";
 import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization, cardholderProblem, ensureCardholder, issuingRegion, createTopupSession, freezeCard } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
 import { toMinor as toMinorIn } from "@/lib/money";
@@ -86,6 +86,8 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
     }
   }
   revalidatePath("/");
+  const next = String(form.get("next") ?? "");
+  if (next === "connect") redirect(`/connect?rail=${encodeURIComponent(String(form.get("rail") ?? "python"))}&mandate=${m.id}&g=${grant(m.id)}`);
   redirect(`/mandates/${m.id}?new=1&g=${grant(m.id)}`);
 }
 
@@ -227,6 +229,61 @@ export async function saveWorkspaceSettingsAction(form: FormData) {
   catch (e) { redirect("/settings?error=" + encodeURIComponent((e as Error).message)); }
   revalidatePath("/settings");
   redirect("/settings?workspace=saved");
+}
+
+// ---------- Public receipts ----------
+
+export async function shareReceiptAction(form: FormData) {
+  const ctx = await requirePermission({ ledger: ["export"] }, "sharing receipts");
+  const id = String(form.get("transactionId") ?? ""); const mandateId = String(form.get("mandateId") ?? "");
+  if (!isUuid(id) || !isUuid(mandateId)) return;
+  if (form.get("stop") === "1") await unshareTransaction(ctx.workspaceId, id, ctx.email);
+  else await shareTransaction(ctx.workspaceId, id, ctx.email);
+  revalidatePath(`/mandates/${mandateId}`);
+  redirect(`/mandates/${mandateId}#tx-${id}`);
+}
+
+// ---------- Pause and temporary raise ----------
+
+export async function pauseMandateAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["revoke"] }, "pausing mandates");
+  const id = String(form.get("mandateId") ?? "");
+  if (!isUuid(id)) return;
+  const hours = num(form.get("hours"), 0);
+  const until = hours > 0 ? new Date(Date.now() + Math.min(hours, 24 * 30) * 3600_000) : null;
+  await pauseMandate(ctx.workspaceId, id, { until, by: ctx.email, reason: String(form.get("reason") ?? "") });
+  revalidatePath(`/mandates/${id}`); revalidatePath("/");
+  redirect(`/mandates/${id}`);
+}
+
+export async function resumeMandateAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["revoke"] }, "resuming mandates");
+  const id = String(form.get("mandateId") ?? "");
+  if (!isUuid(id)) return;
+  await resumeMandate(ctx.workspaceId, id, ctx.email);
+  revalidatePath(`/mandates/${id}`); revalidatePath("/");
+  redirect(`/mandates/${id}`);
+}
+
+export async function raiseLimitAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["issue"] }, "raising limits");
+  const id = String(form.get("mandateId") ?? "");
+  if (!isUuid(id)) return;
+  const m = await getMandate(ctx.workspaceId, id);
+  if (!m) return;
+  const hours = Math.max(0, num(form.get("hours"), 24));
+  const r = await raiseLimit(ctx.workspaceId, id, { field: String(form.get("field") ?? ""), amount: toMinorIn(num(form.get("amount")), m.currency), endsAt: new Date(Date.now() + hours * 3600_000), reason: String(form.get("reason") ?? ""), by: ctx.email });
+  revalidatePath(`/mandates/${id}`); revalidatePath("/");
+  redirect(r.ok ? `/mandates/${id}?raised=1` : `/mandates/${id}?error=${encodeURIComponent(r.error)}`);
+}
+
+export async function withdrawRaiseAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["issue"] }, "withdrawing raises");
+  const id = String(form.get("mandateId") ?? ""); const oid = String(form.get("overrideId") ?? "");
+  if (!isUuid(id) || !isUuid(oid)) return;
+  await withdrawRaise(ctx.workspaceId, id, oid, ctx.email);
+  revalidatePath(`/mandates/${id}`); revalidatePath("/");
+  redirect(`/mandates/${id}`);
 }
 
 export async function revokeMandateAction(form: FormData) {

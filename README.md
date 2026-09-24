@@ -51,6 +51,16 @@ https://mandate-ashen.vercel.app/api/mcp
 
 Approve on the consent page, then ask Claude to *"list my mandates"* or *"request a $5 purchase at OpenAI"*. Claude Code: `claude mcp add --transport http mandate https://mandate-ashen.vercel.app/api/mcp`.
 
+**Your own agent, with the SDK** (Python and TypeScript, zero dependencies, with tools for the OpenAI Agents SDK, LangChain and the Vercel AI SDK):
+
+```python
+pip install mandate-agent
+from mandate_agent import Mandate
+m = Mandate("mnd_…", base_url="https://mandate-ashen.vercel.app")
+with m.hold(1299, "OpenAI", purpose="API credits", idempotency_key="order-1") as h:
+    pay(); h.capture(1199)          # declined → MandateDeclined with a remedy; pending → MandatePending
+```
+
 **Any OpenAI-compatible SDK**, metered through a mandate:
 
 ```bash
@@ -82,7 +92,12 @@ curl -X POST https://mandate-ashen.vercel.app/api/agent/capture \
 - **Terms, not trust.** Per-transaction, daily and lifetime limits; merchant allow-list; blocked categories; active hours in the agent's timezone; expiry; an "ask me above" threshold.
 - **Holds, not charges.** An approval is a hold; the agent captures what it actually paid (less releases the difference) or voids it, and an unsettled hold closes by the mandate's policy when its TTL runs out.
 - **A "no" the agent can act on.** Every decline says when the same request would pass, the most that would pass right now, and what to do instead — so agents plan instead of hammering.
+- **Pause and temporary raises.** Freeze an agent for an hour or until you say so without killing its token; lift one limit for a window ("$150 today only") without editing the issued terms.
+- **Anomaly flags.** Unusual amount, first-time merchant, decline bursts and rapid repeats are flagged on the request itself — in the inbox, the feed, the email and the webhook.
 - **Approvals that agents can wait for.** Requests above the threshold park as *pending*; you approve once from email, a webhook (n8n, Zapier, Make, your own endpoint) or the inbox; the agent retries with the same idempotency key and goes through exactly once.
+- **Approve from your phone.** Install it as a PWA; approval requests arrive as push notifications with Approve / Deny buttons that work from the lock screen.
+- **Public receipts.** Share any decision as a signed page anyone can verify in their browser — the request, the answer, the terms, the human approval and the ledger rows with their hashes.
+- **Templates and a connect wizard.** Start a mandate from a preset or duplicate one; the wizard fills the token into snippets for Claude, Cursor, Python, TypeScript or curl and tells you when the first call lands.
 - **Event webhooks.** Every ledger event, pushed as signed JSON to your own endpoints with retries and ordering — build the Slack bridge, the finance export or the dashboard you want.
 - **An activity feed you can read.** The ledger as sentences: filter by agent, mandate, outcome or date, search it, leave notes on anything.
 - **A ledger you can hand to someone.** Append-only SHA-256 chain per workspace, Ed25519-signed exports, and a public verifier — anyone can check a receipt without an account.
@@ -141,7 +156,7 @@ Found something? See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens with holds and capture, approvals, event webhooks, the activity feed, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
+Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens and SDKs with holds and capture, approvals with push, event webhooks, the activity feed, public receipts, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Contributing
 

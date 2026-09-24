@@ -10,6 +10,7 @@ import { signOutAction, switchWorkspaceAction } from "./actions";
 import { WorkspaceSwitcher } from "./switcher";
 import { ThemeToggle, type Theme } from "./theme";
 import { LiveRefresh } from "./live";
+import { PwaRegister } from "./pwa";
 import { stripeEnabled } from "@/lib/stripe";
 import { isOperator } from "@/lib/env";
 import { cookies } from "next/headers";
@@ -21,7 +22,12 @@ export const metadata: Metadata = {
   metadataBase: (() => { try { return new URL(process.env.APP_URL ?? process.env.BETTER_AUTH_URL ?? "http://localhost:3000"); } catch { return undefined; } })(),
   openGraph: { title: "Mandate — spending authority for AI agents", description, type: "website", siteName: "Mandate" },
   twitter: { card: "summary", title: "Mandate — spending authority for AI agents", description },
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, title: "Mandate", statusBarStyle: "black-translucent" },
+  icons: { apple: "/icons/apple-touch-icon.png" },
 };
+
+export const viewport = { themeColor: "#B8631B" };
 
 export const dynamic = "force-dynamic";
 
@@ -55,7 +61,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <Link href="/proxy">API proxy</Link>
                 {stripeEnabled() && <Link href="/balance">Balance</Link>}
                 <Link href="/members">Members</Link>
-                <Link href="/docs">Connect agents</Link>
+                <Link href="/connect">Connect agents</Link>
                 <Link href="/settings">Settings</Link>
               </nav>
             )}
@@ -71,6 +77,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             )}
             <ThemeToggle initial={theme} />
             {ctx && <LiveRefresh />}
+            {ctx && <PwaRegister />}
           </div>
         </div>
         <main className="main">

@@ -1,6 +1,6 @@
 {
   "name": "mandate",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -30,6 +30,7 @@
     "react-dom": "^19.2.8",
     "resend": "^6.26.0",
     "stripe": "^17.7.0",
+    "web-push": "^3.6.7",
     "zod": "^4.5.4"
   },
   "devDependencies": {
@@ -38,6 +39,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
+    "@types/web-push": "^3.6.4",
     "drizzle-kit": "^0.31.0",
     "playwright": "^1.63.0",
     "tsx": "^4.23.13",
@@ -50,7 +52,7 @@
     "node": ">=22"
   },
   "license": "AGPL-3.0-only",
-  "description": "Scoped, revocable spending authority for AI agents: limits, approvals, a signed ledger, and revocation \u2014 over MCP, an API-key proxy, REST tokens or virtual cards.",
+  "description": "Scoped, revocable spending authority for AI agents: limits, approvals, a signed ledger, and revocation — over MCP, an API-key proxy, REST tokens or virtual cards.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Ivan825/Mandate.git"

@@ -17,6 +17,7 @@ import { cardholderProblem, issuingRegion, termsAcceptanceRequired, cardholderTe
 import { isOperator } from "@/lib/env";
 import { When } from "@/app/components";
 import { PasskeyPanel } from "./passkeys";
+import { PushPanel } from "./push";
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ test?: string; disconnected?: string; channel?: string; error?: string; cardholder?: string; sessions?: string; workspace?: string }> }) {
   const ctx = await requireCtx();
@@ -35,6 +36,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     ["Email delivery (sign-in links, alerts, invitations)", emailOn, "RESEND_API_KEY or SMTP_URL (+ EMAIL_FROM)"],
     ["Deployment-wide fallback webhook", deploymentChannels().length > 0, "NOTIFY_WEBHOOK_URL (used only when no member has a channel)"],
     ["One-tap links signed", Boolean(notifySecret()), "NOTIFY_SECRET"],
+    ["Web push (approve from the lock screen)", Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY), "VAPID_PUBLIC_KEY + VAPID_PRIVATE_KEY + VAPID_SUBJECT"],
     ["Stripe virtual cards + top-ups", stripeEnabled(), "STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET + STRIPE_PUBLISHABLE_KEY"],
   ];
   return (
@@ -78,6 +80,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <p className="muted" style={{ fontSize: 13.5 }}>A JSON POST for each event: <code>approval.requested</code> with the agent, mandate, amount, merchant, purpose and signed <code>links.approve</code> / <code>links.deny</code> / <code>links.inbox</code>; <code>warning</code> for utilisation and velocity alerts; <code>test</code> from the button above. Point it at an n8n, Zapier or Make trigger, or your own endpoint, and route it wherever you already look.</p>
         </div>
       </div>
+
+      <h2 style={{ marginBottom: 8 }}>Push notifications</h2>
+      <p className="muted">Approval requests as notifications on this phone or browser, with Approve and Deny buttons. Install Mandate to your home screen for the best experience.</p>
+      <div style={{ marginBottom: 28 }}><PushPanel /></div>
 
       <h2 style={{ marginBottom: 8 }}>Workspace: {ctx.workspaceName}</h2>
       {workspaceMsg && <div className="notice ok" style={{ marginBottom: 12 }}>Workspace settings saved.</div>}

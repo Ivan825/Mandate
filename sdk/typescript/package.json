@@ -1,0 +1,68 @@
+{
+  "name": "mandate-agent",
+  "version": "0.5.0",
+  "description": "Give your AI agent a spending mandate, not a card: authorise, capture and void purchases against limits a human set, with a signed ledger.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./ai": {
+      "types": "./dist/ai.d.ts",
+      "import": "./dist/ai.js"
+    },
+    "./openai": {
+      "types": "./dist/openai.d.ts",
+      "import": "./dist/openai.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test --import tsx test/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "ai": ">=4",
+    "zod": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ai": "^5.0.266",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.0",
+    "zod": "^4.5.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ivan825/Mandate.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/Ivan825/Mandate/tree/main/sdk/typescript",
+  "keywords": [
+    "ai-agents",
+    "spending-limits",
+    "payments",
+    "mcp",
+    "llm",
+    "vercel-ai-sdk"
+  ]
+}

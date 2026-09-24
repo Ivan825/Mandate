@@ -6,3 +6,9 @@ Claude outputs/
 tsconfig.tsbuildinfo
 next-env.d.ts
 deploy/ecs/params.env
+sdk/typescript/node_modules
+sdk/typescript/dist
+sdk/python/dist
+sdk/python/build
+sdk/python/*.egg-info
+__pycache__/

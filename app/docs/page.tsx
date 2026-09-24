@@ -26,8 +26,11 @@ claude mcp add --transport http mandate ${MCP_RESOURCE}
         </div>
 
         <div className="card">
-          <h3>2. Your own agent: the REST API with a mandate token</h3>
-          <p className="muted" style={{ marginTop: 8 }}>For code you run yourself. The token is shown once when you issue a mandate.</p>
+          <h3>2. Your own agent: the SDKs or the REST API with a mandate token</h3>
+          <p className="muted" style={{ marginTop: 8 }}>For code you run yourself. The token is shown once when you issue a mandate. The <Link href="/connect">connect wizard</Link> fills it into these snippets for you and watches for the first call.</p>
+          <pre>{`pip install mandate-agent          # Python: from mandate_agent import Mandate
+npm install mandate-agent          # TypeScript: import { Mandate } from "mandate-agent"`}</pre>
+          <p className="muted">Both give you <code>authorize</code> / <code>capture</code> / <code>void</code>, a hold helper that voids on error, polling for pending approvals, and ready-made tools for the OpenAI Agents SDK, LangChain and the Vercel AI SDK. Underneath is plain HTTP:</p>
           <pre>{`POST ${base}/api/agent/authorize
 Authorization: Bearer mnd_...
 Idempotency-Key: order-2026-09-05-001

@@ -4,6 +4,7 @@ import { isIP, BlockList } from "node:net";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "./db";
 import { fmt } from "./policy";
+import { FLAG_LABELS, parseFlags } from "./anomaly";
 import type { Approval, Mandate } from "./schema";
 import { appUrl, isProduction } from "./env";
 import { sendMail } from "./mailer";
@@ -21,7 +22,7 @@ import { sendMail } from "./mailer";
 // One-tap links are signed with NOTIFY_SECRET and expire with the request.
 
 export const LINK_TTL_MS = 24 * 3600 * 1000;
-export type ChannelType = "email" | "webhook";
+export type ChannelType = "email" | "webhook" | "push";
 export type Channel = { id: string; userId: string; type: ChannelType; target: string; label: string };
 
 export function notifySecret(): string | null {
@@ -120,9 +121,13 @@ export async function removeChannel(userId: string, id: string) {
 }
 
 // Members who may decide requests in a workspace, with their channels.
-export async function recipientsFor(workspaceId: string): Promise<Channel[]> {
+export async function deciderUserIds(workspaceId: string): Promise<string[]> {
   const members = await db.select({ userId: schema.member.userId, role: schema.member.role }).from(schema.member).where(eq(schema.member.organizationId, workspaceId));
-  const deciders = members.filter((m) => /\b(owner|admin|approver)\b/.test(m.role)).map((m) => m.userId);
+  return members.filter((m) => /\b(owner|admin|approver)\b/.test(m.role)).map((m) => m.userId);
+}
+
+export async function recipientsFor(workspaceId: string): Promise<Channel[]> {
+  const deciders = await deciderUserIds(workspaceId);
   if (deciders.length === 0) return [];
   const rows = await db.select().from(schema.notificationChannels).where(and(inArray(schema.notificationChannels.userId, deciders), eq(schema.notificationChannels.enabled, 1)));
   return rows.map((r) => ({ id: r.id, userId: r.userId, type: r.type as ChannelType, target: r.target, label: r.label }));
@@ -178,8 +183,10 @@ export type ApprovalNotice = { approval: Approval; mandate: Mandate; agentName: 
 export function approvalMessage(n: ApprovalNotice): Message {
   const links = decisionLinks(n.approval.id);
   const amount = fmt(n.approval.amount, n.approval.currency);
+  const flags = parseFlags(n.approval.flags);
   const html = `<b>${esc(n.agentName)}</b> wants to spend <b>${esc(amount)}</b> at <b>${esc(n.approval.merchant)}</b>` +
     (n.approval.purpose ? `\n“${esc(n.approval.purpose)}”` : "") +
+    (flags.length ? `\n⚑ ${esc(flags.map((f) => `${FLAG_LABELS[f].label}: ${FLAG_LABELS[f].hint}`).join(" · "))}` : "") +
     `\nMandate: ${esc(n.mandate.name)} · above your ${esc(fmt(n.mandate.approvalAbove ?? 0, n.mandate.currency))} threshold` +
     (links ? "" : `\nOpen the inbox to decide: ${baseUrl()}/approvals`);
   const text = html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
@@ -188,7 +195,7 @@ export function approvalMessage(n: ApprovalNotice): Message {
     html, text, links,
     payload: {
       event: "approval.requested", approvalId: n.approval.id, mandateId: n.mandate.id, mandateName: n.mandate.name, agentName: n.agentName,
-      amount: n.approval.amount, currency: n.approval.currency, amountDisplay: amount, merchant: n.approval.merchant, purpose: n.approval.purpose,
+      amount: n.approval.amount, currency: n.approval.currency, amountDisplay: amount, merchant: n.approval.merchant, purpose: n.approval.purpose, flags,
       requestedAt: new Date(n.approval.requestedAt).toISOString(), links,
     },
   };
@@ -197,8 +204,22 @@ export function approvalMessage(n: ApprovalNotice): Message {
 export async function sendApprovalRequested(n: ApprovalNotice): Promise<Outcome[]> {
   let channels = await recipientsFor(n.mandate.workspaceId);
   if (channels.length === 0) channels = fallbackChannels();
-  if (channels.length === 0) return [];
-  return deliver(channels, approvalMessage(n));
+  const msg = approvalMessage(n);
+  const [outcomes, push] = await Promise.all([channels.length ? deliver(channels, msg) : Promise.resolve([] as Outcome[]), pushApproval(n, msg)]);
+  return push ? [...outcomes, push] : outcomes;
+}
+
+// Phones and browsers that turned push on get the request with Approve /
+// Deny buttons; the buttons call the signed one-tap endpoint directly.
+async function pushApproval(n: ApprovalNotice, msg: Message): Promise<Outcome | null> {
+  const { pushEnabled, sendPush } = await import("./push");
+  if (!pushEnabled()) return null;
+  try {
+    const ids = await deciderUserIds(n.mandate.workspaceId);
+    const r = await sendPush(ids, { title: msg.title, body: `${n.mandate.name}${n.approval.purpose ? ` — “${n.approval.purpose}”` : ""}`, tag: `approval:${n.approval.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: msg.links?.approve, denyUrl: msg.links?.deny });
+    if (r.devices === 0) return null;
+    return { channel: "push", target: `${r.devices} device${r.devices === 1 ? "" : "s"}`, ok: r.sent > 0, error: r.sent === 0 ? "no device accepted the push" : undefined };
+  } catch (e) { return { channel: "push", target: "devices", ok: false, error: (e as Error).message }; }
 }
 
 export async function sendWarning(workspaceId: string, title: string, body: string, payload: Record<string, unknown>): Promise<Outcome[]> {

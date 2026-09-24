@@ -8,6 +8,8 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { chromium } from "playwright";
 import Stripe from "stripe";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 
 const PORT = Number(process.env.E2E_PORT ?? 3100);
 const BASE = `http://localhost:${PORT}`;
@@ -49,6 +51,8 @@ const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: {
   // Fake Stripe keys: the webhook is exercised with locally signed events;
   // nothing calls Stripe's API.
   STRIPE_SECRET_KEY: "sk_test_e2e_fake", STRIPE_WEBHOOK_SECRET: "whsec_e2e_fake", STRIPE_PUBLISHABLE_KEY: "pk_test_e2e_fake", STRIPE_ISSUING_REGION: "US",
+  // Push: real VAPID keys so subscriptions register; nothing is sent to a real browser.
+  ...(() => { const { generateVAPIDKeys } = require("web-push"); const k = generateVAPIDKeys(); return { VAPID_PUBLIC_KEY: k.publicKey, VAPID_PRIVATE_KEY: k.privateKey, VAPID_SUBJECT: "mailto:e2e@example.com" }; })(),
 }, stdio: ["ignore", "pipe", "pipe"] });
 app.stdout.on("data", (d) => { out += d.toString(); });
 app.stderr.on("data", (d) => { out += d.toString(); });
@@ -129,6 +133,79 @@ try {
   check("a note attaches to an event", (await p.locator("article", { hasText: "Looked into this" }).count()) >= 1);
   await p.goto(BASE + "/activity?group=decisions&outcome=captured", { waitUntil: "networkidle" });
   check("activity filters narrow the feed", (await p.locator("article").count()) >= 1 && (await p.locator("article", { hasText: "authorization.captured" }).count()) >= 1);
+  // 2d′. pause, raise, share, templates, wizard, push, one-tap API
+  await p.goto(BASE + "/mandates/" + mandateInfo.mandateId, { waitUntil: "networkidle" });
+  await p.locator("details.menu summary", { hasText: "Pause" }).click();
+  await p.selectOption("#pause-hours", "1");
+  await Promise.all([p.waitForURL(/\/mandates\//), p.locator("form", { has: p.locator("#pause-hours") }).locator("button[type=submit]").click()]);
+  await p.waitForTimeout(300);
+  const pausedTry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 100, merchant: "OpenAI" }) }).then((r) => r.json());
+  check("paused mandate declines with a resume time", pausedTry.rule === "paused" && typeof pausedTry.remedy?.retryAt === "string", JSON.stringify(pausedTry));
+  check("mandate page shows paused", (await p.locator(".pill.paused").count()) >= 1);
+  await Promise.all([p.waitForURL(/\/mandates\//), p.locator("button", { hasText: "Resume now" }).click()]);
+  await p.waitForTimeout(300);
+  check("resumed mandate approves again", (await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 100, merchant: "OpenAI" }) }).then((r) => r.json())).decision === "approved");
+  // Temporary raise: 45.00 exceeds what is left of today's 150.00 until the daily limit is raised to 300.00 (then it escalates above the 20.00 threshold: pending, not daily).
+  const beforeRaise = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 4500, merchant: "OpenAI" }) }).then((r) => r.json());
+  check("daily limit binds before the raise", beforeRaise.rule === "daily", beforeRaise.rule);
+  await p.locator("details.menu summary", { hasText: "Raise a limit" }).click();
+  await p.selectOption("#raise-field", "daily"); await p.fill("#raise-amount", "300"); await p.selectOption("#raise-hours", "1");
+  await Promise.all([p.waitForURL(/raised=1/), p.locator("form", { has: p.locator("#raise-field") }).locator("button[type=submit]").click()]);
+  await p.waitForLoadState("networkidle");
+  const raisedTry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 4500, merchant: "OpenAI" }) }).then((r) => r.json());
+  check("temporary raise lifts the daily limit", raisedTry.rule !== "daily" && raisedTry.decision === "pending", JSON.stringify({ decision: raisedTry.decision, rule: raisedTry.rule }));
+  await p.goto(BASE + "/mandates/" + mandateInfo.mandateId, { waitUntil: "networkidle" });
+  check("mandate page shows the raise in force", (await p.locator("text=Raises in force").count()) === 1);
+  // Share a receipt, verify its JSON, then stop sharing.
+  await p.goto(BASE + "/mandates/" + mandateInfo.mandateId, { waitUntil: "networkidle" });
+  await p.locator("button", { hasText: "Share receipt" }).first().click();
+  await p.waitForSelector('a[href^="/r/"]', { timeout: 15000 });
+  const receiptHref = await p.locator('a[href^="/r/"]').first().getAttribute("href");
+  check("decision shared with a public link", Boolean(receiptHref?.includes("?k=")), String(receiptHref));
+  const pubCtx = await b.newContext(); const pub = await pubCtx.newPage();
+  await pub.goto(BASE + receiptHref, { waitUntil: "networkidle" });
+  check("public receipt renders without a session", (await pub.locator("h1").textContent())?.includes("at ") && (await pub.locator("table tbody tr").count()) >= 1);
+  const rj = await fetch(BASE + "/api/receipts/tx/" + receiptHref.split("/r/")[1].replace("?k=", "?k=")).then((r) => r.json());
+  check("receipt JSON is signed", rj.kind === "mandate-transaction-receipt" && rj.signature?.alg === "Ed25519" && rj.events.length >= 1);
+  const rv = await fetch(BASE + "/api/receipts/tx/" + rj.transaction.id, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(rj) }).then((r) => r.json());
+  check("server verifier accepts the receipt", rv.coreOk && rv.signatureValid, JSON.stringify(rv));
+  const tampered = { ...rj, transaction: { ...rj.transaction, amount: 1 } };
+  const rv2 = await fetch(BASE + "/api/receipts/tx/" + rj.transaction.id, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(tampered) }).then((r) => r.json());
+  check("server verifier rejects a tampered receipt", rv2.coreOk === false);
+  await pub.locator("button", { hasText: "Verify in my browser" }).click();
+  await pub.waitForSelector(".notice.ok, .notice.bad", { timeout: 15000 });
+  check("receipt verifies in the browser", (await pub.locator(".notice.ok", { hasText: "Verified" }).count()) === 1, await pub.locator(".notice").last().textContent());
+  await pubCtx.close();
+  await p.locator("button", { hasText: "Stop sharing" }).first().click();
+  await p.waitForFunction(() => document.querySelectorAll('a[href^="/r/"]').length === 0, null, { timeout: 15000 });
+  check("un-shared receipt is gone", (await fetch(BASE + receiptHref)).status === 404);
+  // Templates and duplicate pre-fill the issue form.
+  await p.goto(BASE + "/mandates/new?template=shopping", { waitUntil: "networkidle" });
+  check("template pre-fills the form", (await p.inputValue("#name")) === "Shopping assistant" && (await p.inputValue("#activeHoursStart")) === "7");
+  await p.goto(BASE + "/mandates/new?from=" + mandateInfo.mandateId, { waitUntil: "networkidle" });
+  check("duplicate pre-fills from the mandate", (await p.inputValue("#name")).endsWith("(copy)") && (await p.inputValue("#allowedMerchants")).includes("OpenAI"));
+  // Connect wizard renders every rail with the live check.
+  for (const rail of ["claude", "python", "curl"]) { await p.goto(BASE + "/connect?rail=" + rail, { waitUntil: "networkidle" }); check(`connect wizard renders rail ${rail}`, (await p.locator(".rails a.on").count()) === 1 && (await p.locator(".pulse").count()) === 1); }
+  // Push: a subscription registers and lists.
+  const pushInfo = await p.evaluate(async () => (await fetch("/api/push/subscribe")).json());
+  check("push is configured with a VAPID key", pushInfo.enabled === true && typeof pushInfo.publicKey === "string");
+  const subRes = await p.evaluate(async () => (await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint: "https://push.example.test/sub/" + Math.random(), keys: { p256dh: "BPl", auth: "abc" } }) })).status);
+  const pushAfter = await p.evaluate(async () => (await fetch("/api/push/subscribe")).json());
+  check("push subscription registers and lists", subRes === 200 && pushAfter.devices.length === 1);
+  // One-tap API decides with the signed link the (console) email carried — the owner needs an email channel first.
+  await p.goto(BASE + "/settings", { waitUntil: "networkidle" });
+  await p.selectOption("select[name=type]", "email"); await p.fill("input[name=target]", email);
+  await Promise.all([p.waitForURL(/settings\?(error|channel)=/), p.locator("form", { has: p.locator("select[name=type]") }).locator("button[type=submit]").click()]);
+  check("owner added an email channel", p.url().includes("channel=added"), p.url());
+  const pend = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 3300, merchant: "Anthropic", purpose: "one-tap api" }) }).then((r) => r.json());
+  await new Promise((r) => setTimeout(r, 800));
+  const approveLink = lastLink(new RegExp(`${BASE}/a/${pend.approvalId}\\?d=approve&t=[^\\s]+`, "g"));
+  check("approval email carried a signed approve link", Boolean(approveLink));
+  const onetap = await fetch(approveLink.replace("/a/", "/api/approvals/onetap/"), { method: "POST" });
+  check("one-tap API approves with the signed link", onetap.status === 200 && (await onetap.json()).decision === "approved");
+  check("one-tap API refuses a replay", (await fetch(approveLink.replace("/a/", "/api/approvals/onetap/"), { method: "POST" })).status === 409);
+  check("manifest and service worker are public", (await fetch(BASE + "/manifest.webmanifest")).status === 200 && (await fetch(BASE + "/sw.js")).status === 200);
+
   // 2e. event webhooks: settings page, private target refused
   await p.goto(BASE + "/settings/webhooks", { waitUntil: "networkidle" });
   check("event webhooks page renders", (await p.locator("h1").textContent())?.includes("pushed to your own systems"));

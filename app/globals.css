@@ -202,3 +202,24 @@ legend{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transfor
 .reading p:last-child{margin-bottom:0}
 table.mini{min-width:0;font-size:13px}
 table.mini td,table.mini th{padding:6px 8px}
+
+.flags{display:inline-flex;gap:4px;flex-wrap:wrap;vertical-align:middle}
+.flag{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.02em;padding:1px 6px;border-radius:3px;border:1px solid var(--warn);color:var(--warn);background:var(--warn-soft)}
+.pill.paused{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
+.menu{position:relative}
+.menu>summary{list-style:none;cursor:pointer;display:inline-flex}
+.menu>summary::-webkit-details-marker{display:none}
+.menu .menu-body{position:absolute;right:0;top:calc(100% + 6px);z-index:20;min-width:320px;background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:12px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.tpl-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:18px}
+.tpl{display:flex;flex-direction:column;gap:2px;padding:9px 11px;border:1px solid var(--rule);border-radius:4px;background:var(--surface);text-decoration:none;color:var(--ink)}
+.tpl:hover{border-color:var(--ink-3)}
+.tpl.on{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.tpl-name{font-weight:500;font-size:13.5px}
+.tpl-who{font-size:11.5px;color:var(--ink-3)}
+@media (max-width:640px){.tpl-row{grid-template-columns:1fr 1fr}}
+.pulse{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--ink-2)}
+.pulse span{width:9px;height:9px;border-radius:50%;background:var(--warn);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.1)}}
+.rails{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+.rails a{padding:6px 11px;border:1px solid var(--rule);border-radius:999px;font-size:13px;text-decoration:none;color:var(--ink-2);background:var(--surface)}
+.rails a.on{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}

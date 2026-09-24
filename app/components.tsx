@@ -16,4 +16,13 @@ export function Util({ used, limit, currency, label }: { used: number; limit: nu
   );
 }
 
+import { FLAG_LABELS, parseFlags } from "@/lib/anomaly";
+
+// Anomaly chips for a decision or request; nothing when there are none.
+export function Flags({ json, small }: { json: string | null | undefined; small?: boolean }) {
+  const flags = parseFlags(json);
+  if (flags.length === 0) return null;
+  return <span className="flags">{flags.map((f) => <span key={f} className="flag" title={FLAG_LABELS[f].hint} style={small ? { fontSize: 10.5 } : undefined}>⚑ {FLAG_LABELS[f].label}</span>)}</span>;
+}
+
 export { When } from "./when";

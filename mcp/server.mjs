@@ -79,7 +79,7 @@ async function handle(msg) {
   const fail = (code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
   switch (method) {
     case "initialize":
-      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.4.0" } });
+      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.5.0" } });
     case "notifications/initialized":
       return null;
     case "ping":

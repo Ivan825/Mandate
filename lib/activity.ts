@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gte, inArray, lte, lt, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db, schema } from "./db";
 import { fmt } from "./money";
+import { FLAG_LABELS, type Flag } from "./anomaly";
 import type { LedgerEvent, Note } from "./schema";
 
 // The activity feed: the ledger, read as sentences. describeEvent turns a
@@ -36,7 +37,18 @@ export function groupOf(type: string): Group {
   return "system";
 }
 
+export function flagSuffix(p: P): string {
+  const f = Array.isArray(p.flags) ? (p.flags as unknown[]).filter((x): x is Flag => typeof x === "string" && x in FLAG_LABELS) : [];
+  return f.length ? ` ⚑ ${f.map((x) => FLAG_LABELS[x].label).join(", ")}` : "";
+}
+
 export function describeEvent(type: string, p: P, names: { mandate?: string; agent?: string } = {}): Described {
+  const d = describe(type, p, names);
+  if (type.startsWith("authorization.") || type === "approval.requested") d.summary += flagSuffix(p);
+  return d;
+}
+
+function describe(type: string, p: P, names: { mandate?: string; agent?: string } = {}): Described {
   const group = groupOf(type);
   const who = names.agent ? names.agent : "An agent";
   const m = names.mandate ? ` under ${names.mandate}` : "";
@@ -57,6 +69,10 @@ export function describeEvent(type: string, p: P, names: { mandate?: string; age
     case "approval.notified": return { ...base, tone: "", summary: `Approvers were notified (${Array.isArray(p.channels) ? (p.channels as { channel: string; ok: boolean }[]).map((c) => `${c.channel} ${c.ok ? "✓" : "✗"}`).join(", ") : ""}).` };
     case "mandate.issued": return { ...base, tone: "ok", summary: `Mandate “${s(p.name)}” issued: ${money(p, "perTxnLimit")} per purchase, ${money(p, "dailyLimit")} a day, ${money(p, "totalLimit")} in total${n(p.approvalAbove) != null ? `, ask above ${money(p, "approvalAbove")}` : ""}.` };
     case "mandate.revoked": return { ...base, tone: "bad", summary: `Mandate revoked by ${s(p.by) || "the owner"}. The agent is cut off.` };
+    case "mandate.paused": return { ...base, tone: "warn", summary: `Mandate paused by ${s(p.by)}${s(p.until) ? ` until ${s(p.until)}` : " until further notice"}${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
+    case "mandate.resumed": return { ...base, tone: "ok", summary: s(p.by) === "system" ? "Mandate resumed: the pause ran out." : `Mandate resumed by ${s(p.by)}.` };
+    case "mandate.raised": return { ...base, tone: "warn", summary: `${s(p.by)} raised ${s(p.field).replace("_", " ")} to ${n(p.amount) != null && s(p.currency) ? fmt(n(p.amount)!, s(p.currency)) : ""} until ${s(p.endsAt)}${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
+    case "mandate.raise_withdrawn": return { ...base, tone: "", summary: `${s(p.by)} withdrew the temporary ${s(p.field).replace("_", " ")} raise.` };
     case "mandate.card_issued": return { ...base, tone: "ok", summary: `Virtual card ···${s(p.last4)} issued to the mandate.` };
     case "mandate.card_frozen": return { ...base, tone: "warn", summary: `Card frozen by ${s(p.by)}.` };
     case "mandate.card_unfrozen": return { ...base, tone: "ok", summary: `Card unfrozen by ${s(p.by)}.` };
@@ -81,6 +97,8 @@ export function describeEvent(type: string, p: P, names: { mandate?: string; age
     case "webhook.endpoint_paused": return { ...base, tone: "warn", summary: `Event webhook paused by ${s(p.by)}.` };
     case "webhook.endpoint_enabled": return { ...base, tone: "ok", summary: `Event webhook re-enabled by ${s(p.by)}.` };
     case "webhook.endpoint_disabled": return { ...base, tone: "bad", summary: `Event webhook ${s(p.url)} disabled after ${n(p.failures) ?? ""} failures (${s(p.lastError)}).` };
+    case "receipt.shared": return { ...base, tone: "", summary: `${s(p.by)} shared this decision's receipt publicly.` };
+    case "receipt.unshared": return { ...base, tone: "", summary: `${s(p.by)} stopped sharing this decision's receipt.` };
     case "webhook.secret_rotated": return { ...base, tone: "", summary: `Webhook signing secret rotated by ${s(p.by)}.` };
     default: return { ...base, summary: type.replace(/[._]/g, " ") + "." };
   }

@@ -50,7 +50,7 @@ function text(obj: unknown) {
 }
 
 function buildServer(p: Principal) {
-  const server = new McpServer({ name: "mandate", version: "0.4.0" });
+  const server = new McpServer({ name: "mandate", version: "0.5.0" });
 
   server.registerTool("list_mandates", {
     description: "List the active spending mandates in the connected workspace: each mandate's limits, what is left today and overall, allowed merchants and hours. Call this first to pick the mandate a purchase should go under.",

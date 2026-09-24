@@ -2,7 +2,7 @@ import Link from "next/link";
 import { requireCtx, can } from "@/lib/session";
 import { listApprovals } from "@/lib/service";
 import { fmt } from "@/lib/policy";
-import { Pill, When } from "@/app/components";
+import { Pill, When, Flags } from "@/app/components";
 import { decideApprovalAction } from "@/app/actions";
 
 export default async function ApprovalsPage() {
@@ -28,6 +28,7 @@ export default async function ApprovalsPage() {
               <div className="amt num">{fmt(a.amount, a.currency)} <span className="muted" style={{ fontFamily: "var(--sans)", fontSize: 15, fontWeight: 400 }}>at {a.merchant}</span></div>
               <div className="meta"><strong>{agentName}</strong> · <Link href={`/mandates/${a.mandateId}`}>{mandateName}</Link> · asked <When d={a.requestedAt} /></div>
               {a.purpose && <div className="meta">“{a.purpose}”</div>}
+              <Flags json={a.flags} />
             </div>
             {mayDecide ? (
               <form action={decideApprovalAction} className="actions">

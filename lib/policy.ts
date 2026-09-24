@@ -4,7 +4,7 @@
 // officer would check them in — eligibility first, then scope, then limits,
 // then escalation.
 
-import type { Mandate, Approval } from "./schema";
+import type { Mandate, Approval, MandateOverride } from "./schema";
 import { fmt } from "./money";
 
 export { fmt };
@@ -28,7 +28,37 @@ export type Facts = {
   // rail has no balance to check (API, MCP, proxy — the person pays the
   // provider directly).
   availableBalance?: number | null;
+  // Temporary raises in force right now (lib/service loads the live ones).
+  overrides?: MandateOverride[];
 };
+
+export type OverrideField = "per_txn" | "daily" | "total" | "approval_above";
+export const OVERRIDE_FIELDS: { key: OverrideField; label: string }[] = [
+  { key: "per_txn", label: "Per transaction" }, { key: "daily", label: "Per day" }, { key: "total", label: "Total sanctioned" }, { key: "approval_above", label: "Ask me above" },
+];
+
+export type EffectiveTerms = { perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove: number | null; raised: Partial<Record<OverrideField, MandateOverride>> };
+
+// The terms in force at `now`: the mandate's own, lifted by any active
+// temporary raise. A raise only ever goes up; the issued terms are the floor.
+export function effectiveTerms(m: Mandate, overrides: MandateOverride[] = [], now = new Date()): EffectiveTerms {
+  const t: EffectiveTerms = { perTxnLimit: m.perTxnLimit, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove, raised: {} };
+  for (const o of overrides) {
+    if (o.revokedAt || new Date(o.startsAt) > now || new Date(o.endsAt) <= now) continue;
+    const f = o.field as OverrideField;
+    if (f === "per_txn" && o.amount > t.perTxnLimit) { t.perTxnLimit = o.amount; t.raised.per_txn = o; }
+    if (f === "daily" && o.amount > t.dailyLimit) { t.dailyLimit = o.amount; t.raised.daily = o; }
+    if (f === "total" && o.amount > t.totalLimit) { t.totalLimit = o.amount; t.raised.total = o; }
+    if (f === "approval_above" && t.approvalAbove != null && o.amount > t.approvalAbove) { t.approvalAbove = o.amount; t.raised.approval_above = o; }
+  }
+  return t;
+}
+
+// A paused mandate whose pause has run out is active again, whether or not
+// anyone has written that back yet.
+export function isPaused(m: Mandate, now = new Date()): boolean {
+  return m.status === "paused" && !(m.pausedUntil && now >= new Date(m.pausedUntil));
+}
 
 // What the agent can do about a decision that was not "approved": when the
 // same request would be allowed, the largest amount that would pass right
@@ -150,10 +180,13 @@ export function validateHoldTerms(t: { holdTtlHours: number; holdPolicy: string 
   return errs;
 }
 
-export function evaluate(mandate: Mandate, req: AuthRequest, facts: Facts): Decision {
+export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision {
   const now = req.now ?? new Date();
   const amt = req.amount;
-  const ccy = mandate.currency;
+  const ccy = m0.currency;
+  // Limits are read through any temporary raise in force.
+  const eff = effectiveTerms(m0, facts.overrides ?? [], now);
+  const mandate = { ...m0, perTxnLimit: eff.perTxnLimit, dailyLimit: eff.dailyLimit, totalLimit: eff.totalLimit, approvalAbove: eff.approvalAbove };
   const headroomToday = Math.max(0, mandate.dailyLimit - facts.spentToday);
   const headroomTotal = Math.max(0, mandate.totalLimit - facts.spentTotal);
   // The largest single request that would pass every limit right now.
@@ -163,7 +196,11 @@ export function evaluate(mandate: Mandate, req: AuthRequest, facts: Facts): Deci
   if (!Number.isInteger(amt) || amt <= 0) {
     return declined("amount", "Amount must be a positive integer number of minor units.", { message: "Send amount as a positive integer in minor units (1299 for 12.99)." });
   }
-  if (mandate.status !== "active") {
+  if (isPaused(mandate, now)) {
+    const until = mandate.pausedUntil ? new Date(mandate.pausedUntil).toISOString() : null;
+    return declined("paused", `Mandate is paused${until ? ` until ${until}` : ""}.`, { message: until ? `The owner paused this mandate; it resumes at ${until}. Retry then.` : "The owner paused this mandate until further notice. Nothing passes until they resume it.", retryAt: until ?? undefined, approvalRequired: !until });
+  }
+  if (mandate.status !== "active" && !(mandate.status === "paused" && !isPaused(mandate, now))) {
     return declined("status", `Mandate is ${mandate.status}.`, { message: "This mandate can no longer be used. Ask the owner to issue a new one.", approvalRequired: true });
   }
   if (mandate.expiresAt && now > new Date(mandate.expiresAt)) {

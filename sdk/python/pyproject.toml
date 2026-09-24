@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mandate-agent"
+version = "0.5.0"
+description = "Give your AI agent a spending mandate, not a card: authorise, capture and void purchases against limits a human set, with a signed ledger."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "Mandate" }]
+keywords = ["ai-agents", "spending-limits", "payments", "mcp", "llm"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: GNU Affero General Public License v3",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.optional-dependencies]
+openai-agents = ["openai-agents>=0.1"]
+langchain = ["langchain-core>=0.2"]
+
+[project.urls]
+Homepage = "https://github.com/Ivan825/Mandate"
+Documentation = "https://github.com/Ivan825/Mandate/tree/main/sdk/python"
+Source = "https://github.com/Ivan825/Mandate"
+
+[tool.setuptools.packages.find]
+include = ["mandate_agent*"]

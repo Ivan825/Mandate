@@ -57,6 +57,13 @@
       "when": 1790276398585,
       "tag": "0007_phase1_holds_webhooks_activity",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790279669980,
+      "tag": "0008_phase2_pause_overrides_flags_push_shares",
+      "breakpoints": true
     }
   ]
 }

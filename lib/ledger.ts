@@ -11,7 +11,8 @@ export function canonical(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
   const obj = value as Record<string, unknown>;
-  return "{" + Object.keys(obj).sort().map((k) => JSON.stringify(k) + ":" + canonical(obj[k])).join(",") + "}";
+  // Keys with undefined values are dropped, as JSON.stringify would drop them.
+  return "{" + Object.keys(obj).filter((k) => obj[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + canonical(obj[k])).join(",") + "}";
 }
 
 export function hashEvent(seq: number, type: string, payload: string, prevHash: string, createdAtMs: number): string {

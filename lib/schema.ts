@@ -38,6 +38,10 @@ export const mandates = pgTable("mandates", {
   // moved) or released back to the limits. 0 hours = settle at once.
   holdTtlHours: integer("hold_ttl_hours").notNull().default(24),
   holdPolicy: text("hold_policy").notNull().default("capture"), // capture | release
+  // A pause stops the agent without killing the token: status = paused,
+  // until a time (auto-resume) or until someone resumes it (null).
+  pausedUntil: timestamp("paused_until", { withTimezone: true }),
+  pausedBy: text("paused_by"),
   // The agent's credential is never stored in clear. tokenHash is what we
   // look up by; tokenPrefix is shown so the owner can recognise it;
   // tokenReveal holds the plaintext until it has been shown exactly once.
@@ -83,8 +87,14 @@ export const transactions = pgTable("transactions", {
   settledAt: timestamp("settled_at", { withTimezone: true }),
   settledBy: text("settled_by"), // agent | owner email | system | stripe | proxy
   settlementNote: text("settlement_note"),
+  // Anomaly flags computed when the decision was made (JSON string[]):
+  // unusual_amount | new_merchant | decline_burst | rapid_repeat
+  flags: text("flags").notNull().default("[]"),
+  // Set when the owner shares this decision's receipt publicly; the token
+  // is the capability, and clearing it un-shares.
+  shareToken: text("share_token"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-}, (t) => [index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
+}, (t) => [uniqueIndex("txn_share_token_idx").on(t.shareToken), index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
 
 export const approvals = pgTable("approvals", {
   id: text("id").primaryKey(),
@@ -100,6 +110,7 @@ export const approvals = pgTable("approvals", {
   decidedBy: text("decided_by"),
   expiresAt: timestamp("expires_at", { withTimezone: true }), // an approved allowance lapses after this
   usedAt: timestamp("used_at", { withTimezone: true }),
+  flags: text("flags").notNull().default("[]"),
 }, (t) => [index("approvals_mandate_status_idx").on(t.mandateId, t.status), index("approvals_ws_status_idx").on(t.workspaceId, t.status)]);
 
 // Append-only, hash-chained log, one chain per workspace. Each hash covers
@@ -316,6 +327,36 @@ export const notes = pgTable("notes", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 }, (t) => [index("notes_target_idx").on(t.workspaceId, t.targetType, t.targetId)]);
 
+// A temporary raise: for a window, one of the mandate's limits is read as
+// this amount instead of its own (only ever upward — the base terms are
+// the floor). Expires on its own; can be withdrawn early.
+export const mandateOverrides = pgTable("mandate_overrides", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  mandateId: text("mandate_id").notNull().references(() => mandates.id, { onDelete: "cascade" }),
+  field: text("field").notNull(), // per_txn | daily | total | approval_above
+  amount: integer("amount").notNull(),
+  startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+  endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+  reason: text("reason").notNull().default(""),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+}, (t) => [index("mandate_overrides_mandate_idx").on(t.mandateId, t.endsAt)]);
+
+// Web Push subscriptions: one per browser/device a person turned push on in.
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  endpoint: text("endpoint").notNull(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+  userAgent: text("user_agent").notNull().default(""),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  failures: integer("failures").notNull().default(0),
+}, (t) => [uniqueIndex("push_subscriptions_endpoint_idx").on(t.endpoint), index("push_subscriptions_user_idx").on(t.userId)]);
+
 // Per-workspace preferences that are not part of any single mandate.
 export const workspaceSettings = pgTable("workspace_settings", {
   workspaceId: text("workspace_id").primaryKey().references(() => organization.id, { onDelete: "cascade" }),
@@ -331,3 +372,5 @@ export type LedgerEvent = typeof ledger.$inferSelect;
 export type WebhookEndpoint = typeof webhookEndpoints.$inferSelect;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type Note = typeof notes.$inferSelect;
+export type MandateOverride = typeof mandateOverrides.$inferSelect;
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;

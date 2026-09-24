@@ -1,0 +1,19 @@
+{
+  "name": "Mandate",
+  "short_name": "Mandate",
+  "description": "Scoped, revocable spending authority for AI agents. Approve from your phone.",
+  "start_url": "/approvals?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#14171D",
+  "theme_color": "#B8631B",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Approvals", "url": "/approvals", "description": "Requests waiting on you" },
+    { "name": "Activity", "url": "/activity" }
+  ]
+}
