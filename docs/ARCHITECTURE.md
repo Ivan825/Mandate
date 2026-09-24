@@ -51,7 +51,13 @@ deploy/                   AWS EC2 (compose + Caddy) and ECS Fargate (CloudFormat
 
 `lib/policy.ts` is a pure function from *(mandate terms, facts about the mandate so far, the request)* to a decision: `approved`, `declined` with the rule that fired, or `pending` with an escalation. Rules run in a fixed order — status, expiry, active hours (in the mandate's timezone), blocked category, merchant allow-list, per-transaction limit, daily limit, total limit, prepaid balance (cards), then the "ask me above" threshold, which is where an existing unused approval can cover the request. Because it has no I/O it is unit-tested exhaustively and reused unchanged by every rail: REST, MCP, the proxy's pre-authorisation, and Stripe's real-time authorisation webhook.
 
+Every non-approval also carries a **remedy** (`Remedy` in `lib/policy.ts`): when the same request would pass (`retryAt`), the largest amount that would pass right now (`maxAmountNow`), whether a human must act, and one sentence of advice. REST returns it as `remedy` and `x-mandate-retry-at`; MCP as part of the tool result; the proxy in the error message and `x-mandate-*` headers. An agent that reads it stops hammering.
+
 `lib/service.ts` wraps it with the database: it loads facts inside a transaction with the mandate row locked, runs the engine, records the decision, consumes an approval if one applied, and schedules notifications after the response.
+
+## Holds, capture and void
+
+An approved decision is a **hold**, not a charge. The transaction row keeps `authorizedAmount` (what was approved) and `amount` (what counts against the limits right now), plus `settlement`: `held` → `captured` | `voided` | `released`. The agent captures what it actually paid (`POST /api/agent/capture`, `capture_purchase`) — less than authorised gives the difference back, more is refused — or voids the hold. Sums for the daily and lifetime limits always read `amount`, so nothing else in the engine had to change. Each mandate sets `holdTtlHours` (default 24; 0 = settle at once, the pre-0.4 behaviour) and `holdPolicy`: an unsettled hold is captured in full (safe default — the money probably moved and nobody said) or released. Expired holds are closed by `closeExpiredHolds`, which runs for the workspace on every authorisation, and across all workspaces from the health ping and the cron. The proxy settles its own holds on reported usage with a one-hour backstop; Stripe drives card holds through reconciliation; a simulation settles at once.
 
 ## Idempotency
 
@@ -64,6 +70,18 @@ An escalation creates an approval row and notifies every approver in the workspa
 ## The ledger and receipts
 
 `lib/ledger.ts` appends one row per event (grant, decision, approval, revocation, top-up …) to a per-workspace chain: each row's hash covers the previous row's hash and the event payload. Verification is incremental from a checkpoint or full from genesis. Exports (`/api/ledger/export`) carry an Ed25519 signature over the chain head using `RECEIPT_SIGNING_KEY`; the public key is served at `/.well-known/mandate-receipt-key`, and `/api/receipts/verify` checks any receipt without a session — chain integrity, signature validity, and whether *this* server signed it. A receipt that carries its own public key is rejected: verification is always against the server's key.
+
+## Activity feed and notes
+
+`lib/activity.ts` reads the ledger as sentences: `describeEvent(type, payload)` gives every event a one-line summary, a group (decisions, approvals, mandates, cards …), a tone and the ids to filter by. `/activity` filters by kind, outcome, agent, mandate, date and free text (ILIKE over the canonical payload — adequate at beta scale; a tsvector column is the obvious upgrade), pages by ledger sequence, and lets members attach **notes** to a decision, an approval or an event. Notes are their own table, deliberately outside the hash chain: the chain records what happened, notes record what people think about it. The same `describeEvent` summary goes into webhook envelopes, so a Slack message built from a webhook reads exactly like the feed.
+
+## Event webhooks
+
+`lib/webhooks.ts`. A workspace registers up to ten endpoints, each with an event filter (`*`, or prefixes such as `authorization.`) and its own `whsec_` secret (stored encrypted, shown once, rotatable). `ledger.appendEvent` queues one `webhook_deliveries` row per matching endpoint **inside the same transaction** as the ledger row, so an event can never be announced before it exists or exist without being announced. Sending is decoupled: `kick()` runs a dispatch pass after the response (`after()` on Next), and `dispatchDue()` — claim with `FOR UPDATE SKIP LOCKED`, send, record — is also run by the health endpoint, the daily cron and `GET /api/cron/dispatch`, so retries need no worker process. Each envelope carries the ledger `seq` and `hash`, a stable `evt_` id (identical across endpoints, for de-duplication) and the human summary; it is signed Stripe-style (`Mandate-Signature: t=…,v1=HMAC-SHA256(secret, "t.body")`) over the exact bytes sent. Failures back off 1 m → 5 m → 30 m → 2 h → 12 h; an endpoint that fails 25 deliveries in a row is paused and the pause is itself a ledger event. Deliveries to one endpoint go out in ledger order. Targets must resolve to public addresses (same SSRF guard as notification channels) unless the operator sets `WEBHOOK_ALLOW_PRIVATE=1`.
+
+## Money and currencies
+
+Amounts are integers in each currency's minor unit; `lib/money.ts` is the only place that knows that yen have no decimals and dinars have three. Every form converts through it, `fmt` formats in a locale that suits the currency (₹1,00,000), and a workspace carries a default currency for new mandates (`workspace_settings`). Nothing is ever converted between currencies: a mandate is denominated once, and the stats page shows one currency at a time.
 
 ## Identity and OAuth
 

@@ -65,7 +65,11 @@ curl -X POST https://mandate-ashen.vercel.app/api/agent/authorize \
   -H "authorization: Bearer mnd_…" -H "content-type: application/json" \
   -H "idempotency-key: order-1234" \
   -d '{"amount":1299,"merchant":"OpenAI","purpose":"API credits"}'
-# 200 approved · 403 declined (with the rule) · 202 pending your approval — retry after you approve
+# 200 approved (a hold) · 403 declined, with the rule and a remedy · 202 pending your approval — retry after you approve
+
+curl -X POST https://mandate-ashen.vercel.app/api/agent/capture \
+  -H "authorization: Bearer mnd_…" -H "content-type: application/json" \
+  -d '{"transactionId":"…","amount":1199}'     # what was actually paid; the rest goes back to the limits
 ```
 
 <p align="center">
@@ -76,11 +80,16 @@ curl -X POST https://mandate-ashen.vercel.app/api/agent/authorize \
 ## What you get
 
 - **Terms, not trust.** Per-transaction, daily and lifetime limits; merchant allow-list; blocked categories; active hours in the agent's timezone; expiry; an "ask me above" threshold.
+- **Holds, not charges.** An approval is a hold; the agent captures what it actually paid (less releases the difference) or voids it, and an unsettled hold closes by the mandate's policy when its TTL runs out.
+- **A "no" the agent can act on.** Every decline says when the same request would pass, the most that would pass right now, and what to do instead — so agents plan instead of hammering.
 - **Approvals that agents can wait for.** Requests above the threshold park as *pending*; you approve once from email, a webhook (n8n, Zapier, Make, your own endpoint) or the inbox; the agent retries with the same idempotency key and goes through exactly once.
+- **Event webhooks.** Every ledger event, pushed as signed JSON to your own endpoints with retries and ordering — build the Slack bridge, the finance export or the dashboard you want.
+- **An activity feed you can read.** The ledger as sentences: filter by agent, mandate, outcome or date, search it, leave notes on anything.
 - **A ledger you can hand to someone.** Append-only SHA-256 chain per workspace, Ed25519-signed exports, and a public verifier — anyone can check a receipt without an account.
 - **Metered LLM spend.** Store provider keys encrypted, hand out proxy keys, and see estimate vs settled cost per call, streaming included.
 - **Workspaces and roles.** Personal and shared workspaces; owners, admins, approvers, viewers; invitations by email.
 - **Stats.** Spend by day/week/month/year, by agent or merchant, decline reasons, a weekday×hour heat map and a written reading of the trend.
+- **Any currency.** Mandates in 38 currencies with the right minor units and formatting; a default per workspace. Nothing is ever converted.
 - **Sign-in without passwords.** Google, email links, passkeys. Light and dark themes.
 
 ## Run it locally
@@ -132,7 +141,7 @@ Found something? See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens, approvals, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
+Free public beta. Working and exercised end to end: MCP/OAuth (tested against Claude's real client), API-key proxy for three providers, REST tokens with holds and capture, approvals, event webhooks, the activity feed, ledger and receipts, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Contributing
 

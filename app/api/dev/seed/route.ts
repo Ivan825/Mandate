@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCtx, can } from "@/lib/session";
-import { createAgent, createMandate, authorize, listAgents } from "@/lib/service";
+import { createAgent, createMandate, authorize, listAgents, captureTransaction } from "@/lib/service";
 
 // Populates the signed-in user's workspace with a demo state. Development
 // only (or ALLOW_SEED=1); runs once per empty workspace. It mutates, so it
@@ -22,7 +22,7 @@ export async function POST() {
   const shopper = await createAgent(ws, { name: "Household shopper", description: "Reorders groceries and household supplies." });
   const dev = await createMandate(ws, {
     agentId: coder.id, name: "Dev tooling — Sept 2026", currency: "USD",
-    perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
+    perTxnLimit: 5000, dailyLimit: 15000, totalLimit: 50000, approvalAbove: 2000,
     allowedMerchants: ["OpenAI", "Anthropic", "Vercel*", "GitHub"], blockedCategories: ["gambling", "crypto"],
     activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: new Date("2026-09-30T18:29:59.999Z"),
   });
@@ -42,6 +42,10 @@ export async function POST() {
   results.push(await authorize(dev.mandate, { amount: 999, merchant: "Namecheap", purpose: "Domain renewal" }, "simulation"));
   results.push(await authorize(home.mandate, { amount: 184500, merchant: "BigBasket", purpose: "Weekly groceries" }, "simulation"));
   results.push(await authorize(home.mandate, { amount: 320000, merchant: "Blinkit", purpose: "Diwali supplies" }, "simulation"));
+  // Two API-rail decisions so the demo shows holds: one captured for less, one still open.
+  const seat = await authorize(dev.mandate, { amount: 1500, merchant: "GitHub", purpose: "Copilot seat" }, "agent_api", { actor: `token ${dev.mandate.tokenPrefix}…` });
+  if (seat.decision === "approved") await captureTransaction({ mandateId: dev.mandate.id }, seat.transactionId, { amount: 1000, by: "agent", note: "seat prorated" });
+  results.push(seat, await authorize(dev.mandate, { amount: 800, merchant: "OpenAI", purpose: "Embeddings batch" }, "agent_api", { actor: `token ${dev.mandate.tokenPrefix}…` }));
 
   return NextResponse.json({ seeded: true, workspace: ws, decisions: results.map((r) => r.decision), tokens: { dev: dev.token, home: home.token } });
 }

@@ -207,3 +207,116 @@ test("cards spend a prepaid balance: holds, captures, reversals and refunds net 
   assert.equal(results.filter((x) => x.decision === "approved").length, 2);
   assert.equal(await availableBalance(ws2, "USD"), 200);
 });
+
+test("holds: approve → capture less releases the difference; void releases all; capture twice is refused", async () => {
+  const { captureTransaction, voidTransaction, factsFor } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null, perTxnLimit: 2000, dailyLimit: 5000 });
+  const a = await authorize(r.mandate, { amount: 1200, merchant: "OpenAI" }, "agent_api");
+  assert.equal(a.decision, "approved"); assert.equal(a.settlement, "held"); assert.ok(a.holdExpiresAt);
+  assert.equal((await factsFor(r.mandate)).spentToday, 1200); // a hold counts while open
+  const cap = await captureTransaction({ mandateId: r.mandate.id }, a.transactionId, { amount: 940, by: "agent" });
+  assert.ok(cap.ok); if (cap.ok) { assert.equal(cap.released, 260); assert.equal(cap.transaction.settlement, "captured"); }
+  assert.equal((await factsFor(r.mandate)).spentToday, 940);
+  const again = await captureTransaction({ mandateId: r.mandate.id }, a.transactionId, { by: "agent" });
+  assert.equal(again.ok, false); if (!again.ok) assert.equal(again.code, "not_held");
+  const over = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api");
+  const bad = await captureTransaction({ mandateId: r.mandate.id }, over.transactionId, { amount: 1501, by: "agent" });
+  assert.equal(bad.ok, false); if (!bad.ok) assert.equal(bad.code, "bad_amount");
+  const v = await voidTransaction({ mandateId: r.mandate.id }, over.transactionId, { by: "agent", reason: "checkout failed" });
+  assert.ok(v.ok); if (v.ok) assert.equal(v.released, 1500);
+  assert.equal((await factsFor(r.mandate)).spentToday, 940);
+  // Another mandate's token cannot touch this hold.
+  const other = await mandate({ approvalAbove: null });
+  const b = await authorize(r.mandate, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  assert.equal((await captureTransaction({ mandateId: other.mandate.id }, b.transactionId, { by: "agent" })).ok, false);
+});
+
+test("holds: expired holds close by the mandate's policy — capture in full or release", async () => {
+  const { closeExpiredHolds, factsFor } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  const cap = await mandate({ approvalAbove: null, holdTtlHours: 1, holdPolicy: "capture" });
+  const rel = await mandate({ approvalAbove: null, holdTtlHours: 1, holdPolicy: "release" });
+  const a = await authorize(cap.mandate, { amount: 700, merchant: "OpenAI" }, "agent_api");
+  const b = await authorize(rel.mandate, { amount: 900, merchant: "OpenAI" }, "agent_api");
+  const past = new Date(Date.now() - 2 * 3600_000);
+  await db.update(schema.transactions).set({ holdExpiresAt: past }).where(eq(schema.transactions.id, a.transactionId));
+  await db.update(schema.transactions).set({ holdExpiresAt: past }).where(eq(schema.transactions.id, b.transactionId));
+  const n = await db.transaction((tx) => closeExpiredHolds(tx, new Date(), ws));
+  assert.ok(n >= 2);
+  const [ta] = await db.select().from(schema.transactions).where(eq(schema.transactions.id, a.transactionId));
+  const [tb] = await db.select().from(schema.transactions).where(eq(schema.transactions.id, b.transactionId));
+  assert.equal(ta.settlement, "captured"); assert.equal(ta.amount, 700);
+  assert.equal(tb.settlement, "released"); assert.equal(tb.amount, 0);
+  assert.equal((await factsFor(rel.mandate)).spentTotal, 0);
+  // A zero-hour mandate settles at once.
+  const now = await mandate({ approvalAbove: null, holdTtlHours: 0 });
+  assert.equal((await authorize(now.mandate, { amount: 100, merchant: "OpenAI" }, "agent_api")).settlement, "captured");
+});
+
+test("event webhooks: queued with the ledger row, signed, delivered, retried and auto-disabled", async () => {
+  const { createServer } = await import("node:http");
+  const { addEndpoint, dispatchDue, verifySignature, filterMatches, normaliseFilter, listEndpoints, recentDeliveries } = await import("../lib/webhooks");
+  const { eq } = await import("drizzle-orm");
+  assert.equal(filterMatches(normaliseFilter("authorization., approval.approved"), "authorization.captured"), true);
+  assert.equal(filterMatches(normaliseFilter("authorization."), "approval.approved"), false);
+  assert.equal(filterMatches("*", "anything"), true);
+  const got: { headers: Record<string, string | string[] | undefined>; body: string }[] = [];
+  let mode: "ok" | "fail" = "ok";
+  const srv = createServer((req, res) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => { got.push({ headers: req.headers as Record<string, string>, body: b }); res.statusCode = mode === "ok" ? 200 : 500; res.end(); }); });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  // Loopback is refused unless the operator allows private targets.
+  assert.equal((await addEndpoint(ws, { url: `http://127.0.0.1:${port}/hook` }, "tester")).ok, false);
+  process.env.WEBHOOK_ALLOW_PRIVATE = "1";
+  const added = await addEndpoint(ws, { url: `http://127.0.0.1:${port}/hook`, events: "authorization." }, "tester");
+  if (!added.ok) { srv.close(); assert.fail(added.error); }
+  const r = await mandate({ approvalAbove: null });
+  const a = await authorize(r.mandate, { amount: 300, merchant: "OpenAI" }, "agent_api");
+  const pending = await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.endpointId, added.endpoint.id));
+  assert.ok(pending.some((d) => d.eventType === "authorization.approved"), "delivery queued in the same transaction");
+  assert.ok(!pending.some((d) => d.eventType === "mandate.issued"), "filter keeps other events out");
+  await dispatchDue({ limit: 50 });
+  const hit = got.find((g) => JSON.parse(g.body).data.transactionId === a.transactionId);
+  assert.ok(hit, "delivered to the endpoint");
+  const env = JSON.parse(hit!.body);
+  assert.equal(env.type, "authorization.approved"); assert.ok(env.summary.includes("OpenAI")); assert.ok(env.seq > 0);
+  assert.equal(verifySignature(added.secret, hit!.body, String(hit!.headers["mandate-signature"])), true);
+  assert.equal(verifySignature("whsec_wrong", hit!.body, String(hit!.headers["mandate-signature"])), false);
+  // Failures back off and eventually disable the endpoint.
+  mode = "fail";
+  const b = await authorize(r.mandate, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  await dispatchDue({ limit: 50 });
+  const [d1] = await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.endpointId, added.endpoint.id)).then((rows) => rows.filter((x) => x.body.includes(b.transactionId)));
+  assert.equal(d1.status, "pending"); assert.equal(d1.attempts, 1); assert.ok(d1.nextAttemptAt.getTime() > Date.now() + 30_000, "backed off");
+  await db.update(schema.webhookEndpoints).set({ consecutiveFailures: 24 }).where(eq(schema.webhookEndpoints.id, added.endpoint.id));
+  await db.update(schema.webhookDeliveries).set({ nextAttemptAt: new Date(0) }).where(eq(schema.webhookDeliveries.id, d1.id));
+  await dispatchDue({ limit: 50 });
+  const [ep] = (await listEndpoints(ws)).filter((e) => e.id === added.endpoint.id);
+  assert.equal(ep.enabled, 0); assert.ok(ep.disabledReason?.includes("consecutive"));
+  assert.ok((await recentDeliveries(ws)).length >= 2);
+  delete process.env.WEBHOOK_ALLOW_PRIVATE;
+  srv.closeAllConnections(); srv.close();
+});
+
+test("activity feed: events read as sentences, filter by group and mandate, notes attach", async () => {
+  const { listActivity, addNote, describeEvent } = await import("../lib/activity");
+  const r = await mandate({ approvalAbove: 500, name: "Feed test" });
+  const a = await authorize(r.mandate, { amount: 900, merchant: "OpenAI", purpose: "credits" }, "mcp", { actor: "Claude" });
+  assert.equal(a.decision, "pending");
+  const feed = await listActivity(ws, { mandateId: r.mandate.id, limit: 10 });
+  assert.ok(feed.rows.length >= 2);
+  const ask = feed.rows.find((x) => x.e.type === "authorization.pending");
+  assert.ok(ask?.d.summary.includes("Test agent"), ask?.d.summary);
+  assert.ok(ask?.d.summary.includes("waiting for approval"));
+  const decisionsOnly = await listActivity(ws, { group: "decisions", mandateId: r.mandate.id });
+  assert.ok(decisionsOnly.rows.every((x) => x.e.type.startsWith("authorization.")));
+  const pendingOnly = await listActivity(ws, { outcome: "pending", mandateId: r.mandate.id });
+  assert.ok(pendingOnly.rows.length >= 1 && pendingOnly.rows.every((x) => ["authorization.pending", "approval.requested"].includes(x.e.type)));
+  const search = await listActivity(ws, { q: "Feed test" });
+  assert.ok(search.rows.some((x) => x.e.type === "mandate.issued"));
+  const note = await addNote(ws, { type: "transaction", id: a.transactionId }, "Checked with the vendor; fine.", { id: "u1", email: "owner@example.com" });
+  assert.ok(note);
+  const withNotes = await listActivity(ws, { mandateId: r.mandate.id });
+  assert.ok(withNotes.rows.find((x) => x.e.type === "authorization.pending")?.notes.some((n) => n.body.includes("vendor")));
+  assert.equal(describeEvent("mandate.revoked", { by: "me" }).tone, "bad");
+});

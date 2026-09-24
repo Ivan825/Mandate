@@ -7,7 +7,8 @@ import { eq } from "drizzle-orm";
 import { fmt, parseList } from "@/lib/policy";
 import { stripeEnabled } from "@/lib/stripe";
 import { Pill, Util, When } from "@/app/components";
-import { simulatePurchaseAction, revokeMandateAction, freezeCardAction } from "@/app/actions";
+import { simulatePurchaseAction, revokeMandateAction, freezeCardAction, settleHoldAction } from "@/app/actions";
+import { inputStep, toMajor } from "@/lib/money";
 import { stripePublishableKey } from "@/lib/stripe";
 import { availableBalance } from "@/lib/balance";
 import { CardReveal } from "./card";
@@ -33,6 +34,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
   const status = expired ? "expired" : m.status;
   const liveAllowances = facts.approvedAllowances.filter((a) => !a.expiresAt || new Date() <= new Date(a.expiresAt)).length;
   const [mayRevoke, mayTry, mayIssue] = await Promise.all([can({ mandate: ["revoke"] }), can({ mandate: ["try"] }), can({ mandate: ["issue"] })]);
+  const heldCount = txns.filter(({ t }) => t.settlement === "held").length;
   const pk = stripePublishableKey();
   const balance = m.stripeCardId ? await availableBalance(ctx.workspaceId, m.currency) : null;
 
@@ -102,6 +104,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
             <dt>Merchants</dt><dd>{allowed.length ? allowed.join(", ") : <span className="faint">any</span>}</dd>
             <dt>Blocked</dt><dd>{blocked.length ? blocked.join(", ") : <span className="faint">none</span>}</dd>
             <dt>Active hours</dt><dd className="num">{m.activeHoursStart === 0 && m.activeHoursEnd === 24 ? "all day" : `${String(m.activeHoursStart).padStart(2, "0")}:00–${String(m.activeHoursEnd).padStart(2, "0")}:00`} {m.timezone}</dd>
+            <dt>Holds</dt><dd>{m.holdTtlHours === 0 ? "settle at once" : <>open {m.holdTtlHours} h, then {m.holdPolicy === "release" ? "released" : "captured in full"}</>}{heldCount > 0 && <> · <strong className="num">{heldCount}</strong> open now</>}</dd>
             <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}{m.cardStatus && m.cardStatus !== "active" ? ` (${m.cardStatus === "inactive" ? "frozen" : m.cardStatus})` : ""}</span> : <span className="faint">none (API and MCP only)</span>}</dd>
             <dt>Token</dt><dd><span className="mono">{m.tokenPrefix}…</span> <span className="faint">(stored hashed; shown once at issue)</span></dd>
           </dl>
@@ -119,7 +122,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
             <form action={simulatePurchaseAction} className="form">
               <input type="hidden" name="mandateId" value={m.id} />
               <div className="row">
-                <div className="field"><label htmlFor="amount">Amount ({m.currency})</label><input id="amount" name="amount" type="number" step="0.01" min="0.01" required defaultValue="12.99" /></div>
+                <div className="field"><label htmlFor="amount">Amount ({m.currency})</label><input id="amount" name="amount" type="number" step={inputStep(m.currency)} min={inputStep(m.currency)} required defaultValue={String(toMajor(Math.min(m.perTxnLimit, Math.max(1, Math.round(m.perTxnLimit / 2))), m.currency))} /></div>
                 <div className="field"><label htmlFor="merchant">Merchant</label><input id="merchant" name="merchant" required defaultValue={allowed[0]?.replace(/\*$/, "") || "OpenAI"} /></div>
               </div>
               <div className="row">
@@ -152,21 +155,46 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
       )}
 
       <h2 style={{ marginBottom: 10 }}>Decisions</h2>
+      <p className="faint" style={{ fontSize: 12.5, margin: "0 0 10px" }}>An approved decision is a hold until the agent captures what it paid or voids it. Amounts shown are what counts against the limits now; a captured row that was authorised for more shows the original struck through.</p>
       <div className="tbl">
         <table>
-          <thead><tr><th>When</th><th>Merchant</th><th className="r">Amount</th><th>Decision</th><th>Reason</th><th>Via</th></tr></thead>
+          <thead><tr><th>When</th><th>Merchant</th><th className="r">Amount</th><th>Decision</th><th>Money</th><th>Reason</th><th>Via</th></tr></thead>
           <tbody>
-            {txns.length === 0 && <tr><td colSpan={6} className="empty">No attempts yet.</td></tr>}
-            {txns.map(({ t }) => (
+            {txns.length === 0 && <tr><td colSpan={7} className="empty">No attempts yet.</td></tr>}
+            {txns.map(({ t }) => {
+              const authorized = t.authorizedAmount ?? t.amount;
+              return (
               <tr key={t.id}>
                 <td><When d={t.createdAt} /></td>
                 <td>{t.merchant}{t.purpose && <div className="faint" style={{ fontSize: 12 }}>{t.purpose}</div>}</td>
-                <td className="r num">{fmt(t.amount, t.currency)}</td>
+                <td className="r num">{t.settlement && t.settlement !== "held" && authorized !== t.amount ? <><s className="faint">{fmt(authorized, t.currency)}</s> {fmt(t.amount, t.currency)}</> : fmt(t.amount, t.currency)}</td>
                 <td><Pill v={t.decision} /></td>
+                <td>
+                  {t.settlement && <Pill v={t.settlement} />}
+                  {t.settlement === "held" && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>{t.holdExpiresAt ? <>{m.holdPolicy === "release" ? "releases" : "captures"} <When d={t.holdExpiresAt} /></> : "until the card network settles"}</div>}
+                  {t.settlement && t.settlement !== "held" && (t.settledBy || t.settlementNote) && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>{t.settledBy && <>by {t.settledBy}</>}{t.settlementNote && <> · {t.settlementNote}</>}</div>}
+                  {t.settlement === "held" && mayTry && t.source !== "stripe" && (
+                    <details style={{ marginTop: 6 }}>
+                      <summary className="faint" style={{ cursor: "pointer", fontSize: 12 }}>Settle it yourself</summary>
+                      <form action={settleHoldAction} className="form" style={{ marginTop: 6, gap: 6 }}>
+                        <input type="hidden" name="mandateId" value={m.id} /><input type="hidden" name="transactionId" value={t.id} />
+                        <div className="row" style={{ gap: 6 }}>
+                          <input name="amount" type="number" step={inputStep(t.currency)} min={inputStep(t.currency)} max={toMajor(authorized, t.currency)} placeholder={`paid (max ${toMajor(authorized, t.currency)})`} aria-label="Amount actually paid" style={{ maxWidth: 140 }} />
+                          <input name="note" placeholder="note (optional)" aria-label="Note" style={{ maxWidth: 160 }} />
+                        </div>
+                        <div className="actions" style={{ gap: 6 }}>
+                          <button className="btn secondary sm" type="submit" name="kind" value="capture">Capture</button>
+                          <button className="btn danger sm" type="submit" name="kind" value="void">Void</button>
+                        </div>
+                      </form>
+                    </details>
+                  )}
+                </td>
                 <td className="muted">{t.reason}</td>
                 <td className="mono faint">{t.source}{t.actor && <div style={{ fontSize: 11 }}>{t.actor.slice(0, 22)}</div>}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -32,6 +32,12 @@ export const mandates = pgTable("mandates", {
   activeHoursEnd: integer("active_hours_end").notNull().default(24),
   timezone: text("timezone").notNull().default("UTC"),
   expiresAt: timestamp("expires_at", { withTimezone: true }),
+  // An approval is a hold, not a charge: the agent captures what it actually
+  // paid (or voids). A hold nobody settles is closed by policy when its TTL
+  // runs out — captured in full (safe default: money is assumed to have
+  // moved) or released back to the limits. 0 hours = settle at once.
+  holdTtlHours: integer("hold_ttl_hours").notNull().default(24),
+  holdPolicy: text("hold_policy").notNull().default("capture"), // capture | release
   // The agent's credential is never stored in clear. tokenHash is what we
   // look up by; tokenPrefix is shown so the owner can recognise it;
   // tokenReveal holds the plaintext until it has been shown exactly once.
@@ -67,8 +73,18 @@ export const transactions = pgTable("transactions", {
   actor: text("actor").notNull().default(""), // e.g. OAuth client name for MCP calls
   stripeAuthorizationId: text("stripe_authorization_id"),
   approvalId: text("approval_id"),
+  // Money lifecycle of an approved decision. `amount` is always what counts
+  // against the limits right now: the authorised amount while held, the
+  // captured amount after capture, zero after a void or release.
+  // `authorizedAmount` keeps what was originally approved.
+  authorizedAmount: integer("authorized_amount"),
+  settlement: text("settlement"), // held | captured | voided | released; null unless approved
+  holdExpiresAt: timestamp("hold_expires_at", { withTimezone: true }),
+  settledAt: timestamp("settled_at", { withTimezone: true }),
+  settledBy: text("settled_by"), // agent | owner email | system | stripe | proxy
+  settlementNote: text("settlement_note"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-}, (t) => [index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId)]);
+}, (t) => [index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
 
 export const approvals = pgTable("approvals", {
   id: text("id").primaryKey(),
@@ -247,8 +263,71 @@ export const mcpGrants = pgTable("mcp_grants", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, (t) => [index("mcp_grants_user_idx").on(t.userId), index("mcp_grants_ws_idx").on(t.workspaceId)]);
 
+// ---------- Event webhooks ----------
+// A workspace can have every ledger event pushed to its own endpoints,
+// signed with a per-endpoint secret. Deliveries are queued in the same
+// transaction as the ledger row, so an event is never announced before it
+// exists; sending and retrying happen afterwards (lib/webhooks.ts).
+export const webhookEndpoints = pgTable("webhook_endpoints", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  description: text("description").notNull().default(""),
+  secretCiphertext: text("secret_ciphertext").notNull(),
+  secretHint: text("secret_hint").notNull(),
+  events: text("events").notNull().default("*"), // "*" or JSON string[] of type prefixes, e.g. ["authorization.", "approval.approved"]
+  enabled: integer("enabled").notNull().default(1),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  lastDeliveryAt: timestamp("last_delivery_at", { withTimezone: true }),
+  lastStatus: integer("last_status"),
+  disabledReason: text("disabled_reason"),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("webhook_endpoints_ws_idx").on(t.workspaceId)]);
+
+export const webhookDeliveries = pgTable("webhook_deliveries", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  endpointId: text("endpoint_id").notNull().references(() => webhookEndpoints.id, { onDelete: "cascade" }),
+  eventId: text("event_id").notNull(), // the ledger row id: the same event to every endpoint
+  eventType: text("event_type").notNull(),
+  ledgerSeq: integer("ledger_seq").notNull(),
+  body: text("body").notNull(), // exactly the bytes that are signed and sent
+  status: text("status").notNull().default("pending"), // pending | delivered | failed
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull(),
+  lastStatusCode: integer("last_status_code"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+}, (t) => [index("webhook_deliveries_due_idx").on(t.status, t.nextAttemptAt), index("webhook_deliveries_endpoint_idx").on(t.endpointId, t.createdAt)]);
+
+// A remark a person attaches to a decision or an approval: why it was fine,
+// what was checked, a reference number. Not part of the hash chain (the
+// chain records what happened; notes record what people think about it).
+export const notes = pgTable("notes", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  targetType: text("target_type").notNull(), // transaction | approval | event
+  targetId: text("target_id").notNull(),
+  body: text("body").notNull(),
+  authorId: text("author_id").notNull(),
+  authorEmail: text("author_email").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("notes_target_idx").on(t.workspaceId, t.targetType, t.targetId)]);
+
+// Per-workspace preferences that are not part of any single mandate.
+export const workspaceSettings = pgTable("workspace_settings", {
+  workspaceId: text("workspace_id").primaryKey().references(() => organization.id, { onDelete: "cascade" }),
+  currency: text("currency").notNull().default("USD"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
 export type Agent = typeof agents.$inferSelect;
 export type Mandate = typeof mandates.$inferSelect;
 export type Transaction = typeof transactions.$inferSelect;
 export type Approval = typeof approvals.$inferSelect;
 export type LedgerEvent = typeof ledger.$inferSelect;
+export type WebhookEndpoint = typeof webhookEndpoints.$inferSelect;
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
+export type Note = typeof notes.$inferSelect;

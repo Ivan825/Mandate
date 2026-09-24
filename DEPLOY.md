@@ -41,6 +41,10 @@ All four are **required** whenever `NODE_ENV=production` (which is what `next st
 
 Nothing to configure at deployment level. Each person adds an email address or a webhook URL (n8n, Zapier, Make, or your own endpoint) in Settings, and every approver in a workspace is notified through their own channels. `NOTIFY_WEBHOOK_URL` is an optional deployment-wide fallback for a single-owner self-host that hasn't set a channel yet.
 
+**Event webhooks** are a separate, workspace-level feature (Settings → Event webhooks): every ledger event is POSTed as signed JSON to up to ten endpoints per workspace, with retries and per-endpoint ordering. Deliveries are queued in the same database transaction as the event and sent right after the request that produced it; retries are picked up by whatever runs next — the daily cron, a page load, or the `/api/health` ping your uptime monitor already makes every few minutes, which is what turns a monitor into a scheduler on Vercel's free tier. If your scheduler can run more often than daily, point it at `GET /api/cron/dispatch` with `Authorization: Bearer $CRON_SECRET` (safe every minute; it also closes expired holds). Endpoints must be on the public internet; set `WEBHOOK_ALLOW_PRIVATE=1` only on a self-host whose receivers live on the same private network.
+
+**Holds.** An approval is a hold until the agent captures or voids it (`/api/agent/capture`, `/api/agent/void`, or the `capture_purchase` / `void_purchase` MCP tools). Each mandate sets how long holds stay open (default 24 h; 0 = settle at once) and whether an unsettled hold is captured in full or released when that runs out. Expired holds are closed on the next authorisation in the workspace, by the health ping, and by the cron.
+
 ## 4. Connect an agent (the real test)
 
 - Claude Code: `claude mcp add --transport http mandate APP_URL/api/mcp`

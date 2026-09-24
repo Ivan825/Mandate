@@ -89,7 +89,7 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
                   <Link href={`/mandates/${b.mandate.id}`}>{b.mandate.name}</Link>
                   {b.mandate.cardLast4 && <span className="faint mono"> · card ···{b.mandate.cardLast4}</span>}
                 </td>
-                <td><Pill v={b.effectiveStatus} />{b.pendingApprovals > 0 && <div style={{ marginTop: 4 }}><Pill v="pending" /> <span className="faint num">{b.pendingApprovals}</span></div>}</td>
+                <td><Pill v={b.effectiveStatus} />{b.pendingApprovals > 0 && <div style={{ marginTop: 4 }}><Pill v="pending" /> <span className="faint num">{b.pendingApprovals}</span></div>}{b.openHolds > 0 && <div style={{ marginTop: 4 }}><Pill v="held" /> <span className="faint num">{b.openHolds}</span></div>}</td>
                 <td><Util used={b.spentToday} limit={b.mandate.dailyLimit} currency={b.mandate.currency} label="daily" /></td>
                 <td><Util used={b.spentTotal} limit={b.mandate.totalLimit} currency={b.mandate.currency} label="total" /></td>
                 <td className="r num">{fmt(b.mandate.perTxnLimit, b.mandate.currency)}</td>
@@ -113,7 +113,7 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
                 <td>{agentName}<div className="faint" style={{ fontSize: 12 }}>{mandateName}</div></td>
                 <td>{t.merchant}{t.purpose && <div className="faint" style={{ fontSize: 12 }}>{t.purpose}</div>}</td>
                 <td className="r num">{fmt(t.amount, t.currency)}</td>
-                <td><Pill v={t.decision} /></td>
+                <td><Pill v={t.decision} />{t.settlement && t.settlement !== "captured" && <div style={{ marginTop: 4 }}><Pill v={t.settlement} /></div>}</td>
                 <td className="muted" style={{ maxWidth: 320 }}>{t.reason}</td>
                 <td className="mono faint">{t.source}{t.actor && <div title={t.actor} style={{ fontSize: 11 }}>{t.actor.slice(0, 22)}</div>}</td>
               </tr>

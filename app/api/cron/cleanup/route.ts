@@ -20,5 +20,10 @@ export async function GET(req: NextRequest) {
   await run("sessions", sql`delete from session where expires_at < now()`);
   await run("verifications", sql`delete from verification where expires_at < now()`);
   await run("approvals_expired_flag", sql`update approvals set status = 'expired' where status = 'approved' and expires_at is not null and expires_at < now()`);
+  await run("webhook_deliveries", sql`delete from webhook_deliveries where created_at < now() - interval '30 days'`);
+  // Holds nobody settled, across every workspace (each workspace also sweeps
+  // its own on every authorisation, so this is the backstop for idle ones).
+  try { const { sweepAllHolds } = await import("@/lib/service"); out.holds_closed = await sweepAllHolds(500); } catch (e) { out.holds_closed = -1; console.error(`cleanup holds: ${(e as Error).message}`); }
+  try { const { dispatchDue } = await import("@/lib/webhooks"); out.webhooks_dispatched = (await dispatchDue({ limit: 200, budgetMs: 40_000 })).sent; } catch (e) { out.webhooks_dispatched = -1; console.error(`cleanup webhooks: ${(e as Error).message}`); }
   return NextResponse.json({ ok: true, deleted: out, at: new Date().toISOString() });
 }

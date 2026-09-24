@@ -7,7 +7,7 @@ const base: Mandate = {
   id: "m1", agentId: "a1", name: "t", status: "active", currency: "USD",
   perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
   allowedMerchants: JSON.stringify(["OpenAI", "Vercel*"]), blockedCategories: JSON.stringify(["gambling"]),
-  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null,
+  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture",
   workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null,
   createdAt: new Date(), revokedAt: null,
 };
@@ -77,6 +77,31 @@ test("term validation catches contradictory sanction terms", () => {
   assert.ok(validateTerms({ ...ok, activeHoursStart: 9, activeHoursEnd: 9 }).some((e) => e.field === "activeHoursEnd"));
   assert.ok(validateTerms({ ...ok, timezone: "Asia/Kolkatta" }).some((e) => e.field === "timezone"));
   assert.ok(validateTerms({ ...ok, perTxnLimit: 0 }).length > 0);
+});
+
+test("every non-approval carries a remedy the agent can act on", () => {
+  const m = { ...base, activeHoursStart: 8, activeHoursEnd: 23 };
+  // 03:00 IST → allowed again at 08:00 IST = 02:30Z
+  const hours = evaluate(m, { amount: 100, merchant: "OpenAI", now: at("2026-09-05T21:30:00Z") }, facts());
+  assert.equal(hours.decision, "declined");
+  assert.equal(hours.remedy?.retryAt, "2026-09-06T02:30:00.000Z");
+  const daily = evaluate(base, { amount: 4500, merchant: "OpenAI", now: at("2026-09-05T05:30:00Z") }, facts({ spentToday: 6000 }));
+  assert.equal(daily.remedy?.retryAt, "2026-09-05T18:30:00.000Z"); // next IST midnight
+  assert.equal(daily.remedy?.maxAmountNow, 4000);
+  const perTxn = evaluate(base, { amount: 9900, merchant: "OpenAI" }, facts({ spentToday: 8000 }));
+  assert.equal(perTxn.remedy?.maxAmountNow, 2000); // today's headroom binds before the per-transaction limit
+  const merchant = evaluate(base, { amount: 100, merchant: "Namecheap" }, facts());
+  assert.deepEqual(merchant.remedy?.allowedMerchants, ["OpenAI", "Vercel*"]);
+  const deniedAt = at("2026-09-05T10:00:00Z");
+  const denied = evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts({ recentlyDenied: true, recentlyDeniedAt: deniedAt }));
+  assert.equal(denied.remedy?.retryAt, "2026-09-05T16:00:00.000Z");
+  const pending = evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts());
+  assert.equal(pending.decision, "pending");
+  assert.equal(pending.remedy?.approvalRequired, true);
+  assert.equal(pending.remedy?.maxAmountNow, 2000); // up to the threshold passes without asking
+  const total = evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts({ spentTotal: 50000 }));
+  assert.equal(total.remedy?.approvalRequired, true);
+  assert.equal(evaluate(base, { amount: 1500, merchant: "OpenAI" }, facts()).remedy, undefined);
 });
 
 test("prepaid balance caps card spend after the mandate's own limits", () => {

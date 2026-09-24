@@ -75,7 +75,7 @@ try {
 
   // 2. seed + inbox approval
   const seed = await p.evaluate(async () => (await fetch("/api/dev/seed", { method: "POST" })).json());
-  check("seed decisions", seed.decisions?.join(",") === "approved,approved,declined,pending,declined,approved,pending", seed.decisions?.join(","));
+  check("seed decisions", seed.decisions?.join(",") === "approved,approved,declined,pending,declined,approved,pending,approved,approved", seed.decisions?.join(","));
   await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
   await p.locator(".approval", { hasText: "Anthropic" }).first().getByRole("button", { name: "Approve once" }).click();
   await p.waitForURL(/\/approvals$/); await p.waitForTimeout(500);
@@ -95,6 +95,46 @@ try {
   check("approved answer is replayed exactly", a3.status === 200 && a4.status === 200 && a4.headers.get("idempotent-replayed") === "true");
   const big = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body: JSON.stringify({ amount: 2 ** 40, merchant: "Anthropic" }) });
   check("oversized amount rejected", big.status === 400);
+
+  // 2b. holds: the approved answer is a hold; capture less, then it is closed.
+  const approved = await a3.clone().json();
+  check("approval is a hold with an expiry", approved.settlement === "held" && typeof approved.holdExpiresAt === "string" && approved.next?.includes("/api/agent/capture"), JSON.stringify(approved));
+  const tokenHdr = { authorization: "Bearer " + seed.tokens.dev, "content-type": "application/json" };
+  const cap = await fetch(BASE + "/api/agent/capture", { method: "POST", headers: tokenHdr, body: JSON.stringify({ transactionId: approved.transactionId, amount: 1500, note: "e2e capture" }) });
+  const capBody = await cap.json();
+  check("capture for less releases the difference", cap.status === 200 && capBody.settlement === "captured" && capBody.capturedAmount === 1500 && capBody.released === 600, JSON.stringify(capBody));
+  const cap2 = await fetch(BASE + "/api/agent/capture", { method: "POST", headers: tokenHdr, body: JSON.stringify({ transactionId: approved.transactionId }) });
+  check("second capture is refused with the current state", cap2.status === 409 && (await cap2.json()).state?.settlement === "captured");
+  const st = await fetch(BASE + "/api/agent/transactions/" + approved.transactionId, { headers: tokenHdr }).then((r) => r.json());
+  check("transaction state readable by the agent", st.settlement === "captured" && st.settledBy === "agent");
+  const otherTok = { authorization: "Bearer " + seed.tokens.home, "content-type": "application/json" };
+  const cross = await fetch(BASE + "/api/agent/void", { method: "POST", headers: otherTok, body: JSON.stringify({ transactionId: approved.transactionId }) });
+  check("another mandate's token cannot settle this hold", cross.status === 404);
+  // 2c. remedies: a decline says what would pass and when.
+  const tooBig = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 99999, merchant: "OpenAI" }) }).then((r) => r.json());
+  check("decline carries a remedy with the max that would pass now", tooBig.rule === "per_txn" && Number.isInteger(tooBig.remedy?.maxAmountNow) && /pass/.test(tooBig.remedy?.message ?? ""), JSON.stringify(tooBig.remedy));
+  const wrongShop = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: tokenHdr, body: JSON.stringify({ amount: 100, merchant: "Namecheap" }) }).then((r) => r.json());
+  check("merchant decline lists the allowed merchants", wrongShop.rule === "merchant" && wrongShop.remedy?.allowedMerchants?.includes("OpenAI"));
+  const mandateInfo = await fetch(BASE + "/api/agent/mandate", { headers: tokenHdr }).then((r) => r.json());
+  check("agent sees its open holds", Array.isArray(mandateInfo.holds?.open) && mandateInfo.holds.open.length >= 1 && mandateInfo.holds.ttlHours === 24, JSON.stringify(mandateInfo.holds));
+  // 2d. the owner sees holds and the activity feed reads as sentences
+  await p.goto(BASE + "/mandates/" + mandateInfo.mandateId, { waitUntil: "networkidle" });
+  check("mandate page shows held and captured decisions", (await p.locator(".pill.held").count()) >= 1 && (await p.locator(".pill.captured").count()) >= 1);
+  await p.goto(BASE + "/activity", { waitUntil: "networkidle" });
+  const feedText = await p.locator("article").allTextContents();
+  check("activity feed renders decisions as sentences", feedText.length >= 5 && feedText.some((t) => /was allowed|captured/.test(t)), String(feedText.length));
+  await p.fill("article input[name=body] >> nth=0", "Looked into this — fine.");
+  await Promise.all([p.waitForURL(/\/activity/), p.locator("article form >> nth=0").locator("button", { hasText: "Note" }).first().click()]);
+  await p.waitForTimeout(400);
+  check("a note attaches to an event", (await p.locator("article", { hasText: "Looked into this" }).count()) >= 1);
+  await p.goto(BASE + "/activity?group=decisions&outcome=captured", { waitUntil: "networkidle" });
+  check("activity filters narrow the feed", (await p.locator("article").count()) >= 1 && (await p.locator("article", { hasText: "authorization.captured" }).count()) >= 1);
+  // 2e. event webhooks: settings page, private target refused
+  await p.goto(BASE + "/settings/webhooks", { waitUntil: "networkidle" });
+  check("event webhooks page renders", (await p.locator("h1").textContent())?.includes("pushed to your own systems"));
+  await p.fill("#url", "http://10.0.0.8/hook");
+  await Promise.all([p.waitForURL(/webhooks\?(error|reveal)=/), p.click("form.card button.accent[type=submit]")]);
+  check("private event-webhook target refused", p.url().includes("error="));
 
   // 3. invite an approver, accept in a second browser
   await p.goto(BASE + "/members", { waitUntil: "networkidle" });

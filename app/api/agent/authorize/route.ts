@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { getMandateByToken, authorize, factsFor, reserveIdempotent, completeIdempotent, releaseIdempotent, MAX_AMOUNT } from "@/lib/service";
+import { authorize, factsFor, reserveIdempotent, completeIdempotent, releaseIdempotent, MAX_AMOUNT } from "@/lib/service";
 import { fmt } from "@/lib/policy";
-import { rateLimit, clientIp } from "@/lib/ratelimit";
+import { authenticateMandate } from "@/lib/agent-auth";
+import { appUrl } from "@/lib/env";
 import { logger } from "@/lib/log";
 
 // The token-based agent endpoint, for agents you run yourself. The agent
@@ -12,6 +13,11 @@ import { logger } from "@/lib/log";
 //   Authorization: Bearer mnd_...
 //   Idempotency-Key: <any unique string per purchase attempt>   (recommended)
 //   { "amount": 1299, "merchant": "OpenAI", "purpose": "API credits", "category": "computer_software_stores" }
+//
+// An approval is a hold. Once the purchase completes the agent captures the
+// amount actually paid (POST /api/agent/capture) or voids the hold
+// (POST /api/agent/void); an unsettled hold closes by the mandate's policy
+// when its TTL runs out.
 
 type Body = { amount?: unknown; merchant?: unknown; category?: unknown; purpose?: unknown; currency?: unknown };
 
@@ -25,14 +31,9 @@ export const maxDuration = 30;
 
 export async function POST(req: NextRequest) {
   const log = logger(req, "agent_api");
-  const ip = await rateLimit(`ip:${clientIp(req)}:agent`, 600);
-  if (!ip.ok) return NextResponse.json({ error: "Too many requests from this address." }, { status: 429, headers: { "retry-after": String(ip.resetSec) } });
-  const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  if (!token.startsWith("mnd_")) return NextResponse.json({ error: "Missing mandate token. Send it as Authorization: Bearer mnd_..." }, { status: 401 });
-  const m = await getMandateByToken(token);
-  if (!m) { log.warn("auth.unknown_token"); return NextResponse.json({ error: "Unknown mandate token." }, { status: 401 }); }
-  const rl = await rateLimit(`mandate:${m.id}:agent`, 120);
-  if (!rl.ok) return NextResponse.json({ error: "This mandate is being called too fast; slow down." }, { status: 429, headers: { "retry-after": String(rl.resetSec) } });
+  const a = await authenticateMandate(req);
+  if (!a.ok) { if (a.response.status === 401) log.warn("auth.rejected"); return a.response; }
+  const m = a.mandate;
 
   let body: Body;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Body must be JSON." }, { status: 400 }); }
@@ -66,9 +67,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Authorisation could not be decided; nothing was approved. Retry shortly." }, { status: 503 });
   }
   const status = r.decision === "declined" ? 403 : r.decision === "pending" ? 202 : 200;
+  const base = appUrl();
   const responseBody: Record<string, unknown> = {
     decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
-    next: r.decision === "pending" ? "The owner is being notified. Wait for approval, then retry the same request with the same Idempotency-Key." : undefined,
+    settlement: r.settlement, holdExpiresAt: r.holdExpiresAt ? r.holdExpiresAt.toISOString() : null,
+    remedy: r.remedy ?? undefined,
+    next: r.decision === "pending" ? "The owner is being notified. Wait for approval, then retry the same request with the same Idempotency-Key."
+      : r.decision === "approved" && r.settlement === "held" ? `Complete the purchase, then POST ${base}/api/agent/capture with this transactionId and the amount actually paid (or POST ${base}/api/agent/void if nothing was paid). Unsettled, the hold is ${m.holdPolicy === "release" ? "released" : "captured in full"} at holdExpiresAt.`
+      : r.decision === "declined" ? r.remedy?.message : undefined,
   };
   // The decision is committed: record the terminal answer before anything
   // else can fail, so a retry can only ever replay it. "pending" is not an
@@ -80,5 +86,7 @@ export async function POST(req: NextRequest) {
     if (idem && r.decision !== "pending") await completeIdempotent(m.id, idem, status, responseBody);
   } catch (e) { log.warn("facts.failed", { message: (e as Error).message }); }
   log.info("decision", { mandateId: m.id, decision: r.decision, rule: r.rule, amount, merchant });
-  return NextResponse.json(responseBody, { status, headers: { "x-request-id": log.id } });
+  const headers: Record<string, string> = { "x-request-id": log.id };
+  if (r.remedy?.retryAt) headers["x-mandate-retry-at"] = r.remedy.retryAt;
+  return NextResponse.json(responseBody, { status, headers });
 }

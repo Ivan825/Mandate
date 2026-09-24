@@ -5,6 +5,9 @@
 // then escalation.
 
 import type { Mandate, Approval } from "./schema";
+import { fmt } from "./money";
+
+export { fmt };
 
 export type AuthRequest = {
   amount: number; // minor units
@@ -20,16 +23,29 @@ export type Facts = {
   approvedAllowances: Approval[]; // status = approved, not yet used
   openPending: number; // pending approvals currently waiting on the owner
   recentlyDenied?: boolean; // owner denied this same (amount, merchant) recently
+  recentlyDeniedAt?: Date | null; // when, so the agent can be told when the cooling-off ends
   // Prepaid funds the purchase would draw on (card rail only); null when the
   // rail has no balance to check (API, MCP, proxy — the person pays the
   // provider directly).
   availableBalance?: number | null;
 };
 
+// What the agent can do about a decision that was not "approved": when the
+// same request would be allowed, the largest amount that would pass right
+// now, and one sentence of advice. Agents that understand a "no" stop
+// hammering and start planning.
+export type Remedy = {
+  message: string;
+  retryAt?: string; // ISO time after which the same request may pass
+  maxAmountNow?: number; // largest amount (minor units) that would pass right now, if any
+  approvalRequired?: boolean; // a human must act; retrying sooner changes nothing
+  allowedMerchants?: string[];
+};
+
 export type Decision =
-  | { decision: "approved"; reason: string; rule: string; allowanceId?: string }
-  | { decision: "declined"; reason: string; rule: string }
-  | { decision: "pending"; reason: string; rule: string };
+  | { decision: "approved"; reason: string; rule: string; allowanceId?: string; remedy?: undefined }
+  | { decision: "declined"; reason: string; rule: string; remedy: Remedy }
+  | { decision: "pending"; reason: string; rule: string; remedy: Remedy };
 
 export const MAX_OPEN_PENDING = 5;
 export const ALLOWANCE_TTL_MS = 24 * 3600 * 1000;
@@ -65,7 +81,7 @@ export function localDayStart(date: Date, timezone: string): Date {
     hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
   }).formatToParts(date);
   const get = (t: string) => parseInt(parts.find((p) => p.type === t)?.value ?? "0", 10);
-  const elapsedMs = ((get("hour") % 24) * 3600 + get("minute") * 60 + get("second")) * 1000;
+  const elapsedMs = ((get("hour") % 24) * 3600 + get("minute") * 60 + get("second")) * 1000 + date.getUTCMilliseconds();
   return new Date(date.getTime() - elapsedMs);
 }
 
@@ -98,7 +114,7 @@ export function validateTerms(t: {
   if (!/^[A-Z]{3}$/.test(t.currency)) errs.push({ field: "currency", message: "Currency must be a 3-letter ISO code." });
   for (const [k, v] of [["perTxnLimit", t.perTxnLimit], ["dailyLimit", t.dailyLimit], ["totalLimit", t.totalLimit]] as const) {
     if (!Number.isInteger(v) || v <= 0) errs.push({ field: k, message: "Limits must be positive amounts." });
-    else if (v > 2_147_483_647) errs.push({ field: k, message: "Limits must be below 21,474,836.47 in major units." });
+    else if (v > 2_147_483_647) errs.push({ field: k, message: "Limits must be below 2,147,483,647 minor units." });
   }
   if (t.approvalAbove != null && t.approvalAbove > 2_147_483_647) errs.push({ field: "approvalAbove", message: "Threshold too large." });
   if (t.dailyLimit < t.perTxnLimit) errs.push({ field: "dailyLimit", message: "The daily limit cannot be below the per-transaction limit." });
@@ -114,49 +130,83 @@ export function validateTerms(t: {
   return errs;
 }
 
+// The next moment the mandate's active window opens, as a UTC Date: today's
+// local start hour if it is still ahead, otherwise tomorrow's. Half-hour
+// zones (India, Adelaide) and DST shifts fall out of localDayStart.
+export function nextWindowStart(now: Date, timezone: string, startHour: number): Date {
+  const today = localDayStart(now, timezone);
+  const candidate = new Date(today.getTime() + startHour * 3600_000);
+  if (candidate > now) return candidate;
+  const tomorrow = localDayStart(new Date(today.getTime() + 26 * 3600_000), timezone);
+  return new Date(tomorrow.getTime() + startHour * 3600_000);
+}
+
+export const HOLD_TTL_MAX_HOURS = 24 * 14;
+
+export function validateHoldTerms(t: { holdTtlHours: number; holdPolicy: string }): TermsError[] {
+  const errs: TermsError[] = [];
+  if (!Number.isInteger(t.holdTtlHours) || t.holdTtlHours < 0 || t.holdTtlHours > HOLD_TTL_MAX_HOURS) errs.push({ field: "holdTtlHours", message: `Holds can stay open between 0 and ${HOLD_TTL_MAX_HOURS} hours.` });
+  if (t.holdPolicy !== "capture" && t.holdPolicy !== "release") errs.push({ field: "holdPolicy", message: "An expired hold is either captured or released." });
+  return errs;
+}
+
 export function evaluate(mandate: Mandate, req: AuthRequest, facts: Facts): Decision {
   const now = req.now ?? new Date();
   const amt = req.amount;
+  const ccy = mandate.currency;
+  const headroomToday = Math.max(0, mandate.dailyLimit - facts.spentToday);
+  const headroomTotal = Math.max(0, mandate.totalLimit - facts.spentTotal);
+  // The largest single request that would pass every limit right now.
+  const maxNow = Math.max(0, Math.min(mandate.perTxnLimit, headroomToday, headroomTotal, facts.availableBalance ?? Infinity));
+  const declined = (rule: string, reason: string, remedy: Remedy): Decision => ({ decision: "declined", rule, reason, remedy });
 
   if (!Number.isInteger(amt) || amt <= 0) {
-    return { decision: "declined", reason: "Amount must be a positive integer number of minor units.", rule: "amount" };
+    return declined("amount", "Amount must be a positive integer number of minor units.", { message: "Send amount as a positive integer in minor units (1299 for 12.99)." });
   }
   if (mandate.status !== "active") {
-    return { decision: "declined", reason: `Mandate is ${mandate.status}.`, rule: "status" };
+    return declined("status", `Mandate is ${mandate.status}.`, { message: "This mandate can no longer be used. Ask the owner to issue a new one.", approvalRequired: true });
   }
   if (mandate.expiresAt && now > new Date(mandate.expiresAt)) {
-    return { decision: "declined", reason: "Mandate expired on " + new Date(mandate.expiresAt).toISOString().slice(0, 10) + ".", rule: "expiry" };
+    return declined("expiry", "Mandate expired on " + new Date(mandate.expiresAt).toISOString().slice(0, 10) + ".", { message: "This mandate has expired. Ask the owner to issue a renewal.", approvalRequired: true });
   }
 
   const hour = localHour(now, mandate.timezone);
   const { activeHoursStart: hs, activeHoursEnd: he } = mandate;
   const inWindow = hs < he ? hour >= hs && hour < he : hour >= hs || hour < he; // supports overnight windows
   if (!(hs === 0 && he === 24) && !inWindow) {
-    return { decision: "declined", reason: `Outside active hours (${pad(hs)}:00–${pad(he)}:00 ${mandate.timezone}).`, rule: "hours" };
+    const at = nextWindowStart(now, mandate.timezone, hs);
+    return declined("hours", `Outside active hours (${pad(hs)}:00–${pad(he)}:00 ${mandate.timezone}).`, { message: `Spending under this mandate is allowed between ${pad(hs)}:00 and ${pad(he)}:00 ${mandate.timezone}. Retry at or after ${at.toISOString()}.`, retryAt: at.toISOString(), maxAmountNow: maxNow });
   }
 
   const allowed = parseList(mandate.allowedMerchants);
   if (allowed.length > 0 && !allowed.some((p) => merchantMatches(p, req.merchant))) {
-    return { decision: "declined", reason: `Merchant "${req.merchant}" is not in the allowed list.`, rule: "merchant" };
+    return declined("merchant", `Merchant "${req.merchant}" is not in the allowed list.`, { message: `Only these merchants are allowed: ${allowed.join(", ")} (a trailing * matches a prefix). Use one of them, or ask the owner to add "${req.merchant}".`, allowedMerchants: allowed, maxAmountNow: maxNow });
   }
   const blocked = parseList(mandate.blockedCategories);
   if (req.category && blocked.some((c) => c.toLowerCase() === req.category!.toLowerCase())) {
-    return { decision: "declined", reason: `Category "${req.category}" is blocked.`, rule: "category" };
+    return declined("category", `Category "${req.category}" is blocked.`, { message: `Purchases in the "${req.category}" category are blocked under this mandate; nothing you retry in this category will pass.` });
   }
 
   if (amt > mandate.perTxnLimit) {
-    return { decision: "declined", reason: `Exceeds per-transaction limit of ${fmt(mandate.perTxnLimit, mandate.currency)}.`, rule: "per_txn" };
+    return declined("per_txn", `Exceeds per-transaction limit of ${fmt(mandate.perTxnLimit, ccy)}.`, { message: `No single purchase may exceed ${fmt(mandate.perTxnLimit, ccy)}. Right now up to ${fmt(maxNow, ccy)} would pass; a larger purchase needs the owner to raise the limit.`, maxAmountNow: maxNow });
   }
   if (facts.spentToday + amt > mandate.dailyLimit) {
-    return { decision: "declined", reason: `Would exceed today's limit: ${fmt(facts.spentToday, mandate.currency)} used of ${fmt(mandate.dailyLimit, mandate.currency)}.`, rule: "daily" };
+    const at = new Date(localDayStart(now, mandate.timezone).getTime() + 24 * 3600_000);
+    return declined("daily", `Would exceed today's limit: ${fmt(facts.spentToday, ccy)} used of ${fmt(mandate.dailyLimit, ccy)}.`, {
+      message: headroomToday > 0 ? `${fmt(headroomToday, ccy)} is left today; the daily limit resets at ${at.toISOString()} (${mandate.timezone}).` : `Today's limit is used up; it resets at ${at.toISOString()} (${mandate.timezone}).`,
+      retryAt: at.toISOString(), maxAmountNow: maxNow,
+    });
   }
   if (facts.spentTotal + amt > mandate.totalLimit) {
-    return { decision: "declined", reason: `Would exceed the mandate's total limit: ${fmt(facts.spentTotal, mandate.currency)} used of ${fmt(mandate.totalLimit, mandate.currency)}.`, rule: "total" };
+    return declined("total", `Would exceed the mandate's total limit: ${fmt(facts.spentTotal, ccy)} used of ${fmt(mandate.totalLimit, ccy)}.`, {
+      message: headroomTotal > 0 ? `Only ${fmt(headroomTotal, ccy)} of this mandate's total sanction remains; anything above that needs a new mandate from the owner.` : "This mandate's total sanction is used up; ask the owner to issue a new one.",
+      maxAmountNow: maxNow, approvalRequired: headroomTotal === 0,
+    });
   }
   // A card spends the workspace's prepaid balance; it can never go negative,
   // whatever the mandate's own limits say.
   if (facts.availableBalance != null && amt > facts.availableBalance) {
-    return { decision: "declined", reason: `Prepaid balance too low: ${fmt(Math.max(0, facts.availableBalance), mandate.currency)} available. Add funds to the workspace.`, rule: "balance" };
+    return declined("balance", `Prepaid balance too low: ${fmt(Math.max(0, facts.availableBalance), ccy)} available. Add funds to the workspace.`, { message: "The workspace's prepaid balance cannot cover this. The owner needs to add funds.", maxAmountNow: maxNow, approvalRequired: true });
   }
 
   // Escalation. A human pre-approval (an "allowance") is for one specific
@@ -171,24 +221,16 @@ export function evaluate(mandate: Mandate, req: AuthRequest, facts: Facts): Deci
       return { decision: "approved", reason: `Within limits; covered by your approval ${allowance.id.slice(0, 8)}.`, rule: "allowance", allowanceId: allowance.id };
     }
     if (facts.recentlyDenied) {
-      return { decision: "declined", reason: "You denied this same request recently; the agent may ask again after the cooling-off period.", rule: "denied_recently" };
+      const at = facts.recentlyDeniedAt ? new Date(new Date(facts.recentlyDeniedAt).getTime() + DENIAL_COOLOFF_MS) : null;
+      return declined("denied_recently", "You denied this same request recently; the agent may ask again after the cooling-off period.", { message: `The owner denied this exact request${at ? `; it may be asked again after ${at.toISOString()}` : " recently"}. Change the amount or merchant, or wait.`, retryAt: at?.toISOString(), maxAmountNow: Math.min(maxNow, mandate.approvalAbove) });
     }
     if (facts.openPending >= MAX_OPEN_PENDING) {
-      return { decision: "declined", reason: `Too many requests already waiting on you (${facts.openPending}). Decide those first.`, rule: "too_many_pending" };
+      return declined("too_many_pending", `Too many requests already waiting on you (${facts.openPending}). Decide those first.`, { message: `${facts.openPending} requests are already waiting for the owner. Wait for those to be decided; anything up to ${fmt(Math.min(maxNow, mandate.approvalAbove), ccy)} still passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.approvalAbove) });
     }
-    return { decision: "pending", reason: `Above the ${fmt(mandate.approvalAbove, mandate.currency)} threshold — needs your approval before the agent can retry.`, rule: "approval" };
+    return { decision: "pending", reason: `Above the ${fmt(mandate.approvalAbove, ccy)} threshold — needs your approval before the agent can retry.`, rule: "approval", remedy: { message: `Amounts above ${fmt(mandate.approvalAbove, ccy)} need the owner's approval. They have been notified; retry the identical request (same idempotency key) once approved. Approvals lapse after ${ALLOWANCE_TTL_MS / 3600_000} hours. Up to ${fmt(Math.min(maxNow, mandate.approvalAbove), ccy)} passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.approvalAbove) } };
   }
 
   return { decision: "approved", reason: "Within all mandate limits.", rule: "limits" };
 }
 
 function pad(n: number) { return String(n).padStart(2, "0"); }
-
-export function fmt(minor: number, currency: string): string {
-  const major = minor / 100;
-  try {
-    return new Intl.NumberFormat(currency === "INR" ? "en-IN" : "en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(major);
-  } catch {
-    return `${currency} ${major.toFixed(2)}`;
-  }
-}

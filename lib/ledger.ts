@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
+import { enqueue, kick } from "./webhooks";
 
 export const GENESIS = "0".repeat(64);
 
@@ -29,7 +30,11 @@ export async function appendEvent(tx: Tx, workspaceId: string, type: string, pay
   const createdAt = new Date();
   const body = canonical(payload);
   const hash = hashEvent(seq, type, body, prevHash, createdAt.getTime());
-  await tx.insert(schema.ledger).values({ id: randomUUID(), workspaceId, seq, type, payload: body, prevHash, hash, createdAt });
+  const id = randomUUID();
+  await tx.insert(schema.ledger).values({ id, workspaceId, seq, type, payload: body, prevHash, hash, createdAt });
+  // Event webhooks are queued in this same transaction and sent once it has
+  // committed; a workspace with no endpoints pays one indexed lookup.
+  if (await enqueue(tx, workspaceId, { id, type, seq, hash, createdAt, payload })) kick();
   return { seq, hash };
 }
 

@@ -3,13 +3,21 @@
 import { useActionState, useEffect, useState } from "react";
 import Link from "next/link";
 import { createMandateAction, type MandateFormState } from "@/app/actions";
+import { CURRENCIES, inputStep, minorUnits } from "@/lib/money";
 
 type AgentOpt = { id: string; name: string };
 
-export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardCurrency }: { agents: AgentOpt[]; defaultAgent: string; stripeOn: boolean; cardProblem: string | null; cardCurrency: string }) {
+export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardCurrency, defaultCurrency }: { agents: AgentOpt[]; defaultAgent: string; stripeOn: boolean; cardProblem: string | null; cardCurrency: string; defaultCurrency: string }) {
   const [state, action, pending] = useActionState<MandateFormState, FormData>(createMandateAction, undefined);
   const err = (field: string) => state?.errors?.find((e) => e.field === field)?.message;
   const v = (field: string, fallback = "") => state?.values?.[field] ?? fallback;
+  // Amount inputs step in the chosen currency's minor unit (0.01, 1 or 0.001).
+  const [currency, setCurrency] = useState(v("currency", defaultCurrency));
+  const step = inputStep(currency);
+  // Suggested limits are dollar-ish figures scaled roughly into the chosen
+  // currency, so a rupee mandate doesn't start at ₹25.
+  const ROUGH: Record<string, number> = { INR: 80, JPY: 150, KRW: 1300, IDR: 16000, VND: 25000, PHP: 55, THB: 35, EGP: 50, PKR: 280, BDT: 120, LKR: 300, NGN: 1500, KES: 130, TRY: 35, MXN: 18, BRL: 5, ZAR: 18, CNY: 7, HKD: 8, SEK: 10, NOK: 10, DKK: 7, PLN: 4, CZK: 23, AED: 3.7, SAR: 3.75, MYR: 4.5, ILS: 3.7, KWD: 0.3, BHD: 0.38 };
+  const scale = (usd: string) => { const n = Number(usd) * (ROUGH[currency] ?? 1); return minorUnits(currency) === 0 ? String(Math.round(n)) : String(Math.round(n * 100) / 100); };
   // Default the mandate's clock to the browser's zone; the list is every
   // zone the runtime knows, with the browser's own first.
   const [zones, setZones] = useState<string[]>(["UTC"]);
@@ -51,29 +59,29 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
         <div className="row-3">
           <div className="field">
             <label htmlFor="currency">Currency</label>
-            <select id="currency" name="currency" defaultValue={v("currency", "USD")}>
-              <option value="USD">USD</option><option value="INR">INR</option><option value="EUR">EUR</option><option value="GBP">GBP</option>
+            <select id="currency" name="currency" value={currency} onChange={(e) => setCurrency(e.target.value)}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} — {c.name}</option>)}
             </select>
           </div>
           <div className="field">
-            <label htmlFor="perTxnLimit">Per transaction</label>
-            <input id="perTxnLimit" name="perTxnLimit" type="number" min="0.01" step="0.01" required defaultValue={v("perTxnLimit", "25")} aria-invalid={Boolean(err("perTxnLimit"))} />
+            <label htmlFor="perTxnLimit">Per transaction ({currency})</label>
+            <input id="perTxnLimit" name="perTxnLimit" type="number" min={step} step={step} required defaultValue={v("perTxnLimit", scale("25"))} aria-invalid={Boolean(err("perTxnLimit"))} />
           </div>
           <div className="field">
-            <label htmlFor="dailyLimit">Per day</label>
-            <input id="dailyLimit" name="dailyLimit" type="number" min="0.01" step="0.01" required defaultValue={v("dailyLimit", "50")} aria-invalid={Boolean(err("dailyLimit"))} />
+            <label htmlFor="dailyLimit">Per day ({currency})</label>
+            <input id="dailyLimit" name="dailyLimit" type="number" min={step} step={step} required defaultValue={v("dailyLimit", scale("50"))} aria-invalid={Boolean(err("dailyLimit"))} />
             {err("dailyLimit") && <span className="hint" style={{ color: "var(--bad)" }}>{err("dailyLimit")}</span>}
           </div>
         </div>
         <div className="row">
           <div className="field">
             <label htmlFor="totalLimit">Total sanctioned</label>
-            <input id="totalLimit" name="totalLimit" type="number" min="0.01" step="0.01" required defaultValue={v("totalLimit", "200")} aria-invalid={Boolean(err("totalLimit"))} />
+            <input id="totalLimit" name="totalLimit" type="number" min={step} step={step} required defaultValue={v("totalLimit", scale("200"))} aria-invalid={Boolean(err("totalLimit"))} />
             <span className="hint">{err("totalLimit") ?? "Lifetime cap for this mandate. Issue a new one to renew."}</span>
           </div>
           <div className="field">
             <label htmlFor="approvalAbove">Ask me above</label>
-            <input id="approvalAbove" name="approvalAbove" type="number" min="0" step="0.01" defaultValue={v("approvalAbove", "10")} aria-invalid={Boolean(err("approvalAbove"))} />
+            <input id="approvalAbove" name="approvalAbove" type="number" min="0" step={step} defaultValue={v("approvalAbove", scale("10"))} aria-invalid={Boolean(err("approvalAbove"))} />
             <span className="hint" style={err("approvalAbove") ? { color: "var(--bad)" } : undefined}>{err("approvalAbove") ?? "Leave blank to never escalate. Above this, the agent is paused until you approve in the inbox. Approvals lapse after 24 hours."}</span>
           </div>
         </div>
@@ -114,6 +122,26 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
           <label htmlFor="expiresAt">Expires on</label>
           <input id="expiresAt" name="expiresAt" type="date" defaultValue={v("expiresAt", new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10))} />
           <span className="hint">Valid until the end of that day in the mandate's timezone. Defaults to 30 days; renew by issuing a new one.</span>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Holds</legend>
+        <p className="muted" style={{ margin: "0 0 10px", fontSize: 13.5 }}>An approval is a hold, not a charge. After paying, the agent captures what it actually spent (less releases the difference) or voids the hold. If it does neither, the hold is closed for it when the time below runs out.</p>
+        <div className="row">
+          <div className="field">
+            <label htmlFor="holdTtlHours">Holds stay open for (hours)</label>
+            <input id="holdTtlHours" name="holdTtlHours" type="number" min="0" max="336" step="1" defaultValue={v("holdTtlHours", "24")} aria-invalid={Boolean(err("holdTtlHours"))} />
+            <span className="hint" style={err("holdTtlHours") ? { color: "var(--bad)" } : undefined}>{err("holdTtlHours") ?? "0 settles every approval at once, as before. Up to 14 days."}</span>
+          </div>
+          <div className="field">
+            <label htmlFor="holdPolicy">When a hold expires unsettled</label>
+            <select id="holdPolicy" name="holdPolicy" defaultValue={v("holdPolicy", "capture")}>
+              <option value="capture">Capture it in full — assume the money moved (safe default)</option>
+              <option value="release">Release it — give the amount back to the limits</option>
+            </select>
+            <span className="hint">Release suits agents that always capture; capture suits agents you don't fully trust to report.</span>
+          </div>
         </div>
       </fieldset>
 

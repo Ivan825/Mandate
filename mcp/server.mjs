@@ -3,6 +3,9 @@
 // Claude Code, Cursor, Codex — two tools backed by a Mandate token:
 //   check_mandate    : what may I spend, and what is left?
 //   request_purchase : ask to spend; returns approved / declined / pending.
+//   capture_purchase : after paying, record what was actually paid
+//   void_purchase    : nothing was paid; release the hold
+//   get_purchase     : state of one authorisation
 //
 // Env: MANDATE_URL (e.g. http://localhost:3000), MANDATE_TOKEN (mnd_...)
 
@@ -33,6 +36,35 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "capture_purchase",
+    description: "After an approved purchase completes, record what was actually paid. amount defaults to the full authorised amount; less releases the difference; more is refused. One capture per hold.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        transactionId: { type: "string", description: "From request_purchase" },
+        amount: { type: "integer", description: "Minor units actually paid; omit for the full amount" },
+        note: { type: "string", description: "Order or receipt reference" },
+      },
+      required: ["transactionId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "void_purchase",
+    description: "Nothing was paid: release the approved hold back to the mandate's limits.",
+    inputSchema: {
+      type: "object",
+      properties: { transactionId: { type: "string" }, reason: { type: "string" } },
+      required: ["transactionId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_purchase",
+    description: "Current state of one purchase authorisation: held, captured, voided or released.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string" } }, required: ["transactionId"], additionalProperties: false },
+  },
 ];
 
 async function call(path, init) {
@@ -47,7 +79,7 @@ async function handle(msg) {
   const fail = (code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
   switch (method) {
     case "initialize":
-      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.1.0" } });
+      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.4.0" } });
     case "notifications/initialized":
       return null;
     case "ping":
@@ -67,6 +99,14 @@ async function handle(msg) {
           const { idempotencyKey, ...body } = args ?? {};
           const r = await call("/api/agent/authorize", { method: "POST", body: JSON.stringify(body), headers: idempotencyKey ? { "idempotency-key": String(idempotencyKey).slice(0, 128) } : {} });
           return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 && r.status !== 403 });
+        }
+        if (name === "capture_purchase" || name === "void_purchase") {
+          const r = await call(name === "capture_purchase" ? "/api/agent/capture" : "/api/agent/void", { method: "POST", body: JSON.stringify(args ?? {}) });
+          return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 && r.status !== 409 });
+        }
+        if (name === "get_purchase") {
+          const r = await call(`/api/agent/transactions/${encodeURIComponent(String(args?.transactionId ?? ""))}`, { method: "GET" });
+          return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
         }
         return fail(-32601, `Unknown tool ${name}`);
       } catch (e) {

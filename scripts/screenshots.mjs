@@ -51,7 +51,7 @@ try {
   await p.goto(BASE + "/", { waitUntil: "load" });
   await p.screenshot({ path: `${OUT}/exposure.png` });
 
-  const href = await p.locator('a[href^="/mandates/"]').first().getAttribute("href");
+  const href = await p.locator('a[href^="/mandates/"]:not([href="/mandates/new"])').first().getAttribute("href");
   await p.goto(BASE + href, { waitUntil: "load" });
   await p.screenshot({ path: `${OUT}/mandate.png` });
 
@@ -62,8 +62,11 @@ try {
   await p.goto(BASE + "/approvals", { waitUntil: "load" });
   await p.screenshot({ path: `${OUT}/approvals.png` });
 
+  await p.goto(BASE + "/activity", { waitUntil: "load" });
+  await p.screenshot({ path: `${OUT}/activity.png` });
+
   await b.close();
-  console.log(`wrote ${OUT}/{landing,exposure,mandate,stats,approvals}.png`);
+  console.log(`wrote ${OUT}/{landing,exposure,mandate,stats,approvals,activity}.png`);
 } finally {
   app.kill("SIGTERM");
 }

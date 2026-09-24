@@ -3,9 +3,10 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
-import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile } from "@/lib/service";
+import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings } from "@/lib/service";
 import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization, cardholderProblem, ensureCardholder, issuingRegion, createTopupSession, freezeCard } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
+import { toMinor as toMinorIn } from "@/lib/money";
 import { requireCtx, requirePermission, can } from "@/lib/session";
 import { auth } from "@/lib/auth";
 import { revokeConnectedAgent, bindClientWorkspace } from "@/lib/connections";
@@ -18,7 +19,6 @@ function num(v: FormDataEntryValue | null, fallback = 0): number {
   const n = parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : fallback;
 }
-function toMinor(major: number): number { return Math.round(major * 100); }
 function lines(v: FormDataEntryValue | null): string[] {
   return String(v ?? "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 }
@@ -46,20 +46,25 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
   const timezone = String(form.get("timezone") ?? "UTC");
   const approvalRaw = String(form.get("approvalAbove") ?? "").trim();
   const expiresRaw = String(form.get("expiresAt") ?? "").trim();
+  const currency = String(form.get("currency") ?? "USD").toUpperCase();
+  const minor = (v: FormDataEntryValue | null) => toMinorIn(num(v), currency);
+  const holdPolicyRaw = String(form.get("holdPolicy") ?? "capture");
   const res = await createMandate(ctx.workspaceId, {
     agentId,
     name: String(form.get("name") ?? ""),
-    currency: String(form.get("currency") ?? "USD"),
-    perTxnLimit: toMinor(num(form.get("perTxnLimit"))),
-    dailyLimit: toMinor(num(form.get("dailyLimit"))),
-    totalLimit: toMinor(num(form.get("totalLimit"))),
-    approvalAbove: approvalRaw === "" ? null : toMinor(num(approvalRaw)),
+    currency,
+    perTxnLimit: minor(form.get("perTxnLimit")),
+    dailyLimit: minor(form.get("dailyLimit")),
+    totalLimit: minor(form.get("totalLimit")),
+    approvalAbove: approvalRaw === "" ? null : minor(approvalRaw),
     allowedMerchants: lines(form.get("allowedMerchants")),
     blockedCategories: lines(form.get("blockedCategories")),
     activeHoursStart: Math.floor(num(form.get("activeHoursStart"), 0)),
     activeHoursEnd: Math.floor(num(form.get("activeHoursEnd"), 24)),
     timezone,
     expiresAt: /^\d{4}-\d{2}-\d{2}$/.test(expiresRaw) ? endOfLocalDay(expiresRaw, timezone) : null,
+    holdTtlHours: Math.floor(num(form.get("holdTtlHours"), 24)),
+    holdPolicy: holdPolicyRaw === "release" ? "release" : "capture",
   });
   if (!res.ok) return { errors: res.errors, values };
   const m = res.mandate;
@@ -90,7 +95,7 @@ export async function simulatePurchaseAction(form: FormData) {
   if (!isUuid(id)) return;
   const m = await getMandate(ctx.workspaceId, id);
   if (!m) return;
-  const amount = toMinor(num(form.get("amount")));
+  const amount = toMinorIn(num(form.get("amount")), m.currency);
   const merchant = String(form.get("merchant") ?? "").trim() || "unknown merchant";
   const purpose = String(form.get("purpose") ?? "").trim();
   const category = String(form.get("category") ?? "").trim();
@@ -105,6 +110,123 @@ export async function simulatePurchaseAction(form: FormData) {
   revalidatePath("/approvals");
   revalidatePath("/ledger");
   redirect(`/mandates/${id}`);
+}
+
+// The owner settles a hold the agent didn't: capture what was paid (in the
+// mandate's major units, as typed) or void it.
+export async function settleHoldAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["try"] }, "settling holds");
+  const mandateId = String(form.get("mandateId") ?? "");
+  const transactionId = String(form.get("transactionId") ?? "");
+  if (!isUuid(mandateId) || !isUuid(transactionId)) return;
+  const m = await getMandate(ctx.workspaceId, mandateId);
+  if (!m) return;
+  const back = String(form.get("back") ?? `/mandates/${mandateId}`);
+  const kind = form.get("kind") === "void" ? "void" : "capture";
+  const note = String(form.get("note") ?? "").trim();
+  const r = kind === "void"
+    ? await voidTransaction({ workspaceId: ctx.workspaceId, mandateId }, transactionId, { by: ctx.email, reason: note })
+    : await captureTransaction({ workspaceId: ctx.workspaceId, mandateId }, transactionId, { amount: String(form.get("amount") ?? "").trim() === "" ? undefined : toMinorIn(num(form.get("amount")), m.currency), by: ctx.email, note });
+  revalidatePath(back);
+  revalidatePath("/");
+  redirect(r.ok ? back : `${back}${back.includes("?") ? "&" : "?"}error=${encodeURIComponent(r.message)}`);
+}
+
+// ---------- Event webhooks (workspace-level) ----------
+
+const WEBHOOKS = "/settings/webhooks";
+
+export async function addWebhookEndpointAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "managing event webhooks");
+  const { addEndpoint } = await import("@/lib/webhooks");
+  const r = await addEndpoint(ctx.workspaceId, { url: String(form.get("url") ?? ""), description: String(form.get("description") ?? ""), events: String(form.get("events") ?? "*") }, ctx.email);
+  if (!r.ok) redirect(`${WEBHOOKS}?error=${encodeURIComponent(r.error)}`);
+  redirect(`${WEBHOOKS}?reveal=${r.endpoint.id}&g=${grant(r.endpoint.id)}`);
+}
+
+export async function rotateWebhookSecretAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "managing event webhooks");
+  const { rotateEndpointSecret } = await import("@/lib/webhooks");
+  const id = String(form.get("id") ?? "");
+  if (!isUuid(id)) return;
+  const s = await rotateEndpointSecret(ctx.workspaceId, id, ctx.email);
+  if (!s) redirect(`${WEBHOOKS}?error=${encodeURIComponent("No such endpoint.")}`);
+  redirect(`${WEBHOOKS}?reveal=${id}&g=${grant(id)}`);
+}
+
+export async function toggleWebhookEndpointAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "managing event webhooks");
+  const { setEndpointEnabled } = await import("@/lib/webhooks");
+  const id = String(form.get("id") ?? "");
+  if (!isUuid(id)) return;
+  await setEndpointEnabled(ctx.workspaceId, id, form.get("enabled") === "1", ctx.email);
+  revalidatePath(WEBHOOKS);
+  redirect(WEBHOOKS);
+}
+
+export async function removeWebhookEndpointAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "managing event webhooks");
+  const { removeEndpoint } = await import("@/lib/webhooks");
+  const id = String(form.get("id") ?? "");
+  if (!isUuid(id)) return;
+  await removeEndpoint(ctx.workspaceId, id, ctx.email);
+  revalidatePath(WEBHOOKS);
+  redirect(`${WEBHOOKS}?removed=1`);
+}
+
+export async function testWebhookEndpointAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "managing event webhooks");
+  const { rateLimit } = await import("@/lib/ratelimit");
+  if (!(await rateLimit(`user:${ctx.userId}:webhook-test`, 20, 3600)).ok) redirect(`${WEBHOOKS}?error=${encodeURIComponent("Too many test events this hour.")}`);
+  const { sendTestEvent } = await import("@/lib/webhooks");
+  const id = String(form.get("id") ?? "");
+  if (!isUuid(id)) return;
+  const r = await sendTestEvent(ctx.workspaceId, id, ctx.email);
+  revalidatePath(WEBHOOKS);
+  redirect(r.ok ? `${WEBHOOKS}?test=ok` : `${WEBHOOKS}?test=${encodeURIComponent(r.error ?? `HTTP ${r.status}`)}`);
+}
+
+export async function retryWebhookDeliveryAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "managing event webhooks");
+  const { retryDelivery } = await import("@/lib/webhooks");
+  const id = String(form.get("id") ?? "");
+  if (!isUuid(id)) return;
+  await retryDelivery(ctx.workspaceId, id);
+  revalidatePath(WEBHOOKS);
+  redirect(WEBHOOKS);
+}
+
+// ---------- Notes ----------
+
+export async function addNoteAction(form: FormData) {
+  const ctx = await requireCtx();
+  if (ctx.role === "viewer") redirect("/activity?error=" + encodeURIComponent("Viewers can read notes but not add them."));
+  const { addNote } = await import("@/lib/activity");
+  const type = String(form.get("targetType") ?? "");
+  const id = String(form.get("targetId") ?? "");
+  const back = String(form.get("back") ?? "/activity");
+  if (!["transaction", "approval", "event"].includes(type) || !isUuid(id)) redirect(back);
+  await addNote(ctx.workspaceId, { type: type as "transaction" | "approval" | "event", id }, String(form.get("body") ?? ""), { id: ctx.userId, email: ctx.email });
+  revalidatePath(back.split("?")[0]);
+  redirect(back);
+}
+
+export async function removeNoteAction(form: FormData) {
+  const ctx = await requireCtx();
+  const { removeNote } = await import("@/lib/activity");
+  const id = String(form.get("id") ?? "");
+  const back = String(form.get("back") ?? "/activity");
+  if (isUuid(id)) await removeNote(ctx.workspaceId, id, ctx.userId);
+  revalidatePath(back.split("?")[0]);
+  redirect(back);
+}
+
+export async function saveWorkspaceSettingsAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "workspace settings");
+  try { await saveWorkspaceSettings(ctx.workspaceId, { currency: String(form.get("currency") ?? "USD") }, ctx.email); }
+  catch (e) { redirect("/settings?error=" + encodeURIComponent((e as Error).message)); }
+  revalidatePath("/settings");
+  redirect("/settings?workspace=saved");
 }
 
 export async function revokeMandateAction(form: FormData) {
@@ -395,7 +517,7 @@ export async function topupAction(form: FormData) {
   if (!stripeEnabled()) redirect("/balance?error=" + encodeURIComponent("Stripe is not configured on this deployment."));
   const { MIN_TOPUP, MAX_TOPUP } = await import("@/lib/balance");
   const region = issuingRegion();
-  const amount = toMinor(num(form.get("amount")));
+  const amount = toMinorIn(num(form.get("amount")), region.currency);
   if (!Number.isInteger(amount) || amount < MIN_TOPUP || amount > MAX_TOPUP) redirect("/balance?error=" + encodeURIComponent(`Top-ups are between ${(MIN_TOPUP / 100).toFixed(2)} and ${(MAX_TOPUP / 100).toFixed(2)} ${region.currency}.`));
   const { rateLimit } = await import("@/lib/ratelimit");
   if (!(await rateLimit(`user:${ctx.userId}:topup`, 10, 3600)).ok) redirect("/balance?error=" + encodeURIComponent("Too many top-up attempts this hour."));

@@ -12,7 +12,7 @@ export const STATS_CAP = 5000;
 export async function statsRows(workspaceId: string): Promise<{ rows: StatRow[]; truncated: boolean; mandates: { id: string; name: string; agent: string; status: string; totalLimit: number; currency: string }[] }> {
   const since = new Date(Date.now() - 366 * 24 * 3600_000);
   const rows = await db.select({
-    t: schema.transactions.createdAt, a: schema.transactions.amount, c: schema.transactions.currency, d: schema.transactions.decision, r: schema.transactions.reason,
+    t: schema.transactions.createdAt, a: schema.transactions.amount, c: schema.transactions.currency, d: schema.transactions.decision, st: schema.transactions.settlement, r: schema.transactions.reason,
     m: schema.transactions.merchant, s: schema.transactions.source, ag: schema.agents.name, md: schema.mandates.name, mid: schema.mandates.id,
   }).from(schema.transactions)
     .innerJoin(schema.mandates, eq(schema.mandates.id, schema.transactions.mandateId))
@@ -22,7 +22,8 @@ export async function statsRows(workspaceId: string): Promise<{ rows: StatRow[];
   const mandates = await db.select({ id: schema.mandates.id, name: schema.mandates.name, agent: schema.agents.name, status: schema.mandates.status, totalLimit: schema.mandates.totalLimit, currency: schema.mandates.currency })
     .from(schema.mandates).innerJoin(schema.agents, eq(schema.agents.id, schema.mandates.agentId)).where(eq(schema.mandates.workspaceId, workspaceId));
   return {
-    rows: rows.slice(0, STATS_CAP).map((r) => ({ t: new Date(r.t).getTime(), a: r.a, c: r.c, d: r.d as StatRow["d"], r: r.r, m: r.m, s: r.s, ag: r.ag, md: r.md, mid: r.mid })),
+    // A voided or released hold spent nothing; the stats treat it like the old "voided" decision.
+    rows: rows.slice(0, STATS_CAP).map((r) => ({ t: new Date(r.t).getTime(), a: r.a, c: r.c, d: (r.st === "voided" || r.st === "released" ? "voided" : r.d) as StatRow["d"], r: r.r, m: r.m, s: r.s, ag: r.ag, md: r.md, mid: r.mid })),
     truncated: rows.length > STATS_CAP,
     mandates,
   };

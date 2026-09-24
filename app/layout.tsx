@@ -49,6 +49,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <nav className="nav">
                 <Link href="/">Exposure</Link>
                 <Link href="/approvals">Approvals{pending > 0 && <span className="badge">{pending}</span>}</Link>
+                <Link href="/activity">Activity</Link>
                 <Link href="/ledger">Ledger</Link>
                 <Link href="/stats">Stats</Link>
                 <Link href="/proxy">API proxy</Link>

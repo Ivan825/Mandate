@@ -96,9 +96,10 @@ td.r,th.r{text-align:right}
 /* pills */
 .pill{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;padding:2px 8px;border-radius:2px;border:1px solid var(--rule);color:var(--ink-2);white-space:nowrap}
 .pill.approved,.pill.active,.pill.ok{border-color:var(--ok);color:var(--ok);background:var(--ok-soft)}
-.pill.pending,.pill.frozen,.pill.inactive{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
+.pill.pending,.pill.frozen,.pill.inactive,.pill.held{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
 .pill.declined,.pill.revoked,.pill.denied,.pill.canceled,.pill.blocked,.pill.bad{border-color:var(--bad);color:var(--bad);background:var(--bad-soft)}
-.pill.used,.pill.expired,.pill.voided{opacity:.7}
+.pill.used,.pill.expired,.pill.voided,.pill.released,.pill.failed{opacity:.7}
+.pill.captured,.pill.delivered{border-color:var(--ok);color:var(--ok)}
 .pill.voided{text-decoration:line-through}
 
 /* forms */

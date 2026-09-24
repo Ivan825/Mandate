@@ -2,7 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
 import { appendEvent, recordEvent } from "./ledger";
-import { evaluate, localDayStart, validateTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError } from "./policy";
+import { evaluate, localDayStart, validateTerms, validateHoldTerms, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError } from "./policy";
+import { isCurrencyCode } from "./money";
 import { sendApprovalRequested } from "./notify";
 import { checkWarnings } from "./warnings";
 import { sweepReveals } from "./reveal";
@@ -18,6 +19,7 @@ const { agents, mandates, transactions, approvals, idempotencyKeys } = schema;
 export const PENDING_TTL_MS = Number(process.env.APPROVAL_TTL_HOURS ?? 24) * 3600 * 1000;
 
 export function newToken(): string { return "mnd_" + randomBytes(24).toString("base64url"); }
+function dedupe(errs: TermsError[]): TermsError[] { const seen = new Set<string>(); return errs.filter((e) => { const k = e.field + "|" + e.message; if (seen.has(k)) return false; seen.add(k); return true; }); }
 export function hashToken(token: string): string { return createHash("sha256").update(token).digest("hex"); }
 
 // ---------- Housekeeping ----------
@@ -32,10 +34,37 @@ export async function expireStale(tx: Tx, workspaceId: string, now = new Date())
   const lapsed = await tx.update(approvals).set({ status: "expired" })
     .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "approved"), sql`${approvals.expiresAt} is not null and ${approvals.expiresAt} < ${now}`)).returning();
   for (const a of lapsed) await appendEvent(tx, workspaceId, "approval.expired", { approvalId: a.id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, reason: "allowance lapsed unused" });
+  await closeExpiredHolds(tx, now, workspaceId);
 }
 
 export async function sweep(workspaceId: string) {
   await db.transaction((tx) => expireStale(tx, workspaceId));
+}
+
+// A hold the agent never settled is closed by the mandate's policy once its
+// TTL is up: captured in full (the safe assumption — the money probably
+// moved and nobody told us) or released back to the limits. Runs lazily for
+// one workspace on every authorisation, and for all workspaces from cron.
+export async function closeExpiredHolds(tx: Tx, now = new Date(), workspaceId?: string, limit = 200): Promise<number> {
+  const due = await tx.select({ t: transactions, policy: mandates.holdPolicy }).from(transactions).innerJoin(mandates, eq(mandates.id, transactions.mandateId))
+    .where(and(eq(transactions.settlement, "held"), sql`${transactions.holdExpiresAt} is not null and ${transactions.holdExpiresAt} <= ${now}`, workspaceId ? eq(transactions.workspaceId, workspaceId) : undefined))
+    .orderBy(transactions.holdExpiresAt).limit(limit).for("update", { of: transactions, skipLocked: true });
+  for (const { t, policy } of due) {
+    const release = policy === "release";
+    await tx.update(transactions).set({
+      settlement: release ? "released" : "captured", amount: release ? 0 : t.amount, settledAt: now, settledBy: "system",
+      settlementNote: release ? "Hold expired unsettled; released under the mandate's policy." : "Hold expired unsettled; captured in full under the mandate's policy.",
+    }).where(eq(transactions.id, t.id));
+    await appendEvent(tx, t.workspaceId, release ? "authorization.released" : "authorization.captured", {
+      transactionId: t.id, mandateId: t.mandateId, authorizedAmount: t.authorizedAmount ?? t.amount, capturedAmount: release ? 0 : t.amount, released: release ? t.amount : 0,
+      currency: t.currency, merchant: t.merchant, by: "system", reason: "hold expired", policy,
+    });
+  }
+  return due.length;
+}
+
+export async function sweepAllHolds(limit = 200): Promise<number> {
+  return db.transaction((tx) => closeExpiredHolds(tx, new Date(), undefined, limit));
 }
 
 // ---------- Agents ----------
@@ -60,16 +89,20 @@ export type MandateInput = {
   perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove: number | null;
   allowedMerchants: string[]; blockedCategories: string[];
   activeHoursStart: number; activeHoursEnd: number; timezone: string; expiresAt: Date | null;
+  holdTtlHours?: number; holdPolicy?: "capture" | "release";
 };
 
 export type CreateResult = { ok: true; mandate: Mandate; token: string } | { ok: false; errors: TermsError[] };
 
 export async function createMandate(workspaceId: string, input: MandateInput): Promise<CreateResult> {
   const currency = input.currency.toUpperCase();
-  const errors = validateTerms({ ...input, currency });
+  const holdTtlHours = input.holdTtlHours ?? 24;
+  const holdPolicy = input.holdPolicy ?? "capture";
+  const errors = [...validateTerms({ ...input, currency }), ...validateHoldTerms({ holdTtlHours, holdPolicy })];
+  if (!isCurrencyCode(currency)) errors.push({ field: "currency", message: "Currency must be a 3-letter ISO code." });
   const [agent] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, workspaceId))).limit(1);
   if (!agent) errors.push({ field: "agentId", message: "Pick an agent in this workspace." });
-  if (errors.length) return { ok: false, errors };
+  if (errors.length) return { ok: false, errors: dedupe(errors) };
   const token = newToken();
   const row: Mandate = {
     id: randomUUID(), workspaceId, agentId: input.agentId, name: input.name.trim().slice(0, 80), status: "active", currency,
@@ -77,6 +110,7 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
     allowedMerchants: JSON.stringify(input.allowedMerchants.map((s) => s.trim().slice(0, 80)).filter(Boolean).slice(0, 50)),
     blockedCategories: JSON.stringify(input.blockedCategories.map((s) => s.trim().slice(0, 64)).filter(Boolean).slice(0, 50)),
     activeHoursStart: input.activeHoursStart, activeHoursEnd: input.activeHoursEnd, timezone: input.timezone, expiresAt: input.expiresAt,
+    holdTtlHours, holdPolicy,
     tokenHash: hashToken(token), tokenPrefix: token.slice(0, 10), tokenReveal: token,
     stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null, createdAt: new Date(), revokedAt: null,
   };
@@ -88,6 +122,7 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
       allowedMerchants: JSON.parse(row.allowedMerchants), blockedCategories: JSON.parse(row.blockedCategories),
       activeHours: [row.activeHoursStart, row.activeHoursEnd], timezone: row.timezone,
       expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null, tokenPrefix: row.tokenPrefix,
+      holdTtlHours: row.holdTtlHours, holdPolicy: row.holdPolicy,
     });
   });
   // Any plaintext older than the reveal window is cleared right now, not
@@ -181,21 +216,23 @@ export async function factsFor(m: Mandate, now = new Date(), conn: Q = db, req?:
   const allowances = await conn.select().from(approvals).where(and(eq(approvals.mandateId, m.id), eq(approvals.status, "approved")));
   const [pend] = await conn.select({ c: sql<number>`count(*)::int` }).from(approvals).where(and(eq(approvals.mandateId, m.id), eq(approvals.status, "pending")));
   let recentlyDenied = false;
+  let recentlyDeniedAt: Date | null = null;
   if (req) {
     const since = new Date(now.getTime() - DENIAL_COOLOFF_MS);
-    const [d] = await conn.select({ c: sql<number>`count(*)::int` }).from(approvals).where(and(
+    const [d] = await conn.select({ at: sql<Date | null>`max(${approvals.decidedAt})` }).from(approvals).where(and(
       eq(approvals.mandateId, m.id), eq(approvals.status, "denied"), eq(approvals.amount, req.amount),
       sql`lower(${approvals.merchant}) = lower(${req.merchant})`, gte(approvals.decidedAt, since),
     ));
-    recentlyDenied = Number(d?.c ?? 0) > 0;
+    recentlyDeniedAt = d?.at ? new Date(d.at) : null;
+    recentlyDenied = recentlyDeniedAt !== null;
   }
-  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, availableBalance: null };
+  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null };
   return facts;
 }
 
 export type Exposure = {
   mandate: Mandate; agentName: string; effectiveStatus: string;
-  spentToday: number; spentTotal: number; pendingApprovals: number; declinedToday: number; lastActivity: Date | null;
+  spentToday: number; spentTotal: number; pendingApprovals: number; declinedToday: number; lastActivity: Date | null; openHolds: number;
 };
 
 export async function exposureBook(workspaceId: string): Promise<Exposure[]> {
@@ -207,6 +244,9 @@ export async function exposureBook(workspaceId: string): Promise<Exposure[]> {
   const pendings = await db.select({ mandateId: approvals.mandateId, c: sql<number>`count(*)::int` }).from(approvals)
     .where(and(eq(approvals.workspaceId, workspaceId), eq(approvals.status, "pending"))).groupBy(approvals.mandateId);
   const pendingBy = new Map(pendings.map((p) => [p.mandateId, Number(p.c)]));
+  const holds = await db.select({ mandateId: transactions.mandateId, c: sql<number>`count(*)::int` }).from(transactions)
+    .where(and(eq(transactions.workspaceId, workspaceId), eq(transactions.settlement, "held"))).groupBy(transactions.mandateId);
+  const holdsBy = new Map(holds.map((h) => [h.mandateId, Number(h.c)]));
   const out: Exposure[] = [];
   for (const { m, agentName } of rows) {
     const dayStart = localDayStart(now, m.timezone);
@@ -219,7 +259,7 @@ export async function exposureBook(workspaceId: string): Promise<Exposure[]> {
     const spentTotal = Number(mine.find((t) => t.decision === "approved")?.sum ?? 0);
     const last = mine.reduce<Date | null>((acc, t) => (t.last && (!acc || new Date(t.last) > acc) ? new Date(t.last) : acc), null);
     const effectiveStatus = m.status === "active" && m.expiresAt && now > new Date(m.expiresAt) ? "expired" : m.status;
-    out.push({ mandate: m, agentName, effectiveStatus, spentToday: Number(today?.s ?? 0), spentTotal, pendingApprovals: pendingBy.get(m.id) ?? 0, declinedToday: Number(declToday?.c ?? 0), lastActivity: last });
+    out.push({ mandate: m, agentName, effectiveStatus, spentToday: Number(today?.s ?? 0), spentTotal, pendingApprovals: pendingBy.get(m.id) ?? 0, declinedToday: Number(declToday?.c ?? 0), lastActivity: last, openHolds: holdsBy.get(m.id) ?? 0 });
   }
   return out;
 }
@@ -233,7 +273,8 @@ export async function countPending(workspaceId: string): Promise<number> {
 // ---------- Authorisation ----------
 
 export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy";
-export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean };
+export type Settlement = "held" | "captured" | "voided" | "released";
+export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean; settlement: Settlement | null; holdExpiresAt: Date | null };
 // Postgres int4; also a sanity ceiling no mandate should ever reach.
 export const MAX_AMOUNT = 2_147_483_647;
 
@@ -287,17 +328,35 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       }
     }
 
+    // How the money side of an approval is tracked depends on who settles it:
+    // agents (REST, MCP) capture or void explicitly, within the mandate's
+    // hold TTL; the proxy settles on the provider's usage (an hour's grace
+    // covers a function that dies mid-stream); Stripe drives card holds; a
+    // simulation is the owner poking the terms and settles at once.
+    const approved = d.decision === "approved";
+    const settlement = !approved ? null
+      : source === "simulation" || (source !== "stripe" && source !== "proxy" && mandate.holdTtlHours === 0) ? "captured"
+      : "held";
+    const holdExpiresAt = settlement !== "held" ? null
+      : source === "stripe" ? null
+      : source === "proxy" ? new Date(now.getTime() + 3600_000)
+      : new Date(now.getTime() + mandate.holdTtlHours * 3600_000);
     const t: Transaction = {
       id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, category, purpose,
       decision: d.decision, reason: d.reason, source, actor, stripeAuthorizationId: extra.stripeAuthorizationId ?? null,
-      approvalId: d.decision === "approved" ? approvalId ?? null : null, createdAt: now,
+      approvalId: approved ? approvalId ?? null : null,
+      authorizedAmount: approved ? amount : null, settlement, holdExpiresAt,
+      settledAt: settlement === "captured" ? now : null, settledBy: settlement === "captured" ? "system" : null,
+      settlementNote: settlement === "captured" ? (source === "simulation" ? "Simulated purchase; settled at once." : "Mandate settles at once (hold TTL 0).") : null,
+      createdAt: now,
     };
     await tx.insert(transactions).values(t);
     await appendEvent(tx, ws, `authorization.${d.decision}`, {
       transactionId: t.id, mandateId: mandate.id, agentId: mandate.agentId, amount, currency: t.currency, merchant, purpose, category,
       rule: d.rule, reason: d.reason, source, actor, approvalId: approvalId ?? null, stripeAuthorizationId: t.stripeAuthorizationId,
+      settlement, holdExpiresAt: holdExpiresAt ? holdExpiresAt.toISOString() : null,
     });
-    return { ...d, transactionId: t.id, approvalId, mandate };
+    return { ...d, transactionId: t.id, approvalId, mandate, settlement, holdExpiresAt };
   });
 
   // Notify only once the request is durably recorded. Callers with a hard
@@ -323,17 +382,93 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
   else await sideEffects();
   const { mandate: _m, ...rest } = result;
   void _m;
-  return { ...rest, notified };
+  return { ...rest, notified } as AuthResult;
+}
+
+// ---------- Settlement: capture and void ----------
+
+export type SettleResult =
+  | { ok: true; transaction: Transaction; released: number }
+  | { ok: false; code: "not_found" | "not_held" | "bad_amount"; message: string; transaction?: Transaction };
+
+async function loadHeld(tx: Tx, mandateId: string | null, workspaceId: string | null, transactionId: string) {
+  const [t] = await tx.select().from(transactions).where(and(eq(transactions.id, transactionId), mandateId ? eq(transactions.mandateId, mandateId) : undefined, workspaceId ? eq(transactions.workspaceId, workspaceId) : undefined)).for("update").limit(1);
+  return t ?? null;
+}
+
+function notHeld(t: Transaction): SettleResult {
+  const state = t.decision !== "approved" ? `was ${t.decision}, so there is nothing to settle` : `is already ${t.settlement}`;
+  return { ok: false, code: "not_held", message: `This authorisation ${state}.`, transaction: t };
+}
+
+// The agent (or the owner) says what was actually paid. Capturing less than
+// was authorised gives the difference back to the limits; capturing more is
+// refused — a bigger purchase is a new authorisation. One capture closes
+// the hold.
+export async function captureTransaction(scope: { mandateId?: string; workspaceId?: string }, transactionId: string, opts: { amount?: number; by: string; note?: string }): Promise<SettleResult> {
+  const now = new Date();
+  return db.transaction(async (tx): Promise<SettleResult> => {
+    const t = await loadHeld(tx, scope.mandateId ?? null, scope.workspaceId ?? null, transactionId);
+    if (!t) return { ok: false, code: "not_found", message: "No such authorisation under this mandate." };
+    if (t.decision !== "approved" || t.settlement !== "held") return notHeld(t);
+    const authorized = t.authorizedAmount ?? t.amount;
+    const captured = opts.amount ?? authorized;
+    if (!Number.isInteger(captured) || captured <= 0 || captured > authorized) return { ok: false, code: "bad_amount", message: `Capture amount must be a positive integer no greater than the authorised ${authorized}.`, transaction: t };
+    const released = authorized - captured;
+    const note = (opts.note ?? "").trim().slice(0, 300) || null;
+    const [updated] = await tx.update(transactions).set({ amount: captured, settlement: "captured", settledAt: now, settledBy: opts.by.slice(0, 120), settlementNote: note }).where(eq(transactions.id, t.id)).returning();
+    await appendEvent(tx, t.workspaceId, "authorization.captured", { transactionId: t.id, mandateId: t.mandateId, authorizedAmount: authorized, capturedAmount: captured, released, currency: t.currency, merchant: t.merchant, by: opts.by, note });
+    return { ok: true, transaction: updated, released };
+  });
+}
+
+// Nothing was paid: the whole hold goes back to the limits.
+export async function voidTransaction(scope: { mandateId?: string; workspaceId?: string }, transactionId: string, opts: { by: string; reason?: string }): Promise<SettleResult> {
+  const now = new Date();
+  return db.transaction(async (tx): Promise<SettleResult> => {
+    const t = await loadHeld(tx, scope.mandateId ?? null, scope.workspaceId ?? null, transactionId);
+    if (!t) return { ok: false, code: "not_found", message: "No such authorisation under this mandate." };
+    if (t.decision !== "approved" || t.settlement !== "held") return notHeld(t);
+    const authorized = t.authorizedAmount ?? t.amount;
+    const reason = (opts.reason ?? "").trim().slice(0, 300) || null;
+    const [updated] = await tx.update(transactions).set({ amount: 0, settlement: "voided", settledAt: now, settledBy: opts.by.slice(0, 120), settlementNote: reason }).where(eq(transactions.id, t.id)).returning();
+    await appendEvent(tx, t.workspaceId, "authorization.voided", { transactionId: t.id, mandateId: t.mandateId, authorizedAmount: authorized, released: authorized, currency: t.currency, merchant: t.merchant, by: opts.by, reason });
+    return { ok: true, transaction: updated, released: authorized };
+  });
+}
+
+export async function getTransaction(scope: { mandateId?: string; workspaceId?: string }, transactionId: string): Promise<Transaction | null> {
+  const [t] = await db.select().from(transactions).where(and(eq(transactions.id, transactionId), scope.mandateId ? eq(transactions.mandateId, scope.mandateId) : undefined, scope.workspaceId ? eq(transactions.workspaceId, scope.workspaceId) : undefined)).limit(1);
+  return t ?? null;
+}
+
+// Open holds on a mandate, oldest first — what the owner sees as "held".
+export async function openHolds(workspaceId: string, mandateId?: string) {
+  return db.select().from(transactions).where(and(eq(transactions.workspaceId, workspaceId), eq(transactions.settlement, "held"), mandateId ? eq(transactions.mandateId, mandateId) : undefined)).orderBy(transactions.createdAt);
+}
+
+// What the agent is told about a settled or open authorisation.
+export function settlementView(t: Transaction) {
+  const authorized = t.authorizedAmount ?? t.amount;
+  return {
+    transactionId: t.id, decision: t.decision, settlement: t.settlement, authorizedAmount: authorized,
+    capturedAmount: t.settlement === "captured" ? t.amount : t.settlement === "held" ? null : 0,
+    released: t.settlement === "held" ? 0 : authorized - t.amount,
+    currency: t.currency, merchant: t.merchant, purpose: t.purpose,
+    holdExpiresAt: t.holdExpiresAt ? new Date(t.holdExpiresAt).toISOString() : null,
+    settledAt: t.settledAt ? new Date(t.settledAt).toISOString() : null, settledBy: t.settledBy, note: t.settlementNote,
+    createdAt: new Date(t.createdAt).toISOString(),
+  };
 }
 
 // A card authorisation Stripe ended up declining on its side (or that timed
 // out) must not count as spend: mark the approved transaction void.
 export async function voidTransactionByStripeAuthorization(stripeAuthorizationId: string, reason: string) {
   const [t] = await db.select().from(transactions).where(and(eq(transactions.stripeAuthorizationId, stripeAuthorizationId), eq(transactions.decision, "approved"))).limit(1);
-  if (!t) return null;
+  if (!t || t.settlement === "voided") return null;
   await db.transaction(async (tx) => {
-    await tx.update(transactions).set({ decision: "voided", reason: `Voided: ${reason}` }).where(eq(transactions.id, t.id));
-    await appendEvent(tx, t.workspaceId, "authorization.voided", { transactionId: t.id, mandateId: t.mandateId, amount: t.amount, currency: t.currency, merchant: t.merchant, stripeAuthorizationId, reason });
+    await tx.update(transactions).set({ amount: 0, settlement: "voided", settledAt: new Date(), settledBy: "stripe", settlementNote: `Voided: ${reason}`.slice(0, 300) }).where(eq(transactions.id, t.id));
+    await appendEvent(tx, t.workspaceId, "authorization.voided", { transactionId: t.id, mandateId: t.mandateId, authorizedAmount: t.authorizedAmount ?? t.amount, released: t.amount, currency: t.currency, merchant: t.merchant, stripeAuthorizationId, by: "stripe", reason });
   });
   return t;
 }
@@ -445,15 +580,18 @@ export async function reconcileCard(stripeAuthorizationId: string, kind: "captur
     const [prior] = await tx.select({ c: sql<number>`count(*)::int` }).from(schema.ledger)
       .where(and(eq(schema.ledger.workspaceId, t.workspaceId), eq(schema.ledger.type, "stripe.capture"), sql`${schema.ledger.payload} like ${'%"stripeAuthorizationId":"' + stripeAuthorizationId + '"%'}`));
     const captures = Number(prior?.c ?? 0);
+    const authorized = t.authorizedAmount ?? t.amount;
     if (kind === "capture") {
+      // Card captures arrive in parts and can keep coming; the row stays
+      // "captured" from the first one, with the amount accumulating.
       const total = captures === 0 ? amount : t.amount + amount;
-      await tx.update(transactions).set({ amount: total, reason: captures === 0 ? `Captured ${amount} of ${t.amount} authorised.` : `Captured ${amount} more; ${total} in total.` }).where(eq(transactions.id, t.id));
+      await tx.update(transactions).set({ amount: total, settlement: "captured", settledAt: at, settledBy: "stripe", settlementNote: captures === 0 ? `Captured ${amount} of ${authorized} authorised.` : `Captured ${amount} more; ${total} in total.` }).where(eq(transactions.id, t.id));
     } else if (kind === "reversal") {
-      await tx.update(transactions).set({ amount: 0, reason: "Authorisation reversed by the network; nothing charged." }).where(eq(transactions.id, t.id));
+      await tx.update(transactions).set({ amount: 0, settlement: "voided", settledAt: at, settledBy: "stripe", settlementNote: "Authorisation reversed by the network; nothing charged." }).where(eq(transactions.id, t.id));
     } else if (kind === "closed") {
-      if (captures === 0) await tx.update(transactions).set({ amount: 0, reason: "Authorisation closed without capture; hold released." }).where(eq(transactions.id, t.id));
+      if (captures === 0) await tx.update(transactions).set({ amount: 0, settlement: "released", settledAt: at, settledBy: "stripe", settlementNote: "Authorisation closed without capture; hold released." }).where(eq(transactions.id, t.id));
     } else {
-      await tx.insert(transactions).values({ id: randomUUID(), workspaceId: t.workspaceId, mandateId: t.mandateId, amount: -Math.abs(amount), currency: t.currency, merchant: t.merchant, category: t.category, purpose: `Refund of ${t.purpose || "card purchase"}`, decision: "approved", reason: "Refund from merchant.", source: "stripe", actor: t.actor, stripeAuthorizationId: null, approvalId: null, createdAt: at });
+      await tx.insert(transactions).values({ id: randomUUID(), workspaceId: t.workspaceId, mandateId: t.mandateId, amount: -Math.abs(amount), currency: t.currency, merchant: t.merchant, category: t.category, purpose: `Refund of ${t.purpose || "card purchase"}`, decision: "approved", reason: "Refund from merchant.", source: "stripe", actor: t.actor, stripeAuthorizationId: null, approvalId: null, authorizedAmount: -Math.abs(amount), settlement: "captured", holdExpiresAt: null, settledAt: at, settledBy: "stripe", settlementNote: "Refund from merchant.", createdAt: at });
     }
     await appendEvent(tx, t.workspaceId, `stripe.${kind}`, { transactionId: t.id, mandateId: t.mandateId, stripeAuthorizationId, amount, ref, at: at.toISOString() });
   });
@@ -474,7 +612,27 @@ export async function cancelWorkspaceCards(workspaceId: string) {
   for (const r of rows) { try { await deactivateCard(r.cardId!); } catch (e) { console.error(`could not cancel card ${r.cardId}: ${(e as Error).message}`); } }
 }
 
+// ---------- Workspace settings ----------
+
+export async function getWorkspaceSettings(workspaceId: string): Promise<{ currency: string }> {
+  const [s] = await db.select().from(schema.workspaceSettings).where(eq(schema.workspaceSettings.workspaceId, workspaceId)).limit(1);
+  return { currency: s?.currency ?? "USD" };
+}
+
+export async function saveWorkspaceSettings(workspaceId: string, input: { currency: string }, by: string) {
+  const currency = input.currency.toUpperCase();
+  if (!isCurrencyCode(currency)) throw new Error("Currency must be a 3-letter ISO code.");
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.workspaceSettings).values({ workspaceId, currency, updatedAt: new Date() }).onConflictDoUpdate({ target: schema.workspaceSettings.workspaceId, set: { currency, updatedAt: new Date() } });
+    await appendEvent(tx, workspaceId, "workspace.settings_changed", { currency, by });
+  });
+}
+
 export async function purgeWorkspace(tx: Tx, workspaceId: string) {
+  await tx.delete(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.workspaceId, workspaceId));
+  await tx.delete(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.workspaceId, workspaceId));
+  await tx.delete(schema.notes).where(eq(schema.notes.workspaceId, workspaceId));
+  await tx.delete(schema.workspaceSettings).where(eq(schema.workspaceSettings.workspaceId, workspaceId));
   await tx.delete(schema.proxyCalls).where(eq(schema.proxyCalls.workspaceId, workspaceId));
   await tx.delete(schema.proxyKeys).where(eq(schema.proxyKeys.workspaceId, workspaceId));
   await tx.delete(schema.providerKeys).where(eq(schema.providerKeys.workspaceId, workspaceId));

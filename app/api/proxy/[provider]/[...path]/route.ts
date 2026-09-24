@@ -90,7 +90,11 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ provider: strin
   if (auth.decision !== "approved") {
     await recordDeclined(r, callId, 0);
     const status = auth.decision === "pending" ? 402 : 403;
-    return providerError(provider, status, `Mandate ${auth.decision}: ${auth.reason}${auth.decision === "pending" ? " The owner has been notified; retry after approval." : ""}`, auth.decision === "pending" ? "mandate_pending_approval" : "mandate_declined");
+    const res = providerError(provider, status, `Mandate ${auth.decision}: ${auth.reason}${auth.remedy ? " " + auth.remedy.message : ""}`, auth.decision === "pending" ? "mandate_pending_approval" : "mandate_declined");
+    res.headers.set("x-mandate-rule", auth.rule);
+    if (auth.remedy?.retryAt) res.headers.set("x-mandate-retry-at", auth.remedy.retryAt);
+    if (auth.remedy?.maxAmountNow != null) res.headers.set("x-mandate-max-cents-now", String(auth.remedy.maxAmountNow));
+    return res;
   }
 
   let upstream: Response;

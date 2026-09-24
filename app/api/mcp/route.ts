@@ -5,7 +5,7 @@ import { requireMcpAuth } from "@better-auth/mcp";
 import { and, eq } from "drizzle-orm";
 import { auth, MCP_RESOURCE } from "@/lib/auth";
 import { db, schema } from "@/lib/db";
-import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, MAX_AMOUNT } from "@/lib/service";
+import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, MAX_AMOUNT } from "@/lib/service";
 import { grantedWorkspace, isTokenRevoked } from "@/lib/connections";
 import { fmt, parseList } from "@/lib/policy";
 
@@ -50,7 +50,7 @@ function text(obj: unknown) {
 }
 
 function buildServer(p: Principal) {
-  const server = new McpServer({ name: "mandate", version: "0.3.0" });
+  const server = new McpServer({ name: "mandate", version: "0.4.0" });
 
   server.registerTool("list_mandates", {
     description: "List the active spending mandates in the connected workspace: each mandate's limits, what is left today and overall, allowed merchants and hours. Call this first to pick the mandate a purchase should go under.",
@@ -77,18 +77,19 @@ function buildServer(p: Principal) {
   }, async ({ mandateId }) => {
     const m = await getMandate(p.workspaceId, mandateId);
     if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
-    const f = await factsFor(m);
+    const [f, holds] = await Promise.all([factsFor(m), openHolds(p.workspaceId, m.id)]);
     return text({
       mandateId: m.id, name: m.name, status: m.status, currency: m.currency,
       limits: { perTransaction: m.perTxnLimit, daily: m.dailyLimit, total: m.totalLimit, approvalAbove: m.approvalAbove },
       remaining: { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal) },
       scope: { allowedMerchants: parseList(m.allowedMerchants), blockedCategories: parseList(m.blockedCategories), activeHours: [m.activeHoursStart, m.activeHoursEnd], timezone: m.timezone },
+      holds: { ttlHours: m.holdTtlHours, onExpiry: m.holdPolicy, open: holds.map(settlementView) },
       pendingApprovals: f.openPending, expiresAt: m.expiresAt,
     });
   });
 
   server.registerTool("request_purchase", {
-    description: "Ask for authorisation to spend under a mandate BEFORE paying. amount is an integer in minor units (1299 = $12.99). Returns approved, declined (with the rule and reason), or pending — pending means the owner has been notified and must approve; tell the user, wait, then retry the identical request with the same idempotencyKey.",
+    description: "Ask for authorisation to spend under a mandate BEFORE paying. amount is an integer in minor units (1299 = $12.99). Returns approved, declined (with the rule, reason and a remedy: when to retry or the most that would pass now), or pending — pending means the owner has been notified and must approve; tell the user, wait, then retry the identical request with the same idempotencyKey. An approval is a hold: after paying, call capture_purchase with the amount actually paid, or void_purchase if nothing was paid.",
     inputSchema: z.object({
       mandateId: z.string(),
       amount: z.number().int().positive(),
@@ -118,7 +119,10 @@ function buildServer(p: Principal) {
     }
     const body: Record<string, unknown> = {
       decision: r.decision, reason: r.reason, rule: r.rule, transactionId: r.transactionId, approvalId: r.approvalId ?? null,
-      next: r.decision === "pending" ? "Tell the user their approval is needed, wait, then call request_purchase again with the same arguments." : undefined,
+      settlement: r.settlement, holdExpiresAt: r.holdExpiresAt ? r.holdExpiresAt.toISOString() : null, remedy: r.remedy ?? undefined,
+      next: r.decision === "pending" ? "Tell the user their approval is needed, wait, then call request_purchase again with the same arguments."
+        : r.decision === "approved" && r.settlement === "held" ? `Complete the purchase, then call capture_purchase with this transactionId and the amount actually paid, or void_purchase if nothing was paid. Unsettled, the hold is ${m.holdPolicy === "release" ? "released" : "captured in full"} at holdExpiresAt.`
+        : r.decision === "declined" ? r.remedy?.message : undefined,
     };
     // Record the committed decision before anything else can fail.
     if (key) { if (r.decision === "pending") await releaseIdempotent(m.id, key); else await completeIdempotent(m.id, key, r.decision === "declined" ? 403 : 200, body); }
@@ -128,6 +132,52 @@ function buildServer(p: Principal) {
       if (key && r.decision !== "pending") await completeIdempotent(m.id, key, r.decision === "declined" ? 403 : 200, body);
     } catch { /* remaining is informational */ }
     return { ...text(body), isError: false };
+  });
+
+  const spendGuard = () => {
+    if (!p.scopes.has("mandate:spend")) return { ...text({ error: "This connection was granted read-only access (mandate:read). Reconnect with the mandate:spend scope." }), isError: true };
+    if (!p.canSpend) return { ...text({ error: "The person who connected this agent is not an owner or admin of the workspace, so it may read mandates but not settle purchases." }), isError: true };
+    return null;
+  };
+
+  server.registerTool("capture_purchase", {
+    description: "After an approved purchase is complete, record what was actually paid. amount defaults to the full authorised amount; paying less gives the difference back to the mandate's limits; paying more is refused (request a new purchase for the extra). Each hold can be captured once.",
+    inputSchema: z.object({
+      mandateId: z.string(),
+      transactionId: z.string().describe("From request_purchase"),
+      amount: z.number().int().positive().optional().describe("Minor units actually paid; omit for the full authorised amount"),
+      note: z.string().max(300).optional().describe("Order number, receipt reference…"),
+    }),
+  }, async ({ mandateId, transactionId, amount, note }) => {
+    const g = spendGuard(); if (g) return g;
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    const r = await captureTransaction({ mandateId: m.id }, transactionId, { amount, by: p.clientName, note });
+    if (!r.ok) return { ...text({ error: r.message, code: r.code, state: r.transaction ? settlementView(r.transaction) : undefined }), isError: r.code !== "not_held" };
+    return text({ ...settlementView(r.transaction), note: "Captured. The mandate's limits now reflect the amount actually paid." });
+  });
+
+  server.registerTool("void_purchase", {
+    description: "Release an approved hold when nothing was paid (checkout failed, the user changed their mind). The whole amount goes back to the mandate's limits.",
+    inputSchema: z.object({ mandateId: z.string(), transactionId: z.string().describe("From request_purchase"), reason: z.string().max(300).optional() }),
+  }, async ({ mandateId, transactionId, reason }) => {
+    const g = spendGuard(); if (g) return g;
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    const r = await voidTransaction({ mandateId: m.id }, transactionId, { by: p.clientName, reason });
+    if (!r.ok) return { ...text({ error: r.message, code: r.code, state: r.transaction ? settlementView(r.transaction) : undefined }), isError: r.code !== "not_held" };
+    return text({ ...settlementView(r.transaction), note: "Voided. Nothing counts against the mandate for this purchase." });
+  });
+
+  server.registerTool("get_purchase", {
+    description: "Read the current state of one purchase authorisation: held, captured, voided or released, and by whom.",
+    inputSchema: z.object({ mandateId: z.string(), transactionId: z.string() }),
+  }, async ({ mandateId, transactionId }) => {
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    const t = await getTransaction({ mandateId: m.id }, transactionId);
+    if (!t) return { ...text({ error: "No such authorisation under this mandate." }), isError: true };
+    return text({ ...settlementView(t), reason: t.reason });
   });
 
   return server;

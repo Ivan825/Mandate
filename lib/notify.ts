@@ -68,11 +68,16 @@ export async function listChannels(userId: string): Promise<Channel[]> {
 // internet: no loopback, link-local, private ranges or cloud metadata
 // addresses, and https only outside development. Checked when added and
 // again at delivery time (a hostname can be re-pointed later).
+// A self-hosted deployment whose n8n lives on the same private network sets
+// WEBHOOK_ALLOW_PRIVATE=1 to lift the address check (never the URL check).
+export function privateWebhooksAllowed(): boolean { return process.env.WEBHOOK_ALLOW_PRIVATE === "1"; }
+
 export async function webhookProblem(raw: string): Promise<string | null> {
   let u: URL;
   try { u = new URL(raw); } catch { return "Enter a full http(s) URL."; }
-  if (u.protocol !== "https:" && !(u.protocol === "http:" && !isProduction())) return "Webhook URLs must use https.";
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && (!isProduction() || privateWebhooksAllowed()))) return "Webhook URLs must use https.";
   if (u.username || u.password) return "Webhook URLs cannot carry credentials.";
+  if (privateWebhooksAllowed()) return null;
   const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return "Webhook URLs must be reachable on the public internet.";
   const addrs: string[] = [];

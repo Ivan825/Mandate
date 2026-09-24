@@ -236,7 +236,7 @@ export async function settle(r: Resolved, callId: string, transactionId: string,
   const actual = !ok ? 0 : usage ? costCents(price, usage.inputTokens, usage.outputTokens, usage.cachedTokens) : est.cents;
   const overrun = ok && (actual > r.mandate.perTxnLimit || (actual > est.cents * OVERRUN_FACTOR && actual - est.cents >= 50));
   await db.transaction(async (tx) => {
-    await tx.update(schema.transactions).set({ amount: actual, reason: !ok ? `Upstream ${upstreamStatus}; settled to zero.` : usage ? `Settled on reported usage (est. ${est.cents}¢).` : `Settled at estimate (no usage reported).` }).where(eq(schema.transactions.id, transactionId));
+    await tx.update(schema.transactions).set({ amount: actual, settlement: ok ? "captured" : "voided", settledAt: new Date(), settledBy: "proxy", settlementNote: !ok ? `Upstream ${upstreamStatus}; settled to zero.` : usage ? `Settled on reported usage (est. ${est.cents}¢).` : `Settled at estimate (no usage reported).` }).where(eq(schema.transactions.id, transactionId));
     await tx.update(schema.proxyCalls).set({ actualAmount: actual, inputTokens: usage?.inputTokens ?? null, outputTokens: usage?.outputTokens ?? null, upstreamStatus, settledAt: new Date() }).where(eq(schema.proxyCalls.id, callId));
     await appendEvent(tx, r.mandate.workspaceId, ok ? "authorization.settled" : "authorization.voided", {
       transactionId, callId, mandateId: r.mandate.id, provider: r.provider, model: est.model, estimatedAmount: est.cents, actualAmount: actual,

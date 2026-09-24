@@ -4,7 +4,11 @@ import { deploymentChannels, notifySecret, baseUrl, listChannels } from "@/lib/n
 import { stripeEnabled } from "@/lib/stripe";
 import { PENDING_TTL_MS } from "@/lib/service";
 import { listConnectedAgents } from "@/lib/connections";
-import { sendTestNotificationAction, revokeOAuthClientAction, addChannelAction, removeChannelAction, saveCardholderProfileAction, leaveWorkspaceAction, deleteWorkspaceAction, deleteAccountAction, revokeSessionAction, revokeOtherSessionsAction } from "@/app/actions";
+import { sendTestNotificationAction, revokeOAuthClientAction, addChannelAction, removeChannelAction, saveCardholderProfileAction, leaveWorkspaceAction, deleteWorkspaceAction, deleteAccountAction, revokeSessionAction, revokeOtherSessionsAction, saveWorkspaceSettingsAction } from "@/app/actions";
+import { getWorkspaceSettings } from "@/lib/service";
+import { listEndpoints } from "@/lib/webhooks";
+import { CURRENCIES } from "@/lib/money";
+import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 import { soleOwnedWorkspaces } from "@/lib/service";
@@ -14,9 +18,10 @@ import { isOperator } from "@/lib/env";
 import { When } from "@/app/components";
 import { PasskeyPanel } from "./passkeys";
 
-export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ test?: string; disconnected?: string; channel?: string; error?: string; cardholder?: string; sessions?: string }> }) {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ test?: string; disconnected?: string; channel?: string; error?: string; cardholder?: string; sessions?: string; workspace?: string }> }) {
   const ctx = await requireCtx();
-  const { test, disconnected, channel, error, cardholder, sessions: sessionsMsg } = await searchParams;
+  const { test, disconnected, channel, error, cardholder, sessions: sessionsMsg, workspace: workspaceMsg } = await searchParams;
+  const [wsSettings, endpoints] = await Promise.all([getWorkspaceSettings(ctx.workspaceId), listEndpoints(ctx.workspaceId)]);
   const region = issuingRegion();
   const h = await headers();
   const [connected, channels, profile, sessions, current, sole] = await Promise.all([
@@ -71,6 +76,27 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         <div className="card">
           <div className="eyebrow" style={{ marginBottom: 6 }}>What a webhook receives</div>
           <p className="muted" style={{ fontSize: 13.5 }}>A JSON POST for each event: <code>approval.requested</code> with the agent, mandate, amount, merchant, purpose and signed <code>links.approve</code> / <code>links.deny</code> / <code>links.inbox</code>; <code>warning</code> for utilisation and velocity alerts; <code>test</code> from the button above. Point it at an n8n, Zapier or Make trigger, or your own endpoint, and route it wherever you already look.</p>
+        </div>
+      </div>
+
+      <h2 style={{ marginBottom: 8 }}>Workspace: {ctx.workspaceName}</h2>
+      {workspaceMsg && <div className="notice ok" style={{ marginBottom: 12 }}>Workspace settings saved.</div>}
+      <div className="grid-2" style={{ marginBottom: 28 }}>
+        <form action={saveWorkspaceSettingsAction} className="card form">
+          <div className="eyebrow">Default currency</div>
+          <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>New mandates start in this currency. Each mandate keeps its own; amounts are never converted.</p>
+          <div className="field" style={{ maxWidth: 320 }}>
+            <label htmlFor="ws-currency">Currency</label>
+            <select id="ws-currency" name="currency" defaultValue={wsSettings.currency} disabled={!(ctx.role === "owner" || ctx.role === "admin")}>
+              {CURRENCIES.map((c) => <option key={c.code} value={c.code}>{c.code} — {c.name}</option>)}
+            </select>
+          </div>
+          {(ctx.role === "owner" || ctx.role === "admin") && <div className="actions"><button className="btn secondary sm" type="submit">Save</button></div>}
+        </form>
+        <div className="card">
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Event webhooks</div>
+          <p className="muted" style={{ fontSize: 13.5 }}>Push every ledger event in this workspace — decisions, captures, approvals, revocations — as signed JSON to your own endpoints, with retries. {endpoints.length > 0 ? <>{endpoints.length} endpoint{endpoints.length === 1 ? "" : "s"} configured.</> : "None configured yet."}</p>
+          <Link className="btn secondary sm" href="/settings/webhooks">Manage event webhooks</Link>
         </div>
       </div>
 
