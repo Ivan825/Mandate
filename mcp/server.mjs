@@ -75,6 +75,16 @@ const TOOLS = [
     description: "Current state of one purchase authorisation: held, captured, voided or released.",
     inputSchema: { type: "object", properties: { transactionId: { type: "string" } }, required: ["transactionId"], additionalProperties: false },
   },
+  {
+    name: "get_voucher",
+    description: "The signed authorisation voucher (mv1.…) for an approved hold, to hand to the merchant. They verify it offline with Mandate's public key and redeem it for what was actually sold; you then need not capture yourself.",
+    inputSchema: { type: "object", properties: { transactionId: { type: "string" } }, required: ["transactionId"], additionalProperties: false },
+  },
+  {
+    name: "delegate",
+    description: "Carve a narrower sub-mandate out of this one for a helper agent or a one-off job. Limits must be at or below this mandate's, merchants within its list, no later expiry; the helper's spend counts against this mandate; revoking this mandate revokes the helper. Returns the helper's token once.",
+    inputSchema: { type: "object", properties: { name: { type: "string" }, perTxnLimit: { type: "integer" }, dailyLimit: { type: "integer" }, totalLimit: { type: "integer" }, approvalAbove: { type: ["integer", "null"] }, allowedMerchants: { type: "array", items: { type: "string" } }, agentName: { type: "string" } }, required: ["name", "perTxnLimit", "dailyLimit", "totalLimit"], additionalProperties: false },
+  },
 ];
 
 async function call(path, init) {
@@ -89,7 +99,7 @@ async function handle(msg) {
   const fail = (code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
   switch (method) {
     case "initialize":
-      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.6.0" } });
+      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mandate", version: "0.7.0" } });
     case "notifications/initialized":
       return null;
     case "ping":
@@ -124,6 +134,14 @@ async function handle(msg) {
         }
         if (name === "get_purchase") {
           const r = await call(`/api/agent/transactions/${encodeURIComponent(String(args?.transactionId ?? ""))}`, { method: "GET" });
+          return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
+        }
+        if (name === "get_voucher") {
+          const r = await call(`/api/agent/transactions/${encodeURIComponent(String(args?.transactionId ?? ""))}/voucher`, { method: "GET" });
+          return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
+        }
+        if (name === "delegate") {
+          const r = await call("/api/agent/delegate", { method: "POST", body: JSON.stringify(args ?? {}) });
           return reply({ content: [{ type: "text", text: r.body }], isError: r.status >= 400 });
         }
         return fail(-32601, `Unknown tool ${name}`);

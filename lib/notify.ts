@@ -7,6 +7,7 @@ import { fmt } from "./policy";
 import { FLAG_LABELS, parseFlags } from "./anomaly";
 import type { Approval, Mandate, Plan } from "./schema";
 import { parsePlanItems } from "./policy";
+import { parseUserIds } from "./routing";
 import { appUrl, isProduction } from "./env";
 import { sendMail } from "./mailer";
 
@@ -127,10 +128,22 @@ export async function deciderUserIds(workspaceId: string): Promise<string[]> {
   return members.filter((m) => /\b(owner|admin|approver)\b/.test(m.role)).map((m) => m.userId);
 }
 
-export async function recipientsFor(workspaceId: string): Promise<Channel[]> {
+// Who should hear about a request: the members of its approval route, if it
+// matched one (and they still may decide); otherwise every decider.
+export async function notifyUserIds(workspaceId: string, routeId?: string | null): Promise<string[]> {
   const deciders = await deciderUserIds(workspaceId);
-  if (deciders.length === 0) return [];
-  const rows = await db.select().from(schema.notificationChannels).where(and(inArray(schema.notificationChannels.userId, deciders), eq(schema.notificationChannels.enabled, 1)));
+  if (!routeId) return deciders;
+  const [route] = await db.select({ userIds: schema.approvalRoutes.userIds }).from(schema.approvalRoutes).where(eq(schema.approvalRoutes.id, routeId)).limit(1);
+  if (!route) return deciders;
+  const wanted = new Set(parseUserIds(route.userIds));
+  const routed = deciders.filter((u) => wanted.has(u));
+  return routed.length ? routed : deciders;
+}
+
+export async function recipientsFor(workspaceId: string, routeId?: string | null): Promise<Channel[]> {
+  const users = await notifyUserIds(workspaceId, routeId);
+  if (users.length === 0) return [];
+  const rows = await db.select().from(schema.notificationChannels).where(and(inArray(schema.notificationChannels.userId, users), eq(schema.notificationChannels.enabled, 1)));
   return rows.map((r) => ({ id: r.id, userId: r.userId, type: r.type as ChannelType, target: r.target, label: r.label }));
 }
 
@@ -186,7 +199,10 @@ export function approvalMessage(n: ApprovalNotice): Message {
   const amount = fmt(n.approval.amount, n.approval.currency);
   const flags = parseFlags(n.approval.flags);
   const veto = n.approval.kind === "veto" && n.approval.vetoUntil ? new Date(n.approval.vetoUntil) : null;
-  const html = `<b>${esc(n.agentName)}</b> ${veto ? "will spend" : "wants to spend"} <b>${esc(amount)}</b> at <b>${esc(n.approval.merchant)}</b>` +
+  const cosign = n.approval.requiredApprovers > 1 ? n.approval.requiredApprovers : 0;
+  const sandbox = n.mandate.sandbox === 1 ? "[sandbox] " : "";
+  const html = `${sandbox ? "<b>[sandbox]</b> " : ""}<b>${esc(n.agentName)}</b> ${veto ? "will spend" : "wants to spend"} <b>${esc(amount)}</b> at <b>${esc(n.approval.merchant)}</b>` +
+    (cosign ? `\n<b>${cosign} approvers</b> must co-sign this one; yours is one signature.` : "") +
     (veto ? ` at <b>${veto.toISOString().slice(11, 16)} UTC</b> unless you cancel` : "") +
     (n.approval.purpose ? `\n“${esc(n.approval.purpose)}”` : "") +
     (flags.length ? `\n⚑ ${esc(flags.map((f) => `${FLAG_LABELS[f].label}: ${FLAG_LABELS[f].hint}`).join(" · "))}` : "") +
@@ -194,12 +210,12 @@ export function approvalMessage(n: ApprovalNotice): Message {
     (links ? "" : `\nOpen the inbox to decide: ${baseUrl()}/approvals`);
   const text = html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   return {
-    title: veto ? `${n.agentName} will spend ${amount} at ${n.approval.merchant} in ${n.mandate.vetoMinutes} min unless you cancel` : `${n.agentName} asks to spend ${amount} at ${n.approval.merchant}`,
+    title: sandbox + (veto ? `${n.agentName} will spend ${amount} at ${n.approval.merchant} in ${n.mandate.vetoMinutes} min unless you cancel` : cosign ? `${n.agentName} asks to spend ${amount} at ${n.approval.merchant} — ${cosign} approvers needed` : `${n.agentName} asks to spend ${amount} at ${n.approval.merchant}`),
     html, text, links,
     payload: {
       event: "approval.requested", kind: n.approval.kind, approvalId: n.approval.id, mandateId: n.mandate.id, mandateName: n.mandate.name, agentName: n.agentName,
       amount: n.approval.amount, currency: n.approval.currency, amountDisplay: amount, merchant: n.approval.merchant, purpose: n.approval.purpose, flags,
-      requestedAt: new Date(n.approval.requestedAt).toISOString(), vetoUntil: veto ? veto.toISOString() : null, links,
+      requestedAt: new Date(n.approval.requestedAt).toISOString(), vetoUntil: veto ? veto.toISOString() : null, requiredApprovers: n.approval.requiredApprovers, sandbox: n.mandate.sandbox === 1, routeId: n.approval.routeId, links,
     },
   };
 }
@@ -239,7 +255,7 @@ export async function sendPlanProposed(plan: Plan): Promise<Outcome[]> {
 }
 
 export async function sendApprovalRequested(n: ApprovalNotice): Promise<Outcome[]> {
-  let channels = await recipientsFor(n.mandate.workspaceId);
+  let channels = await recipientsFor(n.mandate.workspaceId, n.approval.routeId);
   if (channels.length === 0) channels = fallbackChannels();
   const msg = approvalMessage(n);
   const [outcomes, push] = await Promise.all([channels.length ? deliver(channels, msg) : Promise.resolve([] as Outcome[]), pushApproval(n, msg)]);
@@ -252,7 +268,7 @@ async function pushApproval(n: ApprovalNotice, msg: Message): Promise<Outcome | 
   const { pushEnabled, sendPush } = await import("./push");
   if (!pushEnabled()) return null;
   try {
-    const ids = await deciderUserIds(n.mandate.workspaceId);
+    const ids = await notifyUserIds(n.mandate.workspaceId, n.approval.routeId);
     const r = await sendPush(ids, { title: msg.title, body: `${n.mandate.name}${n.approval.purpose ? ` — “${n.approval.purpose}”` : ""}`, tag: `approval:${n.approval.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: msg.links?.approve, denyUrl: msg.links?.deny });
     if (r.devices === 0) return null;
     return { channel: "push", target: `${r.devices} device${r.devices === 1 ? "" : "s"}`, ok: r.sent > 0, error: r.sent === 0 ? "no device accepted the push" : undefined };

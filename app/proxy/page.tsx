@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { requireCtx, can } from "@/lib/session";
-import { listProviderKeys, listProxyKeys, recentCalls, revealProxyKey, PROVIDERS } from "@/lib/proxy";
+import { listProviderKeys, listProxyKeys, recentCalls, revealProxyKey, listTargets, PROVIDERS } from "@/lib/proxy";
+import { addTargetAction, removeTargetAction } from "@/app/actions";
+import { inputStep } from "@/lib/money";
 import { listMandates } from "@/lib/service";
 import { fmt, parseList, merchantMatches } from "@/lib/policy";
 import { Pill, When } from "@/app/components";
@@ -13,15 +15,18 @@ export default async function ProxyPage({ searchParams }: { searchParams: Promis
   const { added, error, reveal, g } = await searchParams;
   await sweepReveals();
   const base = appUrl();
-  const [providerKeys, proxyKeys, calls, mandates, mayManage] = await Promise.all([
-    listProviderKeys(ctx.workspaceId), listProxyKeys(ctx.workspaceId), recentCalls(ctx.workspaceId), listMandates(ctx.workspaceId, true), can({ proxy: ["manage"] }),
+  const [providerKeys, proxyKeys, calls, mandates, mayManage, targets] = await Promise.all([
+    listProviderKeys(ctx.workspaceId), listProxyKeys(ctx.workspaceId), recentCalls(ctx.workspaceId), listMandates(ctx.workspaceId, true), can({ proxy: ["manage"] }), listTargets(ctx.workspaceId),
   ]);
   const revealed = reveal && /^[0-9a-f-]{36}$/i.test(reveal) && grantValid(reveal, g) ? await revealProxyKey(ctx.workspaceId, reveal) : null;
-  const usdMandates = mandates.filter((m) => m.m.currency === "USD");
+  const live = mandates.filter((m) => m.m.sandbox !== 1);
+  const usdMandates = live.filter((m) => m.m.currency === "USD");
+  const keyable = live.filter((m) => m.m.currency === "USD" || targets.some((t) => t.currency === m.m.currency));
   // Proxy calls are authorised as purchases at "OpenAI", "Anthropic" or
   // "Google Gemini". A mandate whose merchant list leaves those out would
   // decline every call, so say so before a key is issued.
   const providerNames = Object.values(PROVIDERS).map((p) => p.name);
+  const ccyOf = (provider: string) => targets.find((t) => `target:${t.slug}` === provider)?.currency ?? "USD";
   const blocksProviders = (allowed: string) => { const list = parseList(allowed); return list.length > 0 && !providerNames.some((n) => list.some((pat) => merchantMatches(pat, n))); };
 
   return (
@@ -29,8 +34,8 @@ export default async function ProxyPage({ searchParams }: { searchParams: Promis
       <div className="page-head">
         <div>
           <div className="eyebrow">API-key proxy</div>
-          <h1>Meter what your agents spend on OpenAI, Anthropic and Gemini</h1>
-          <p className="muted">Store your real provider keys here, encrypted. Hand each agent a proxy key bound to a mandate instead. Every call is priced from the request, decided against the mandate before it is forwarded, and settled on the tokens the provider actually billed. The agent never sees your real key.</p>
+          <h1>Meter what your agents spend on OpenAI, Anthropic, Gemini — and any other API</h1>
+          <p className="muted">Store your real keys here, encrypted. Hand each agent a proxy key bound to a mandate instead. LLM calls are priced from the request and settled on the tokens billed; any other API you add as a <a href="#targets">custom target</a> is priced by its own rule. Every call is decided against the mandate before it is forwarded. The agent never sees your real key.</p>
         </div>
       </div>
 
@@ -72,17 +77,20 @@ export default async function ProxyPage({ searchParams }: { searchParams: Promis
 
         <div className="card stack">
           <div className="eyebrow">Issue a proxy key to an agent</div>
-          {providerKeys.length === 0 || usdMandates.length === 0 ? (
-            <p className="muted" style={{ margin: 0 }}>{providerKeys.length === 0 ? "Store a provider key first." : "Issue a USD mandate first; the proxy prices calls in USD."} {usdMandates.length === 0 && <Link href="/mandates/new">Issue mandate</Link>}</p>
+          {(providerKeys.length === 0 && targets.length === 0) || keyable.length === 0 ? (
+            <p className="muted" style={{ margin: 0 }}>{providerKeys.length === 0 && targets.length === 0 ? "Store a provider key or add a custom target first." : "Issue a live (non-sandbox) mandate in the right currency first: USD for LLM providers, or the target's currency."} {keyable.length === 0 && <Link href="/mandates/new">Issue mandate</Link>}</p>
           ) : mayManage ? (
             <form action={createProxyKeyAction} className="form">
               <div className="field"><label htmlFor="name">Name</label><input id="name" name="name" required placeholder="e.g. Claude Code on the work laptop" /></div>
               <div className="field"><label htmlFor="mandateId">Mandate (limits that apply)</label>
-                <select id="mandateId" name="mandateId">{usdMandates.map((m) => <option key={m.m.id} value={m.m.id}>{m.m.name} · {m.agentName} · {fmt(m.m.dailyLimit, "USD")}/day{blocksProviders(m.m.allowedMerchants) ? " · ⚠ merchant list excludes providers" : ""}</option>)}</select>
-                <span className="hint">Calls are recorded as purchases at {providerNames.join(", ")}. If the mandate restricts merchants, include the provider's name (or leave the list empty).</span>
+                <select id="mandateId" name="mandateId">{keyable.map((m) => <option key={m.m.id} value={m.m.id}>{m.m.name} · {m.agentName} · {fmt(m.m.dailyLimit, m.m.currency)}/day{m.m.currency === "USD" && blocksProviders(m.m.allowedMerchants) ? " · ⚠ merchant list excludes providers" : ""}</option>)}</select>
+                <span className="hint">LLM calls are recorded as purchases at {providerNames.join(", ")}; a custom target's calls at the target's name. If the mandate restricts merchants, include that name (or leave the list empty). Currencies must match.</span>
               </div>
-              <div className="field"><label htmlFor="providerKeyId">Provider key</label>
-                <select id="providerKeyId" name="providerKeyId">{providerKeys.map((k) => <option key={k.id} value={k.id}>{PROVIDERS[k.provider as keyof typeof PROVIDERS]?.name ?? k.provider} ····{k.hint} {k.label && `(${k.label})`}</option>)}</select>
+              <div className="field"><label htmlFor="providerKeyId">Provider key or target</label>
+                <select id="providerKeyId" name="providerKeyId">
+                  {providerKeys.map((k) => <option key={k.id} value={k.id}>{PROVIDERS[k.provider as keyof typeof PROVIDERS]?.name ?? k.provider} ····{k.hint} {k.label && `(${k.label})`}</option>)}
+                  {targets.map((t) => <option key={t.id} value={`target:${t.id}`}>Target: {t.name} ({t.currency})</option>)}
+                </select>
               </div>
               <div className="actions"><button className="btn accent" type="submit">Issue proxy key</button></div>
             </form>
@@ -96,8 +104,8 @@ export default async function ProxyPage({ searchParams }: { searchParams: Promis
           <thead><tr><th>Name</th><th>Provider</th><th>Mandate</th><th>Key</th><th>Status</th><th>Last used</th><th></th></tr></thead>
           <tbody>
             {proxyKeys.length === 0 && <tr><td colSpan={7} className="empty">No proxy keys yet.</td></tr>}
-            {proxyKeys.map(({ k, mandateName, provider, hint }) => (
-              <tr key={k.id}><td>{k.name}</td><td>{PROVIDERS[provider as keyof typeof PROVIDERS]?.name ?? provider} <span className="faint mono">····{hint}</span></td><td>{mandateName}</td><td className="mono faint">{k.tokenPrefix}…</td><td><Pill v={k.status} /></td><td><When d={k.lastUsedAt} /></td>
+            {proxyKeys.map(({ k, mandateName, provider, hint, targetName }) => (
+              <tr key={k.id}><td>{k.name}</td><td>{targetName ? <>{targetName} <span className="faint">(custom target)</span></> : <>{PROVIDERS[provider as keyof typeof PROVIDERS]?.name ?? provider} <span className="faint mono">····{hint}</span></>}</td><td>{mandateName}</td><td className="mono faint">{k.tokenPrefix}…</td><td><Pill v={k.status} /></td><td><When d={k.lastUsedAt} /></td>
                 <td>{mayManage && k.status === "active" && <form action={revokeProxyKeyAction}><input type="hidden" name="id" value={k.id} /><button className="btn danger sm" type="submit">Revoke</button></form>}</td></tr>
             ))}
           </tbody>
@@ -119,6 +127,44 @@ client = genai.Client(api_key="mpx_…", http_options={"base_url": "${base}/api/
         <p className="muted" style={{ marginTop: 10 }}>A call that would exceed the mandate returns the provider's error shape with status 403 (declined) or 402 (needs your approval), so the SDK raises normally and the agent can tell the user. Streaming works unchanged; usage is settled when the stream ends.</p>
       </div>
 
+      <h2 id="targets" style={{ marginBottom: 10 }}>Custom targets — govern any API</h2>
+      <p className="muted" style={{ margin: "0 0 12px", fontSize: 13.5 }}>Any HTTP API an agent uses — a scraping service, a data vendor, a search API, your own internal service — becomes a governed merchant. Store the credential here; the agent calls <code>{base}/api/proxy/t/&lt;slug&gt;/…</code> with its proxy key and Mandate injects the real one. Each call is authorised against the mandate at the target's price, so limits, merchants, hours, veto windows and approvals all apply, and the ledger records every call.</p>
+      {added === "target" && <div className="notice ok" style={{ marginBottom: 12 }}>Target added. Issue a proxy key bound to it above.</div>}
+      <div className="grid-2" style={{ marginBottom: 24 }}>
+        <div className="card">
+          <div className="eyebrow">Targets</div>
+          {targets.length === 0 ? <p className="faint" style={{ margin: 0 }}>None yet.</p> : (
+            <table className="mini"><tbody>{targets.map((t) => (
+              <tr key={t.id}><td><strong>{t.name}</strong><div className="mono faint" style={{ fontSize: 11.5 }}>/api/proxy/t/{t.slug}/… → {t.baseUrl}</div><div className="faint" style={{ fontSize: 12 }}>{t.pricing === "per_call" ? `${fmt(t.priceAmount, t.currency)} per call` : `pre-authorises ${fmt(t.priceAmount, t.currency)}, settles from ${t.pricing === "header" ? `header ${t.priceKey}` : `JSON ${t.priceKey}`}`} · credential in <span className="mono">{t.authHeader}</span> ····{t.authHint}</div></td>
+                <td className="r">{mayManage && <form action={removeTargetAction}><input type="hidden" name="id" value={t.id} /><button className="btn danger sm" type="submit" title="Removes the target and revokes its proxy keys">Remove</button></form>}</td></tr>
+            ))}</tbody></table>
+          )}
+        </div>
+        <div className="card">
+          <div className="eyebrow">Add a target</div>
+          {mayManage ? (
+            <form action={addTargetAction} className="form">
+              <div className="row">
+                <div className="field"><label htmlFor="t-name">Name (the merchant the ledger shows)</label><input id="t-name" name="name" required placeholder="SerpAPI" /></div>
+                <div className="field"><label htmlFor="t-slug">Slug (in the URL)</label><input id="t-slug" name="slug" placeholder="serpapi" pattern="[a-z0-9-]*" /></div>
+              </div>
+              <div className="field"><label htmlFor="t-base">Base URL</label><input id="t-base" name="baseUrl" type="url" required placeholder="https://serpapi.com" /><span className="hint">Public https only. The agent's path is appended: /api/proxy/t/serpapi/search → https://serpapi.com/search</span></div>
+              <div className="row">
+                <div className="field"><label htmlFor="t-header">Credential header</label><input id="t-header" name="authHeader" defaultValue="authorization" /></div>
+                <div className="field"><label htmlFor="t-value">Header value (stored encrypted)</label><input id="t-value" name="authValue" type="password" required placeholder="Bearer sk-live-…" autoComplete="off" /></div>
+              </div>
+              <div className="row-3">
+                <div className="field"><label htmlFor="t-pricing">Pricing</label><select id="t-pricing" name="pricing" defaultValue="per_call"><option value="per_call">Fixed price per call</option><option value="header">From a response header</option><option value="json">From a JSON field in the response</option></select></div>
+                <div className="field"><label htmlFor="t-amount">Price / pre-authorise per call</label><input id="t-amount" name="priceAmount" type="number" min={inputStep("USD")} step="any" required defaultValue="0.01" /></div>
+                <div className="field"><label htmlFor="t-ccy">Currency</label><input id="t-ccy" name="currency" defaultValue="USD" maxLength={3} style={{ textTransform: "uppercase" }} /></div>
+              </div>
+              <div className="field"><label htmlFor="t-key">Header name or JSON path carrying the cost (minor units)</label><input id="t-key" name="priceKey" placeholder="x-cost-cents  ·  usage.cost_cents" /><span className="hint">Only for header / JSON pricing. A reported cost above the pre-authorised amount is capped there and you are warned.</span></div>
+              <div className="actions"><button className="btn secondary" type="submit">Add target</button></div>
+            </form>
+          ) : <p className="faint" style={{ margin: 0 }}>Only owners and admins add targets.</p>}
+        </div>
+      </div>
+
       <h2 style={{ marginBottom: 10 }}>Recent calls</h2>
       <div className="tbl">
         <table>
@@ -126,7 +172,7 @@ client = genai.Client(api_key="mpx_…", http_options={"base_url": "${base}/api/
           <tbody>
             {calls.length === 0 && <tr><td colSpan={8} className="empty">No calls yet.</td></tr>}
             {calls.map(({ c, keyName }) => (
-              <tr key={c.id}><td><When d={c.createdAt} /></td><td>{keyName}</td><td className="mono" style={{ fontSize: 12.5 }}>{c.model}{c.streamed ? " ·stream" : ""}</td><td className="r num">{fmt(c.estimatedAmount, "USD")}</td><td className="r num">{c.actualAmount == null ? <span className="faint">—</span> : fmt(c.actualAmount, "USD")}</td><td className="num faint">{c.inputTokens ?? "–"} / {c.outputTokens ?? "–"}</td><td><Pill v={c.decision} /></td><td className="mono faint">{c.upstreamStatus ?? ""}</td></tr>
+              <tr key={c.id}><td><When d={c.createdAt} /></td><td>{keyName}</td><td className="mono" style={{ fontSize: 12.5 }}>{c.model}{c.streamed ? " ·stream" : ""}</td><td className="r num">{fmt(c.estimatedAmount, ccyOf(c.provider))}</td><td className="r num">{c.actualAmount == null ? <span className="faint">—</span> : fmt(c.actualAmount, ccyOf(c.provider))}</td><td className="num faint">{c.inputTokens ?? "–"} / {c.outputTokens ?? "–"}</td><td><Pill v={c.decision} /></td><td className="mono faint">{c.upstreamStatus ?? ""}</td></tr>
             ))}
           </tbody>
         </table>

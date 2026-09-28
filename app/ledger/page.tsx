@@ -1,11 +1,13 @@
 import { requireCtx } from "@/lib/session";
 import { verifyChain, listEvents } from "@/lib/ledger";
+import { latestAnchor, workspaceLabel } from "@/lib/anchors";
 import { When } from "@/app/components";
 
 export default async function LedgerPage({ searchParams }: { searchParams: Promise<{ full?: string }> }) {
   const ctx = await requireCtx();
   const { full } = await searchParams;
-  const [rows, v] = await Promise.all([listEvents(ctx.workspaceId, 100), verifyChain(ctx.workspaceId, full === "1")]);
+  const [rows, v, anchor] = await Promise.all([listEvents(ctx.workspaceId, 100), verifyChain(ctx.workspaceId, full === "1"), latestAnchor(ctx.workspaceId)]);
+  const label = workspaceLabel(ctx.workspaceId);
   return (
     <>
       <div className="page-head">
@@ -19,6 +21,10 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
 
       <div className={`notice ${v.ok ? "ok" : "bad"}`} style={{ marginBottom: 20 }}>
         {v.ok ? <><strong>Chain intact.</strong> {v.checked} event{v.checked === 1 ? "" : "s"} verified{full === "1" ? " from genesis" : " (incrementally from the last verified head)"}.</> : <><strong>Chain broken at #{v.brokenAt}.</strong> {v.detail}. {v.checked} events before it verify.</>}
+      </div>
+
+      <div className="notice" style={{ marginBottom: 20 }}>
+        {anchor ? <><strong>Anchored publicly.</strong> Head #{anchor.seq} was signed into the public anchor chain as anchor {anchor.n} at {new Date(anchor.signedAt).toUTCString().replace(" GMT", " UTC")}{rows[0] && rows[0].seq > anchor.seq ? <>; {rows[0].seq - anchor.seq} newer event{rows[0].seq - anchor.seq === 1 ? "" : "s"} will be anchored on the next daily run</> : null}. Your ledger's public name is <span className="mono">{label.slice(0, 16)}…</span> — <a href={`/anchors?label=${label}`}>see its anchors</a>.</> : <><strong>Not yet anchored.</strong> Once a day the head of this ledger is signed into a public, deployment-wide anchor chain (<a href="/anchors">/anchors</a>), so even the operator cannot rewrite history unnoticed. Your ledger's public name will be <span className="mono">{label.slice(0, 16)}…</span>.</>}
       </div>
 
       <div className="tbl">

@@ -5,9 +5,10 @@ import { appendEvent } from "./ledger";
 import { encrypt, decrypt } from "./crypto";
 import { authorize, getMandate, type AuthResult } from "./service";
 import { costCents, estimateTokens, priceFor, type Provider } from "./pricing";
-import { sendWarning } from "./notify";
+import { sendWarning, webhookProblem } from "./notify";
 import { sweepReveals } from "./reveal";
-import type { Mandate } from "./schema";
+import { isCurrencyCode } from "./money";
+import type { Mandate, ProxyTarget } from "./schema";
 
 // The API-key proxy. An agent points its OpenAI / Anthropic / Gemini SDK at
 // Mandate with a proxy key instead of the real key. Each call is priced
@@ -85,20 +86,146 @@ export async function removeProviderKey(workspaceId: string, id: string, by: str
 function newProxyToken() { return "mpx_" + randomBytes(24).toString("base64url"); }
 function hash(t: string) { return createHash("sha256").update(t).digest("hex"); }
 
-export async function createProxyKey(workspaceId: string, input: { mandateId: string; providerKeyId: string; name: string }, by: string) {
+export async function createProxyKey(workspaceId: string, input: { mandateId: string; providerKeyId?: string; targetId?: string; name: string }, by: string) {
   const m = await getMandate(workspaceId, input.mandateId);
   if (!m) throw new Error("No such mandate in this workspace.");
-  if (m.currency !== "USD") throw new Error("The API proxy prices calls in USD; issue a USD mandate for it.");
-  const [pk] = await db.select().from(schema.providerKeys).where(and(eq(schema.providerKeys.id, input.providerKeyId), eq(schema.providerKeys.workspaceId, workspaceId))).limit(1);
-  if (!pk) throw new Error("No such provider key in this workspace.");
+  if (m.sandbox === 1) throw new Error("A sandbox mandate never reaches a real API; issue a live mandate for the proxy.");
+  let pk: typeof schema.providerKeys.$inferSelect | null = null;
+  let target: ProxyTarget | null = null;
+  if (input.targetId) {
+    [target] = await db.select().from(schema.proxyTargets).where(and(eq(schema.proxyTargets.id, input.targetId), eq(schema.proxyTargets.workspaceId, workspaceId))).limit(1);
+    if (!target) throw new Error("No such API target in this workspace.");
+    if (m.currency !== target.currency) throw new Error(`The target "${target.name}" is priced in ${target.currency}; issue a ${target.currency} mandate for it.`);
+  } else {
+    if (m.currency !== "USD") throw new Error("The API proxy prices LLM calls in USD; issue a USD mandate for it.");
+    [pk] = await db.select().from(schema.providerKeys).where(and(eq(schema.providerKeys.id, input.providerKeyId ?? ""), eq(schema.providerKeys.workspaceId, workspaceId))).limit(1);
+    if (!pk) throw new Error("No such provider key in this workspace.");
+  }
   const token = newProxyToken();
-  const row = { id: randomUUID(), workspaceId, mandateId: m.id, providerKeyId: pk.id, name: input.name.trim().slice(0, 60) || `${pk.provider} key`, status: "active", tokenHash: hash(token), tokenPrefix: token.slice(0, 10), tokenReveal: token, lastUsedAt: null, createdAt: new Date(), revokedAt: null };
+  const row = { id: randomUUID(), workspaceId, mandateId: m.id, providerKeyId: pk?.id ?? null, targetId: target?.id ?? null, name: input.name.trim().slice(0, 60) || `${pk?.provider ?? target?.name} key`, status: "active", tokenHash: hash(token), tokenPrefix: token.slice(0, 10), tokenReveal: token, lastUsedAt: null, createdAt: new Date(), revokedAt: null };
   await db.transaction(async (tx) => {
     await tx.insert(schema.proxyKeys).values(row);
-    await appendEvent(tx, workspaceId, "proxy.key_issued", { proxyKeyId: row.id, mandateId: m.id, provider: pk.provider, name: row.name, tokenPrefix: row.tokenPrefix, by });
+    await appendEvent(tx, workspaceId, "proxy.key_issued", { proxyKeyId: row.id, mandateId: m.id, provider: pk?.provider ?? `target:${target!.slug}`, name: row.name, tokenPrefix: row.tokenPrefix, by });
   });
   await sweepReveals().catch(() => {});
   return { ...row, token };
+}
+
+// ---------- Generic API targets ----------
+
+export type TargetInput = { name: string; slug?: string; baseUrl: string; authHeader?: string; authValue: string; currency?: string; pricing: "per_call" | "header" | "json"; priceAmount: number; priceKey?: string };
+
+export async function addTarget(workspaceId: string, input: TargetInput, by: string): Promise<{ ok: true; target: ProxyTarget } | { ok: false; error: string }> {
+  const name = input.name.trim().slice(0, 60);
+  if (!name) return { ok: false, error: "Give the target a name." };
+  const slug = (input.slug?.trim() || name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  if (!slug) return { ok: false, error: "The slug needs at least one letter or digit." };
+  const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
+  // Targets are fetched from our servers, so the same public-address rule as
+  // webhooks applies — unless this deployment fronts internal APIs on its
+  // own network (PROXY_TARGET_ALLOW_PRIVATE=1), the classic self-host case.
+  let problem: string | null = null;
+  if (process.env.PROXY_TARGET_ALLOW_PRIVATE === "1") { try { const u = new URL(baseUrl); if (u.protocol !== "http:" && u.protocol !== "https:") problem = "Enter a full http(s) URL."; } catch { problem = "Enter a full http(s) URL."; } }
+  else problem = await webhookProblem(baseUrl);
+  if (problem) return { ok: false, error: `Base URL: ${problem}` };
+  const authHeader = (input.authHeader ?? "authorization").trim().toLowerCase().slice(0, 60);
+  if (!/^[a-z0-9-]+$/.test(authHeader) || /^(host|content-length|transfer-encoding|connection)$/.test(authHeader)) return { ok: false, error: "That header cannot carry the credential." };
+  const authValue = input.authValue.trim();
+  if (authValue.length < 8) return { ok: false, error: "The credential looks too short." };
+  const currency = (input.currency ?? "USD").toUpperCase();
+  if (!isCurrencyCode(currency)) return { ok: false, error: "Currency must be a 3-letter ISO code." };
+  if (!["per_call", "header", "json"].includes(input.pricing)) return { ok: false, error: "Pricing is per_call, header or json." };
+  if (!Number.isInteger(input.priceAmount) || input.priceAmount <= 0) return { ok: false, error: input.pricing === "per_call" ? "Enter the cost of one call in minor units." : "Enter the amount to pre-authorise per call, in minor units." };
+  const priceKey = (input.priceKey ?? "").trim().slice(0, 80);
+  if (input.pricing !== "per_call" && !priceKey) return { ok: false, error: input.pricing === "header" ? "Name the response header that carries the cost." : "Give the JSON path (dotted) that carries the cost." };
+  const [dup] = await db.select({ id: schema.proxyTargets.id }).from(schema.proxyTargets).where(and(eq(schema.proxyTargets.workspaceId, workspaceId), eq(schema.proxyTargets.slug, slug))).limit(1);
+  if (dup) return { ok: false, error: `A target with the slug "${slug}" already exists.` };
+  const row: ProxyTarget = { id: randomUUID(), workspaceId, name, slug, baseUrl, authHeader, authCiphertext: encrypt(authValue), authHint: authValue.slice(-4), currency, pricing: input.pricing, priceAmount: input.priceAmount, priceKey, createdBy: by.slice(0, 120), createdAt: new Date() };
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.proxyTargets).values(row);
+    await appendEvent(tx, workspaceId, "proxy.target_added", { targetId: row.id, name, slug, baseUrl, pricing: row.pricing, priceAmount: row.priceAmount, currency, by });
+  });
+  return { ok: true, target: row };
+}
+
+export async function listTargets(workspaceId: string): Promise<ProxyTarget[]> {
+  return db.select().from(schema.proxyTargets).where(eq(schema.proxyTargets.workspaceId, workspaceId)).orderBy(desc(schema.proxyTargets.createdAt));
+}
+
+export async function removeTarget(workspaceId: string, id: string, by: string) {
+  await db.transaction(async (tx) => {
+    const r = await tx.delete(schema.proxyTargets).where(and(eq(schema.proxyTargets.id, id), eq(schema.proxyTargets.workspaceId, workspaceId))).returning({ name: schema.proxyTargets.name, slug: schema.proxyTargets.slug });
+    if (!r.length) return;
+    await tx.update(schema.proxyKeys).set({ status: "revoked", revokedAt: new Date(), tokenReveal: null }).where(and(eq(schema.proxyKeys.targetId, id), eq(schema.proxyKeys.status, "active")));
+    await appendEvent(tx, workspaceId, "proxy.target_removed", { targetId: id, name: r[0].name, slug: r[0].slug, by });
+  });
+}
+
+export type ResolvedTarget = { proxyKey: typeof schema.proxyKeys.$inferSelect; mandate: Mandate; target: ProxyTarget; authValue: string };
+
+export async function resolveTargetToken(token: string, slug: string): Promise<ResolvedTarget | null> {
+  if (!token.startsWith("mpx_")) return null;
+  const [row] = await db.select({ k: schema.proxyKeys, t: schema.proxyTargets, m: schema.mandates })
+    .from(schema.proxyKeys).innerJoin(schema.proxyTargets, eq(schema.proxyTargets.id, schema.proxyKeys.targetId)).innerJoin(schema.mandates, eq(schema.mandates.id, schema.proxyKeys.mandateId))
+    .where(eq(schema.proxyKeys.tokenHash, hash(token))).limit(1);
+  if (!row || row.k.status !== "active" || row.t.slug !== slug) return null;
+  return { proxyKey: row.k, mandate: row.m, target: row.t, authValue: decrypt(row.t.authCiphertext) };
+}
+
+// Request headers that travel to a generic target: the content itself plus
+// the agent's own x- headers, never anything that identifies our host or
+// the proxy key.
+export function forwardableTargetHeader(name: string): boolean {
+  const n = name.toLowerCase();
+  if (["content-type", "accept", "user-agent", "accept-language", "if-none-match", "if-modified-since"].includes(n)) return true;
+  return n.startsWith("x-") && !n.startsWith("x-mandate") && !n.startsWith("x-forwarded") && !n.startsWith("x-vercel") && n !== "x-real-ip";
+}
+
+export async function preauthorizeTarget(r: ResolvedTarget, method: string, path: string): Promise<{ auth: AuthResult; callId: string }> {
+  const t = r.target;
+  const auth = await authorize(r.mandate, { amount: t.priceAmount, merchant: t.name, category: "api", purpose: `${method} /${path}`.slice(0, 300) }, "proxy", { actor: `proxy key ${r.proxyKey.name}` });
+  const callId = randomUUID();
+  await db.insert(schema.proxyCalls).values({
+    id: callId, workspaceId: r.mandate.workspaceId, mandateId: r.mandate.id, proxyKeyId: r.proxyKey.id, provider: `target:${t.slug}`, model: method, path,
+    transactionId: auth.transactionId, decision: auth.decision, estimatedAmount: t.priceAmount, actualAmount: null, inputTokens: null, outputTokens: null, upstreamStatus: null, streamed: 0, createdAt: new Date(), settledAt: null,
+  });
+  await db.update(schema.proxyKeys).set({ lastUsedAt: new Date() }).where(eq(schema.proxyKeys.id, r.proxyKey.id));
+  return { auth, callId };
+}
+
+// What the call actually cost, by the target's rule. Missing or unreadable
+// cost information settles at the pre-authorised amount (the safe side);
+// a cost above what was authorised is capped there and flagged.
+export function targetCost(t: ProxyTarget, upstream: { status: number; headers: Headers; body: string | null }): { amount: number; source: string } {
+  if (upstream.status < 200 || upstream.status >= 300) return { amount: 0, source: "upstream error" };
+  if (t.pricing === "header") {
+    const v = upstream.headers.get(t.priceKey);
+    const n = v != null ? Number(v) : NaN;
+    return Number.isFinite(n) && n >= 0 ? { amount: Math.round(n), source: `header ${t.priceKey}` } : { amount: t.priceAmount, source: "estimate (header missing)" };
+  }
+  if (t.pricing === "json" && upstream.body) {
+    try {
+      let v: unknown = JSON.parse(upstream.body);
+      for (const k of t.priceKey.split(".")) v = v && typeof v === "object" ? (v as Record<string, unknown>)[k] : undefined;
+      const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+      if (Number.isFinite(n) && n >= 0) return { amount: Math.round(n), source: `json ${t.priceKey}` };
+    } catch { /* fall through */ }
+    return { amount: t.priceAmount, source: "estimate (path missing)" };
+  }
+  return { amount: t.priceAmount, source: "per call" };
+}
+
+export async function settleTarget(r: ResolvedTarget, callId: string, transactionId: string, upstreamStatus: number, cost: { amount: number; source: string }) {
+  const ok = upstreamStatus >= 200 && upstreamStatus < 300;
+  const authorized = r.target.priceAmount;
+  const actual = Math.min(cost.amount, authorized);
+  const over = ok && cost.amount > authorized;
+  await db.transaction(async (tx) => {
+    await tx.update(schema.transactions).set({ amount: ok ? actual : 0, settlement: ok ? "captured" : "voided", settledAt: new Date(), settledBy: "proxy", settlementNote: !ok ? `Upstream ${upstreamStatus}; settled to zero.` : over ? `Reported ${cost.amount} (${cost.source}); capped at the ${authorized} authorised.` : `Settled by ${cost.source}.` }).where(eq(schema.transactions.id, transactionId));
+    await tx.update(schema.proxyCalls).set({ actualAmount: ok ? actual : 0, upstreamStatus, settledAt: new Date() }).where(eq(schema.proxyCalls.id, callId));
+    await appendEvent(tx, r.mandate.workspaceId, ok ? "authorization.settled" : "authorization.voided", { transactionId, callId, mandateId: r.mandate.id, provider: `target:${r.target.slug}`, model: r.target.name, estimatedAmount: authorized, actualAmount: ok ? actual : 0, reported: over ? cost.amount : undefined, currency: r.target.currency, upstreamStatus, by: "proxy" });
+  });
+  if (over) { try { await sendWarning(r.mandate.workspaceId, `"${r.target.name}" reported a call above its pre-authorisation`, `${r.mandate.name}: a call to ${r.target.name} reported ${cost.amount} ${r.target.currency} (minor units) against ${authorized} pre-authorised. It was settled at ${authorized}; raise the target's per-call amount if this is normal.`, { kind: "target_overrun", mandateId: r.mandate.id, targetId: r.target.id, reported: cost.amount, authorized }); } catch (e) { console.error("target overrun warning failed:", (e as Error).message); } }
 }
 
 export async function revealProxyKey(workspaceId: string, id: string): Promise<string | null> {
@@ -115,9 +242,10 @@ export async function revokeProxyKey(workspaceId: string, id: string, by: string
 }
 
 export async function listProxyKeys(workspaceId: string) {
-  return db.select({ k: schema.proxyKeys, mandateName: schema.mandates.name, provider: schema.providerKeys.provider, hint: schema.providerKeys.hint })
-    .from(schema.proxyKeys).innerJoin(schema.mandates, eq(schema.mandates.id, schema.proxyKeys.mandateId)).innerJoin(schema.providerKeys, eq(schema.providerKeys.id, schema.proxyKeys.providerKeyId))
+  const rows = await db.select({ k: schema.proxyKeys, mandateName: schema.mandates.name, provider: schema.providerKeys.provider, hint: schema.providerKeys.hint, targetName: schema.proxyTargets.name, targetSlug: schema.proxyTargets.slug })
+    .from(schema.proxyKeys).innerJoin(schema.mandates, eq(schema.mandates.id, schema.proxyKeys.mandateId)).leftJoin(schema.providerKeys, eq(schema.providerKeys.id, schema.proxyKeys.providerKeyId)).leftJoin(schema.proxyTargets, eq(schema.proxyTargets.id, schema.proxyKeys.targetId))
     .where(eq(schema.proxyKeys.workspaceId, workspaceId)).orderBy(desc(schema.proxyKeys.createdAt));
+  return rows.map((r) => ({ k: r.k, mandateName: r.mandateName, provider: r.provider ?? (r.targetSlug ? `target:${r.targetSlug}` : "?"), hint: r.hint ?? "", targetName: r.targetName, targetSlug: r.targetSlug }));
 }
 
 export async function recentCalls(workspaceId: string, limit = 30) {
@@ -254,6 +382,6 @@ export async function settle(r: Resolved, callId: string, transactionId: string,
   }
 }
 
-export async function recordDeclined(r: Resolved, callId: string, upstreamStatus: number) {
+export async function recordDeclined(_r: { proxyKey: { id: string } }, callId: string, upstreamStatus: number) {
   await db.update(schema.proxyCalls).set({ upstreamStatus, settledAt: new Date(), actualAmount: 0 }).where(eq(schema.proxyCalls.id, callId));
 }

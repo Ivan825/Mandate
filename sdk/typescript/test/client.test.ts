@@ -11,7 +11,9 @@ const srv = createServer((req, res) => {
     const body = raw ? JSON.parse(raw) : {};
     calls.push({ method: req.method!, path: req.url!, body, headers: req.headers });
     const send = (status: number, b: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(b)); };
-    if (req.headers.authorization !== "Bearer mnd_test") return send(401, { error: "Unknown mandate token." });
+    if (req.headers.authorization !== "Bearer mnd_test" && req.headers.authorization !== "Bearer mnd_child") return send(401, { error: "Unknown mandate token." });
+    if (req.method === "GET" && req.url?.endsWith("/voucher")) return send(200, { voucher: "mv1.abc.def", payload: { tx: "t3", amount: 100 }, expiresAt: "2026-01-02T00:00:00Z" });
+    if (req.url === "/api/agent/delegate") return body.perTxnLimit > 5000 ? send(400, { error: "The sub-mandate does not fit inside this mandate.", errors: [{ field: "perTxnLimit", message: "too big" }] }) : send(201, { mandateId: "c1", parentId: "m1", token: "mnd_child", name: body.name, limits: { perTransaction: body.perTxnLimit } });
     if (req.method === "GET" && req.url === "/api/agent/mandate") return send(200, { mandate: "M", remaining: { today: 5000 } });
     if (req.url === "/api/agent/authorize") {
       if (body.amount > 5000) return send(403, { decision: "declined", rule: "per_txn", reason: "too big", transactionId: "t1", remedy: { message: "Split it.", maxAmountNow: 5000 } });
@@ -72,8 +74,21 @@ test("plans propose and poll", async () => {
   assert.equal(p.status, "approved");
 });
 
+test("vouchers and delegation", async () => {
+  const v = await m.voucher("t3");
+  assert.ok(v.voucher.startsWith("mv1."));
+  assert.equal(m.sandbox, false);
+  assert.equal(new Mandate("mnd_test_x", { baseUrl: base }).sandbox, true);
+  const child = await m.delegate({ name: "helper", perTxnLimit: 500, dailyLimit: 2000, totalLimit: 5000, allowedMerchants: ["OpenAI"], agentName: "helper-1" });
+  assert.equal(child.token, "mnd_child");
+  assert.equal(calls.at(-1)!.body.agentName, "helper-1");
+  assert.equal((await child.client.authorize({ amount: 100, merchant: "OpenAI" })).decision, "approved");
+  await assert.rejects(m.delegate({ name: "big", perTxnLimit: 9000, dailyLimit: 9000, totalLimit: 9000 }));
+  assert.equal(((await dispatch(m, "get_voucher", { transaction_id: "t3" })) as { voucher: string }).voucher, "mv1.abc.def");
+});
+
 test("openai tools dispatch", async () => {
-  assert.deepEqual(openaiTools().map((t) => t.function.name), ["check_mandate", "request_purchase", "capture_purchase", "propose_plan", "get_plan", "void_purchase"]);
+  assert.deepEqual(openaiTools().map((t) => t.function.name), ["check_mandate", "request_purchase", "capture_purchase", "propose_plan", "get_plan", "void_purchase", "get_voucher", "delegate"]);
   const r = (await dispatch(m, "request_purchase", JSON.stringify({ amount: 100, merchant: "OpenAI" }))) as { decision: string };
   assert.equal(r.decision, "approved");
   srv.close();

@@ -70,6 +70,16 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "description": "Nothing was paid: release the approved hold back to the limits.",
         "parameters": {"type": "object", "properties": {"transaction_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["transaction_id"], "additionalProperties": False},
     },
+    {
+        "name": "get_voucher",
+        "description": "The signed authorisation voucher for an approved hold, to hand to the merchant; they verify it offline and redeem it for what was actually sold.",
+        "parameters": {"type": "object", "properties": {"transaction_id": {"type": "string"}}, "required": ["transaction_id"], "additionalProperties": False},
+    },
+    {
+        "name": "delegate",
+        "description": "Carve a narrower sub-mandate out of yours for a helper: limits at or below yours (minor units), merchants within your list. Returns the helper's token once; its spend counts against your limits.",
+        "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "per_txn_limit": {"type": "integer"}, "daily_limit": {"type": "integer"}, "total_limit": {"type": "integer"}, "allowed_merchants": {"type": "array", "items": {"type": "string"}}, "agent_name": {"type": "string"}}, "required": ["name", "per_txn_limit", "daily_limit", "total_limit"], "additionalProperties": False},
+    },
 ]
 
 
@@ -94,6 +104,11 @@ def dispatch(m: Mandate, name: str, arguments: Any) -> Dict[str, Any]:
         return m.propose_plan(str(args["title"]), list(args["items"]))
     if name == "get_plan":
         return m.get_plan(str(args["plan_id"]))
+    if name == "get_voucher":
+        return m.voucher(str(args["transaction_id"]))
+    if name == "delegate":
+        child = m.delegate(str(args["name"]), int(args["per_txn_limit"]), int(args["daily_limit"]), int(args["total_limit"]), allowed_merchants=args.get("allowed_merchants"), agent_name=args.get("agent_name"))
+        return getattr(child, "info", {"token": child.token})
     raise ValueError(f"Unknown tool {name}")
 
 

@@ -71,6 +71,13 @@
       "when": 1790285146182,
       "tag": "0009_phase3_veto_plans_shadow_autonomy_signed",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790332860041,
+      "tag": "0010_phase4_panic_cosign_disputes_routing_delegation_anchors_sandbox_targets",
+      "breakpoints": true
     }
   ]
 }

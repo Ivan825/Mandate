@@ -22,6 +22,7 @@ const upstream = http.createServer(async (req, res) => {
   let body = ""; for await (const c of req) body += c;
   const auth = String(req.headers["authorization"] ?? req.headers["x-api-key"] ?? req.headers["x-goog-api-key"] ?? "");
   if (!auth.includes("REAL")) { res.writeHead(401, { "content-type": "application/json" }); return res.end(JSON.stringify({ error: { message: "bad key" } })); }
+  if (req.url.startsWith("/t/")) { res.writeHead(200, { "content-type": "application/json", "x-cost-cents": "7" }); return res.end(JSON.stringify({ ok: true, path: req.url, method: req.method })); }
   let j = {}; try { j = JSON.parse(body); } catch {}
   if (j.stream) {
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -43,7 +44,7 @@ const upstream = http.createServer(async (req, res) => {
 // ---- app server, stdout captured for sign-in links ----
 let out = "";
 const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: {
-  ...process.env, ALLOW_SEED: "1", APP_URL: BASE, PROXY_UPSTREAM_OPENAI: `http://localhost:${UP}/openai`,
+  ...process.env, ALLOW_SEED: "1", APP_URL: BASE, PROXY_UPSTREAM_OPENAI: `http://localhost:${UP}/openai`, PROXY_TARGET_ALLOW_PRIVATE: "1", CRON_SECRET: "e2e-cron-secret-0123456789",
   // `next start` is production mode, so the same keys a deployment needs
   // (BETTER_AUTH_SECRET and NOTIFY_SECRET come from .env or the CI env).
   MANDATE_ENCRYPTION_KEY: process.env.MANDATE_ENCRYPTION_KEY ?? Buffer.alloc(32, 7).toString("base64"),
@@ -64,6 +65,7 @@ try {
   const b = await chromium.launch({ executablePath: process.env.PW_CHROMIUM });
   const ctx = await b.newContext();
   const p = await ctx.newPage();
+  const ctx2Free = await b.newContext(); // anonymous: public pages must work without a session
 
   // 1. landing + sign-in by email link
   await p.goto(BASE + "/", { waitUntil: "networkidle" });
@@ -74,6 +76,7 @@ try {
   await p.waitForSelector(".notice.ok"); await new Promise((r) => setTimeout(r, 800));
   const link = lastLink(new RegExp(`${BASE}/api/auth/magic-link/verify\\?[^\\s]+`, "g"));
   check("sign-in link printed", Boolean(link));
+  if (!link) throw new Error("no sign-in link in server output:\n" + out.slice(-3000));
   await p.goto(link, { waitUntil: "networkidle" });
   check("signed in to onboarding", (await p.locator(".steps li").count()) === 4);
 
@@ -253,6 +256,125 @@ try {
   await p.goto(BASE + "/p/" + plan.planId + "?d=approve&t=bad", { waitUntil: "networkidle" });
   check("plan one-tap page renders and rejects a bad token", (await p.locator("h1").textContent())?.includes("E2E shopping list") && (await p.locator(".notice", { hasText: "already approved" }).count()) === 1);
 
+  // 2d‴. Phase 4: panic button, sandbox, co-signing, delegation, vouchers, disputes, routing, anchors, generic proxy targets
+  // Panic button: two clicks freeze every rail; the agent is told; unfreeze restores.
+  await p.goto(BASE + "/", { waitUntil: "networkidle" });
+  await p.locator("details.panic > summary").click();
+  await p.fill("#panic-reason", "e2e drill");
+  await p.locator("details.panic button[type=submit]").click();
+  await p.waitForSelector(".notice.frozen", { timeout: 20000 });
+  check("frozen banner names who and why", (await p.locator(".notice.frozen").count()) === 1 && (await p.locator(".notice.frozen").textContent())?.includes("e2e drill"));
+  const frozenTry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: vHdr, body: JSON.stringify({ amount: 100, merchant: "OpenAI" }) }).then((r) => r.json());
+  check("frozen workspace declines with rule frozen on the API", frozenTry.decision === "declined" && frozenTry.rule === "frozen" && frozenTry.remedy?.approvalRequired === true, JSON.stringify({ d: frozenTry.decision, r: frozenTry.rule }));
+  await p.locator(".notice.frozen button", { hasText: "Unfreeze" }).click();
+  await p.waitForSelector(".notice.frozen", { state: "detached", timeout: 20000 });
+  check("unfreeze restores spending", (await p.locator(".notice.frozen").count()) === 0 && (await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: vHdr, body: JSON.stringify({ amount: 100, merchant: "OpenAI" }) }).then((r) => r.json())).decision === "approved");
+  // Sandbox mandate from the form.
+  await p.goto(BASE + "/mandates/new?template=llm-dev", { waitUntil: "networkidle" });
+  await p.fill("#name", "Sandbox test"); await p.check("input[name=sandbox]");
+  await Promise.all([p.waitForURL(/\/mandates\/[0-9a-f-]+\?new=1/), p.locator("form.form button.accent[type=submit]").click()]);
+  const sbToken = (await p.locator(".token").textContent())?.trim();
+  check("sandbox mandate issues a mnd_test_ token and shows the badge", Boolean(sbToken?.startsWith("mnd_test_")) && (await p.locator(".pill.sandbox").count()) >= 1 && (await p.locator("button", { hasText: "Reset sandbox" }).count()) === 1);
+  const sbTry = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: { authorization: "Bearer " + sbToken, "content-type": "application/json" }, body: JSON.stringify({ amount: 100, merchant: "OpenAI" }) }).then((r) => r.json());
+  check("sandbox token authorises like a live one", sbTry.decision === "approved");
+  // Co-signing: a mandate whose biggest asks need two approvers (finished in section 3, once the partner has joined).
+  await p.goto(BASE + "/mandates/new?template=llm-dev", { waitUntil: "networkidle" });
+  await p.fill("#name", "Cosign test"); await p.fill("#perTxnLimit", "100"); await p.fill("#dailyLimit", "300"); await p.fill("#totalLimit", "900"); await p.fill("#approvalAbove", "40"); await p.fill("#vetoAbove", ""); await p.fill("#allowedMerchants", "");
+  await p.check("input[name=cosignOn]"); await p.fill("#cosignAbove", "60"); await p.fill("#cosignCount", "2");
+  await Promise.all([p.waitForURL(/\/mandates\/[0-9a-f-]+\?new=1/), p.locator("form.form button.accent[type=submit]").click()]);
+  const csToken = (await p.locator(".token").textContent())?.trim();
+  const csHdr = { authorization: "Bearer " + csToken, "content-type": "application/json" };
+  check("co-sign mandate shows its terms", (await p.locator("dd", { hasText: "2 distinct approvers" }).count()) === 1);
+  const csAsk = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: csHdr, body: JSON.stringify({ amount: 7000, merchant: "OpenAI", purpose: "cosign me" }) }).then((r) => r.json());
+  check("big ask needs two approvers", csAsk.decision === "pending" && /2 approvers/.test(csAsk.reason), csAsk.reason);
+  await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  const csCard = p.locator(".approval", { hasText: "cosign me" });
+  check("inbox shows the co-sign progress", (await csCard.locator(".cosign i").count()) === 2 && (await csCard.getByRole("button", { name: "Co-sign", exact: true }).count()) === 1);
+  await csCard.getByRole("button", { name: "Co-sign", exact: true }).click();
+  await p.waitForSelector("text=you have signed", { timeout: 20000 });
+  const csHalf = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: csHdr, body: JSON.stringify({ amount: 7000, merchant: "OpenAI", purpose: "cosign me" }) }).then((r) => r.json());
+  check("one signature is not yet an allowance; the signer sees they have signed", csHalf.decision === "pending" && (await p.locator(".approval", { hasText: "you have signed" }).count()) === 1 && (await p.locator(".approval", { hasText: "cosign me" }).getByRole("button", { name: "Co-sign", exact: true }).count()) === 0);
+  // Delegation over REST: the veto mandate carves a helper out of itself.
+  const badChild = await fetch(BASE + "/api/agent/delegate", { method: "POST", headers: vHdr, body: JSON.stringify({ name: "too big", perTxnLimit: 999999, dailyLimit: 1000, totalLimit: 2000 }) });
+  check("a sub-mandate outside the parent's terms is refused with field errors", badChild.status === 400 && Array.isArray((await badChild.json()).errors));
+  const childRes = await fetch(BASE + "/api/agent/delegate", { method: "POST", headers: vHdr, body: JSON.stringify({ name: "Price checker", perTxnLimit: 500, dailyLimit: 1000, totalLimit: 2000, approvalAbove: 300, allowedMerchants: ["OpenAI"], agentName: "helper-1" }) });
+  const child = await childRes.json();
+  check("sub-mandate delegated with a token", childRes.status === 201 && child.token?.startsWith("mnd_") && child.parentId === vetoMandateId, JSON.stringify(child).slice(0, 200));
+  const cHdr = { authorization: "Bearer " + child.token, "content-type": "application/json" };
+  const childOk = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: cHdr, body: JSON.stringify({ amount: 200, merchant: "OpenAI", purpose: "helper buy" }) }).then((r) => r.json());
+  const childNo = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: cHdr, body: JSON.stringify({ amount: 200, merchant: "Namecheap" }) }).then((r) => r.json());
+  check("helper spends inside its narrower scope", childOk.decision === "approved" && childNo.rule === "merchant", `${childOk.decision} ${childNo.rule}`);
+  const childInfo = await fetch(BASE + "/api/agent/mandate", { headers: cHdr }).then((r) => r.json());
+  const parentInfo = await fetch(BASE + "/api/agent/mandate", { headers: vHdr }).then((r) => r.json());
+  check("both sides see the delegation", childInfo.parentId === vetoMandateId && parentInfo.subMandates?.some((c) => c.mandateId === child.mandateId));
+  await p.goto(BASE + "/mandates/" + vetoMandateId, { waitUntil: "networkidle" });
+  check("mandate page lists sub-mandates", (await p.locator("h2", { hasText: "Sub-mandates" }).count()) === 1 && (await p.locator("table a", { hasText: "Price checker" }).count()) === 1);
+  // Vouchers: the approval carries one; the merchant verifies and redeems it without an account.
+  check("approved hold carries a signed voucher", typeof childOk.voucher === "string" && childOk.voucher.startsWith("mv1."));
+  const vv = await fetch(BASE + "/api/vouchers/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voucher: childOk.voucher }) }).then((r) => r.json());
+  check("voucher verifies and is redeemable", vv.valid === true && vv.redeemable === true && vv.voucher?.amount === 200, JSON.stringify(vv).slice(0, 200));
+  const [vt, vp, vs] = childOk.voucher.split(".");
+  const vTampered = `${vt}.${Buffer.from(Buffer.from(vp, "base64url").toString().replace('"amount":200', '"amount":900')).toString("base64url")}.${vs}`;
+  check("tampered voucher is rejected", (await fetch(BASE + "/api/vouchers/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voucher: vTampered }) }).then((r) => r.json())).valid === false);
+  const redeemed = await fetch(BASE + "/api/vouchers/redeem", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voucher: childOk.voucher, amount: 180, merchant: "OpenAI", reference: "INV-42" }) });
+  const redeemedBody = await redeemed.json();
+  check("merchant redeems the voucher for less; the rest goes back", redeemed.status === 200 && redeemedBody.settlement === "captured" && redeemedBody.capturedAmount === 180 && redeemedBody.released === 20, JSON.stringify(redeemedBody).slice(0, 200));
+  check("a voucher redeems once", (await fetch(BASE + "/api/vouchers/redeem", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voucher: childOk.voucher, merchant: "OpenAI" }) })).status === 409);
+  const vAgent = await fetch(BASE + `/api/agent/transactions/${childOk.transactionId}/voucher`, { headers: cHdr });
+  check("re-issuing a voucher for a settled hold is refused", vAgent.status === 409);
+  // Disputes: from the helper's mandate page, dispute the captured purchase, settle it from the inbox.
+  await p.goto(BASE + "/mandates/" + child.mandateId, { waitUntil: "networkidle" });
+  const txRow = p.locator(`#tx-${childOk.transactionId}`);
+  await txRow.locator("summary", { hasText: "Dispute" }).click();
+  await txRow.locator("input[name=reason]").fill("helper bought the wrong thing");
+  await Promise.all([p.waitForURL(/disputed=1/), txRow.locator("button", { hasText: "Open dispute" }).click()]);
+  await p.waitForLoadState("networkidle");
+  check("dispute opened and shown on the decision", (await p.locator(`#tx-${childOk.transactionId} .pill.disputed`).count()) === 1 && (await p.locator("h2", { hasText: "Disputes" }).count()) === 1);
+  await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  const dCard = p.locator(".approval", { hasText: "helper bought the wrong thing" });
+  check("inbox lists the dispute", (await dCard.count()) === 1);
+  await dCard.getByRole("button", { name: "Refunded" }).click();
+  await p.waitForSelector(".approval:has-text('helper bought the wrong thing')", { state: "detached", timeout: 20000 });
+  const afterRefund = await fetch(BASE + "/api/agent/mandate", { headers: cHdr }).then((r) => r.json());
+  check("refunded dispute nets the helper's spend back to zero", (await p.locator(".approval", { hasText: "helper bought the wrong thing" }).count()) === 0 && afterRefund.remaining?.total === 2000, JSON.stringify(afterRefund.remaining));
+  // Routing: a route to the owner for big amounts.
+  await p.goto(BASE + "/settings/routing", { waitUntil: "networkidle" });
+  check("routing page renders", (await p.locator("h1").textContent())?.includes("Who is asked"));
+  await p.fill("#name", "Big spends → me"); await p.fill("#minAmount", "40"); await p.locator("input[name=userIds]").first().check();
+  await Promise.all([p.waitForURL(/added=1/), p.locator("form.card button[type=submit]").click()]);
+  await p.waitForSelector("table td strong", { timeout: 20000 });
+  check("route added and listed", (await p.locator("table td strong", { hasText: "Big spends → me" }).count()) === 1);
+  const routedAsk = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: csHdr, body: JSON.stringify({ amount: 5000, merchant: "GitHub", purpose: "routed ask" }) }).then((r) => r.json());
+  await p.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  check("routed request is marked as yours in the inbox", routedAsk.decision === "pending" && (await p.locator(".approval.mine", { hasText: "routed ask" }).count()) === 1);
+  // Anchors: the daily job signs every moved ledger head into the public chain.
+  const cron = await fetch(BASE + "/api/cron/cleanup", { headers: { authorization: "Bearer e2e-cron-secret-0123456789" } }).then((r) => r.json());
+  check("cron anchors ledgers", cron.ok === true && cron.deleted?.ledgers_anchored >= 1, JSON.stringify(cron.deleted));
+  const anchorsRes = await fetch(BASE + "/api/ledger/anchors?verify=1");
+  const anchors = await anchorsRes.json();
+  check("public anchor list is signed and verifies", Array.isArray(anchors.anchors) && anchors.anchors.length >= 1 && anchors.verification?.ok === true && typeof anchors.publicKeyPem === "string", `${anchorsRes.status} ${JSON.stringify(anchors).slice(0, 300)}`);
+  const pubA = await ctx2Free.newPage();
+  await pubA.goto(BASE + "/anchors", { waitUntil: "networkidle" });
+  check("anchors page is public and intact", (await pubA.locator(".notice.ok", { hasText: "Anchor chain intact" }).count()) === 1 && (await pubA.locator("table tbody tr").count()) >= 1, (await pubA.locator("h1").textContent()) + " | " + (await pubA.locator(".notice").first().textContent()));
+  await pubA.close();
+  await p.goto(BASE + "/ledger", { waitUntil: "networkidle" });
+  check("ledger page shows the anchor", (await p.locator("text=Anchored publicly").count()) === 1);
+  // Generic proxy target: any API becomes a governed merchant.
+  await p.goto(BASE + "/proxy", { waitUntil: "networkidle" });
+  await p.fill("#t-name", "Search API"); await p.fill("#t-slug", "search"); await p.fill("#t-base", `http://localhost:${UP}/t`); await p.fill("#t-value", "Bearer REAL-target-key"); await p.selectOption("#t-pricing", "header"); await p.fill("#t-amount", "0.10"); await p.fill("#t-key", "x-cost-cents");
+  await Promise.all([p.waitForURL(/added=target/), p.locator("form.form button", { hasText: "Add target" }).click()]);
+  await p.waitForSelector("table.mini strong", { timeout: 20000 });
+  check("custom target added", (await p.locator("table.mini strong", { hasText: "Search API" }).count()) === 1);
+  await p.fill("#name", "scraper"); await p.selectOption("#mandateId", vetoMandateId); await p.selectOption("#providerKeyId", { label: "Target: Search API (USD)" });
+  await Promise.all([p.waitForURL(/reveal=/), p.locator("form.form button.accent[type=submit]").click()]);
+  const tKey = (await p.locator(".token").textContent())?.trim();
+  const tCall = await fetch(BASE + "/api/proxy/t/search/lookup?q=mandate", { headers: { authorization: "Bearer " + tKey } });
+  const tBody = await tCall.json();
+  check("generic proxy forwards with the injected credential and settles from the cost header", tCall.status === 200 && tBody.ok === true && tBody.path === "/t/lookup?q=mandate" && tCall.headers.get("x-mandate-settled") === "7" && Boolean(tCall.headers.get("x-mandate-transaction")), `${tCall.status} ${JSON.stringify(tBody)} settled=${tCall.headers.get("x-mandate-settled")}`);
+  check("generic proxy refuses a key bound to another target", (await fetch(BASE + "/api/proxy/t/other/x", { headers: { authorization: "Bearer " + tKey } })).status === 401);
+  const settledTx = await fetch(BASE + `/api/agent/transactions/${tCall.headers.get("x-mandate-transaction")}`, { headers: vHdr }).then((r) => r.json());
+  check("the ledger recorded the call as a captured purchase at the target", settledTx.settlement === "captured" && settledTx.capturedAmount === 7 && settledTx.merchant === "Search API", JSON.stringify(settledTx).slice(0, 160));
+
   // 2e. event webhooks: settings page, private target refused
   await p.goto(BASE + "/settings/webhooks", { waitUntil: "networkidle" });
   check("event webhooks page renders", (await p.locator("h1").textContent())?.includes("pushed to your own systems"));
@@ -278,6 +400,14 @@ try {
   check("approver cannot see Issue mandate", (await p2.locator("a.btn.accent", { hasText: "Issue mandate" }).count()) === 0);
   await p2.goto(BASE + "/mandates/new", { waitUntil: "networkidle" });
   check("approver is turned away from /mandates/new with a reason", p2.url().includes("error="), p2.url());
+  // The partner supplies the second signature; the agent's retry is then an allowance.
+  await p2.goto(BASE + "/approvals", { waitUntil: "networkidle" });
+  const p2Card = p2.locator(".approval", { hasText: "cosign me" });
+  check("partner sees the half-signed request with one signature in", (await p2Card.count()) === 1 && (await p2Card.locator(".cosign i.on").count()) === 1);
+  await p2Card.getByRole("button", { name: "Co-sign", exact: true }).click();
+  await p2.waitForSelector(".approval:has-text('cosign me')", { state: "detached", timeout: 20000 });
+  const csDone = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: csHdr, body: JSON.stringify({ amount: 7000, merchant: "OpenAI", purpose: "cosign me" }) }).then((r) => r.json());
+  check("two signatures make the allowance", csDone.decision === "approved" && csDone.rule === "allowance", `${csDone.decision} ${csDone.rule}`);
   // Webhook targets must be public: a private address is refused.
   await p2.goto(BASE + "/settings", { waitUntil: "networkidle" });
   await p2.selectOption("select[name=type]", "webhook"); await p2.fill("input[name=target]", "http://169.254.169.254/latest/meta-data");
@@ -370,7 +500,7 @@ try {
   check("mcp tools listed", list.includes("request_purchase"));
   const lm = await mcp({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_mandates", arguments: {} } });
   const inner = JSON.parse(JSON.parse((lm.split("\n").find((l) => l.startsWith("data:")) ?? lm).replace(/^data:\s*/, "")).result.content[0].text);
-  const usd = inner.mandates.find((m) => m.currency === "USD");
+  const usd = inner.mandates.find((m) => m.currency === "USD" && /Dev tooling/.test(m.name));
   const rp = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "request_purchase", arguments: { mandateId: usd.mandateId, amount: 150, merchant: "GitHub", purpose: "e2e" } } });
   check("mcp purchase approved", rp.includes('\\"decision\\": \\"approved\\"'));
 

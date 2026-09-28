@@ -1,19 +1,23 @@
 import Link from "next/link";
 import { requireCtx, can } from "@/lib/session";
-import { listApprovals, listPlans, planView } from "@/lib/service";
+import { listApprovals, listPlans, planView, listDisputes, parseSignoffs } from "@/lib/service";
+import { listRoutes, parseUserIds } from "@/lib/routing";
 import { fmt } from "@/lib/policy";
 import { Pill, When, Flags } from "@/app/components";
-import { decideApprovalAction, decidePlanAction } from "@/app/actions";
+import { decideApprovalAction, decidePlanAction, resolveDisputeAction } from "@/app/actions";
 import { SignedDecision } from "./sign";
 
-export default async function ApprovalsPage() {
+export default async function ApprovalsPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const ctx = await requireCtx();
-  const [all, plans, mayDecide] = await Promise.all([listApprovals(ctx.workspaceId), listPlans(ctx.workspaceId, { status: "proposed" }), can({ approval: ["decide"] })]);
+  const { error } = await searchParams;
+  const [all, plans, mayDecide, disputes, routes] = await Promise.all([listApprovals(ctx.workspaceId), listPlans(ctx.workspaceId, { status: "proposed" }), can({ approval: ["decide"] }), listDisputes(ctx.workspaceId, { status: "open" }), listRoutes(ctx.workspaceId)]);
+  const routeName = (id: string | null) => routes.find((r) => r.id === id)?.name ?? null;
+  const routedToMe = (id: string | null) => { const r = routes.find((x) => x.id === id); return r ? parseUserIds(r.userIds).includes(ctx.userId) : false; };
   const pending = all.filter((r) => r.a.status === "pending");
   const asks = pending.filter((r) => r.a.kind !== "veto");
   const vetoes = pending.filter((r) => r.a.kind === "veto");
   const history = all.filter((r) => r.a.status !== "pending").slice(0, 30);
-  const waiting = asks.length + vetoes.length + plans.length;
+  const waiting = asks.length + vetoes.length + plans.length + disputes.length;
 
   return (
     <>
@@ -21,9 +25,10 @@ export default async function ApprovalsPage() {
         <div>
           <div className="eyebrow">Approval inbox</div>
           <h1>{waiting === 0 ? "Nothing waiting on you" : `${waiting} thing${waiting === 1 ? "" : "s"} waiting on you`}</h1>
-          <p className="muted">Requests above an agent's threshold, plans it wants approved up front, and purchases in a veto window that go through unless you cancel. Approving a request grants a one-time allowance for that exact amount at that merchant, valid 24 hours; denying blocks the same ask for 6 hours.</p>
+          <p className="muted">Requests above an agent's threshold, plans it wants approved up front, purchases in a veto window that go through unless you cancel, and disputes to settle. Approving a request grants a one-time allowance for that exact amount at that merchant, valid 24 hours; denying blocks the same ask for 6 hours.</p>
         </div>
       </div>
+      {error && <div className="notice bad" style={{ marginBottom: 20 }}>{error}</div>}
 
       {vetoes.length > 0 && (
         <>
@@ -77,27 +82,57 @@ export default async function ApprovalsPage() {
 
       {(asks.length > 0 || waiting === 0) && <h2 style={{ marginBottom: 8 }}>Requests</h2>}
       <div className="stack" style={{ marginBottom: 36 }}>
-        {asks.map(({ a, agentName, mandateName }) => (
-          <div className="card approval" key={a.id}>
+        {asks.map(({ a, agentName, mandateName }) => { const signoffs = parseSignoffs(a.signoffs); const mine = signoffs.some((x) => x.by.toLowerCase() === ctx.email.toLowerCase()); const rn = routeName(a.routeId); return (
+          <div className={`card approval${routedToMe(a.routeId) ? " mine" : ""}`} key={a.id}>
             <div>
-              <div className="amt num">{fmt(a.amount, a.currency)} <span className="muted" style={{ fontFamily: "var(--sans)", fontSize: 15, fontWeight: 400 }}>at {a.merchant}</span></div>
-              <div className="meta"><strong>{agentName}</strong> · <Link href={`/mandates/${a.mandateId}`}>{mandateName}</Link> · asked <When d={a.requestedAt} /></div>
+              <div className="amt num">{fmt(a.amount, a.currency)} <span className="muted" style={{ fontFamily: "var(--sans)", fontSize: 15, fontWeight: 400 }}>at {a.merchant}</span>{a.requiredApprovers > 1 && <span className="cosign" title={`${signoffs.length} of ${a.requiredApprovers} signatures`}>{Array.from({ length: a.requiredApprovers }, (_, i) => <i key={i} className={i < signoffs.length ? "on" : ""} />)}</span>}</div>
+              <div className="meta"><strong>{agentName}</strong> · <Link href={`/mandates/${a.mandateId}`}>{mandateName}</Link> · asked <When d={a.requestedAt} />{rn && <> · routed to <strong>{rn}</strong>{routedToMe(a.routeId) && " (you)"}</>}</div>
               {a.purpose && <div className="meta">“{a.purpose}”</div>}
+              {a.requiredApprovers > 1 && <div className="meta">Needs <strong>{a.requiredApprovers} approvers</strong> · {signoffs.length ? `signed by ${signoffs.map((x) => x.by).join(", ")}` : "no signatures yet"}{mine && " — you have signed; waiting for the others"}</div>}
               <Flags json={a.flags} />
             </div>
             {mayDecide ? (
               <div className="actions" style={{ alignItems: "flex-start" }}>
-                <SignedDecision approvalId={a.id} decision="approve" label="Approve once · signed" className="btn ok" />
+                {!mine && <SignedDecision approvalId={a.id} decision="approve" label={a.requiredApprovers > 1 ? "Co-sign · signed" : "Approve once · signed"} className="btn ok" />}
                 <form action={decideApprovalAction} className="actions">
                   <input type="hidden" name="approvalId" value={a.id} />
-                  <button className="btn secondary" name="decision" value="approve" type="submit" title="Approve without a passkey signature">Approve once</button>
+                  {!mine && <button className="btn secondary" name="decision" value="approve" type="submit" title="Approve without a passkey signature">{a.requiredApprovers > 1 ? "Co-sign" : "Approve once"}</button>}
                   <button className="btn danger" name="decision" value="deny" type="submit">Deny</button>
                 </form>
               </div>
             ) : <span className="faint">Waiting for an approver</span>}
           </div>
-        ))}
+        ); })}
       </div>
+
+      {disputes.length > 0 && (
+        <>
+          <h2 style={{ marginBottom: 8 }}>Disputes to settle</h2>
+          <div className="stack" style={{ marginBottom: 28 }}>
+            {disputes.map(({ d, agentName, mandateName }) => (
+              <div className="card approval" key={d.id} style={{ alignItems: "flex-start" }}>
+                <div>
+                  <div className="amt num">{fmt(d.amount, d.currency)} <span className="muted" style={{ fontFamily: "var(--sans)", fontSize: 15, fontWeight: 400 }}>at {d.merchant}</span> <Pill v="disputed" /></div>
+                  <div className="meta"><strong>{agentName}</strong> · <Link href={`/mandates/${d.mandateId}#tx-${d.transactionId}`}>{mandateName}</Link> · opened <When d={d.openedAt} /> by {d.openedBy}</div>
+                  {d.reason && <div className="meta">“{d.reason}”</div>}
+                  <div className="faint" style={{ fontSize: 12.5, marginTop: 4 }}>Refunded posts a negative entry so the mandate's limits net down; upheld keeps the charge; withdraw closes it without effect.</div>
+                </div>
+                {mayDecide ? (
+                  <form action={resolveDisputeAction} className="form" style={{ gap: 6, minWidth: 220 }}>
+                    <input type="hidden" name="disputeId" value={d.id} /><input type="hidden" name="back" value="/approvals" />
+                    <input name="note" placeholder="note (optional)" aria-label="Resolution note" />
+                    <div className="actions" style={{ gap: 6 }}>
+                      <button className="btn ok sm" type="submit" name="outcome" value="refunded">Refunded</button>
+                      <button className="btn secondary sm" type="submit" name="outcome" value="upheld">Upheld</button>
+                      <button className="btn secondary sm" type="submit" name="outcome" value="withdrawn">Withdraw</button>
+                    </div>
+                  </form>
+                ) : <span className="faint">Waiting for an approver</span>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <h2 style={{ marginBottom: 10 }}>Decided</h2>
       <div className="tbl">
@@ -106,7 +141,7 @@ export default async function ApprovalsPage() {
           <tbody>
             {history.length === 0 && <tr><td colSpan={7} className="empty">No decisions yet.</td></tr>}
             {history.map(({ a, agentName }) => (
-              <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{agentName}</td><td>{a.merchant}{a.kind === "veto" && <span className="faint"> · veto</span>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td><td className="faint" style={{ fontSize: 12.5 }}>{a.decidedBy === "silence" ? "no objection" : a.decidedBy ?? ""}{a.signedWith && <span className="pill ok" style={{ marginLeft: 6 }} title={`Passkey ${a.signedWith.slice(0, 8)}…`}>signed</span>}</td></tr>
+              <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{agentName}</td><td>{a.merchant}{a.kind === "veto" && <span className="faint"> · veto</span>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} /></td><td><When d={a.decidedAt} /></td><td className="faint" style={{ fontSize: 12.5 }}>{a.decidedBy === "silence" ? "no objection" : a.decidedBy ?? ""}{a.requiredApprovers > 1 && <span className="pill" style={{ marginLeft: 6 }} title="Co-signed">{a.requiredApprovers}-of-{a.requiredApprovers}</span>}{a.signedWith && <span className="pill ok" style={{ marginLeft: 6 }} title={`Passkey ${a.signedWith.slice(0, 8)}…`}>signed</span>}</td></tr>
             ))}
           </tbody>
         </table>

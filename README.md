@@ -98,6 +98,15 @@ curl -X POST https://mandate-ashen.vercel.app/api/agent/capture \
 - **Policy time-travel.** Change the terms and replay the mandate's real history through the real engine to see which past decisions would have gone the other way.
 - **Graduated autonomy.** A mandate that earns its limits: every N clean decisions the per-transaction limit and the ask-me-above threshold step up toward a ceiling; a denial steps them back.
 - **Human-signed approvals.** Approve with your passkey and the receipt carries a WebAuthn signature over the exact decision — proof a person on a registered device decided, not a script with a cookie.
+- **A panic button.** Two clicks freeze every agent in the workspace on every rail — cards, API, MCP, proxy — without revoking anything; lift it and everything is exactly as it was.
+- **Authorisation vouchers.** An approval comes with a signed, offline-verifiable voucher the agent hands to the merchant, who checks it with a public key and redeems it for what was actually sold — a payment authorisation with no card network in the loop.
+- **Co-signing.** Above a threshold an approval needs two (or up to five) distinct people; one denial ends it; the receipt shows who signed.
+- **Approval routing.** "Above $500 → finance", "category travel → ops", "this mandate → its sponsor": the first matching route decides who is notified and whose inbox owns the request.
+- **Sub-mandates.** An agent carves a narrower mandate out of its own for a helper — limits within its own, merchants within its list, no later expiry; the helper's spend counts against the parent and dies with it. Three levels deep.
+- **Disputes.** Contest any decision from its row: the mandate can pause, approvers settle it as refunded (the limits net down), upheld or withdrawn, and every step is on the ledger.
+- **Public ledger anchoring.** Once a day every ledger head that moved is signed into a public, deployment-wide anchor chain at `/anchors`, so not even the operator can rewrite history unnoticed; receipts point at the anchor that covers them.
+- **Sandbox mandates.** `mnd_test_` tokens that decide, ask and record exactly like live ones, never touch a card or a real API, stay out of your totals and reset in one click.
+- **Govern any API.** Add any HTTP API as a proxy target — a scraping service, a data vendor, your own internal service — with its credential stored encrypted and a price per call (fixed, from a header, or from the JSON): every call is a governed purchase.
 - **Pause and temporary raises.** Freeze an agent for an hour or until you say so without killing its token; lift one limit for a window ("$150 today only") without editing the issued terms.
 - **Anomaly flags.** Unusual amount, first-time merchant, decline bursts and rapid repeats are flagged on the request itself — in the inbox, the feed, the email and the webhook.
 - **Approvals that agents can wait for.** Requests above the threshold park as *pending*; you approve once from email, a webhook (n8n, Zapier, Make, your own endpoint) or the inbox; the agent retries with the same idempotency key and goes through exactly once.
@@ -107,7 +116,7 @@ curl -X POST https://mandate-ashen.vercel.app/api/agent/capture \
 - **Event webhooks.** Every ledger event, pushed as signed JSON to your own endpoints with retries and ordering — build the Slack bridge, the finance export or the dashboard you want.
 - **An activity feed you can read.** The ledger as sentences: filter by agent, mandate, outcome or date, search it, leave notes on anything.
 - **A ledger you can hand to someone.** Append-only SHA-256 chain per workspace, Ed25519-signed exports, and a public verifier — anyone can check a receipt without an account.
-- **Metered LLM spend.** Store provider keys encrypted, hand out proxy keys, and see estimate vs settled cost per call, streaming included.
+- **Metered LLM spend.** Store provider keys encrypted, hand out proxy keys, and see estimate vs settled cost per call, streaming included — and the same for any other API through custom targets.
 - **Workspaces and roles.** Personal and shared workspaces; owners, admins, approvers, viewers; invitations by email.
 - **Stats.** Spend by day/week/month/year, by agent or merchant, decline reasons, a weekday×hour heat map and a written reading of the trend.
 - **Any currency.** Mandates in 38 currencies with the right minor units and formatting; a default per workspace. Nothing is ever converted.

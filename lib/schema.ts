@@ -57,6 +57,19 @@ export const mandates = pgTable("mandates", {
   autonomyCeiling: integer("autonomy_ceiling"),
   autonomyLevel: integer("autonomy_level").notNull().default(0), // earned so far, minor units
   autonomyStreak: integer("autonomy_streak").notNull().default(0),
+  // Co-signing: above this amount an ask needs `cosignCount` distinct
+  // approvers before it becomes an allowance; one denial ends it.
+  cosignAbove: integer("cosign_above"),
+  cosignCount: integer("cosign_count").notNull().default(2),
+  // Delegation: a sub-mandate the agent carved out of this one for a helper.
+  // Its terms are within the parent's; its spend counts against the parent;
+  // revoking the parent revokes it.
+  parentId: text("parent_id"),
+  depth: integer("depth").notNull().default(0),
+  // Sandbox: decided and recorded exactly like a real mandate, but its
+  // token is mnd_test_, it never gets a card or a proxy key, and its spend
+  // is kept out of the workspace's totals.
+  sandbox: integer("sandbox").notNull().default(0),
   // The agent's credential is never stored in clear. tokenHash is what we
   // look up by; tokenPrefix is shown so the owner can recognise it;
   // tokenReveal holds the plaintext until it has been shown exactly once.
@@ -75,6 +88,7 @@ export const mandates = pgTable("mandates", {
   uniqueIndex("mandates_token_hash_idx").on(t.tokenHash),
   index("mandates_card_idx").on(t.stripeCardId),
   index("mandates_ws_idx").on(t.workspaceId),
+  index("mandates_parent_idx").on(t.parentId),
 ]);
 
 export const transactions = pgTable("transactions", {
@@ -113,6 +127,8 @@ export const transactions = pgTable("transactions", {
   shadowRule: text("shadow_rule"),
   shadowReason: text("shadow_reason"),
   planId: text("plan_id"),
+  // Set while the owner disputes this decision (lib/service disputes).
+  disputeId: text("dispute_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 }, (t) => [uniqueIndex("txn_share_token_idx").on(t.shareToken), index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
 
@@ -139,6 +155,13 @@ export const approvals = pgTable("approvals", {
   // on a registered device decided.
   signedWith: text("signed_with"), // passkey credential id
   signature: text("signature"),
+  // Co-signing: how many distinct approvers this ask needs, and who has
+  // signed so far (JSON [{ by, at, signedWith? }]). 1 = a single decision.
+  requiredApprovers: integer("required_approvers").notNull().default(1),
+  signoffs: text("signoffs").notNull().default("[]"),
+  // Which approval route matched when the request was raised (notifications
+  // went to that route's members); null = every decider.
+  routeId: text("route_id"),
 }, (t) => [index("approvals_mandate_status_idx").on(t.mandateId, t.status), index("approvals_ws_status_idx").on(t.workspaceId, t.status)]);
 
 // Append-only, hash-chained log, one chain per workspace. Each hash covers
@@ -184,7 +207,10 @@ export const proxyKeys = pgTable("proxy_keys", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
   mandateId: text("mandate_id").notNull().references(() => mandates.id),
-  providerKeyId: text("provider_key_id").notNull().references(() => providerKeys.id, { onDelete: "cascade" }),
+  // Exactly one of providerKeyId (OpenAI / Anthropic / Gemini, priced from
+  // tokens) or targetId (any other API, priced by the target's rule) is set.
+  providerKeyId: text("provider_key_id").references(() => providerKeys.id, { onDelete: "cascade" }),
+  targetId: text("target_id"),
   name: text("name").notNull(),
   status: text("status").notNull().default("active"), // active | revoked
   tokenHash: text("token_hash").notNull(),
@@ -410,8 +436,94 @@ export const pushSubscriptions = pgTable("push_subscriptions", {
 export const workspaceSettings = pgTable("workspace_settings", {
   workspaceId: text("workspace_id").primaryKey().references(() => organization.id, { onDelete: "cascade" }),
   currency: text("currency").notNull().default("USD"),
+  // The panic button: while set, every request in the workspace declines
+  // ("frozen"), on every rail, whatever the mandates say.
+  frozenAt: timestamp("frozen_at", { withTimezone: true }),
+  frozenBy: text("frozen_by"),
+  frozenReason: text("frozen_reason"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
+
+// A dispute the owner raises against one decision: "this should not have
+// happened / was not delivered". Resolving it as refunded posts a negative
+// approved transaction so the limits net down; upheld leaves the money.
+export const disputes = pgTable("disputes", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  transactionId: text("transaction_id").notNull(),
+  mandateId: text("mandate_id").notNull(),
+  amount: integer("amount").notNull(),
+  currency: text("currency").notNull(),
+  merchant: text("merchant").notNull(),
+  reason: text("reason").notNull().default(""),
+  status: text("status").notNull().default("open"), // open | refunded | upheld | withdrawn
+  openedBy: text("opened_by").notNull(),
+  openedAt: timestamp("opened_at", { withTimezone: true }).notNull(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolvedBy: text("resolved_by"),
+  resolution: text("resolution").notNull().default(""),
+}, (t) => [index("disputes_ws_status_idx").on(t.workspaceId, t.status), index("disputes_txn_idx").on(t.transactionId)]);
+
+// Approval routing: which members are asked for which requests. The first
+// enabled route (lowest priority number) whose conditions all match wins;
+// with no match every decider is asked, as before.
+export const approvalRoutes = pgTable("approval_routes", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  minAmount: integer("min_amount"), // inclusive, minor units; null = no floor
+  maxAmount: integer("max_amount"), // inclusive; null = no ceiling
+  category: text("category").notNull().default(""), // "" = any
+  merchantPattern: text("merchant_pattern").notNull().default(""), // "" = any; trailing * = prefix
+  mandateId: text("mandate_id"), // null = any mandate
+  userIds: text("user_ids").notNull().default("[]"), // JSON string[] of member user ids
+  priority: integer("priority").notNull().default(100),
+  enabled: integer("enabled").notNull().default(1),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [index("approval_routes_ws_idx").on(t.workspaceId, t.priority)]);
+
+// Ledger anchoring: a signed statement, taken daily, of where each
+// workspace's chain stood. Anchors themselves chain across the whole
+// deployment (prevAnchorHash), and the list is public (/anchors), so a
+// workspace's history cannot be quietly rewritten after the fact — even by
+// the operator — without the public anchor disagreeing.
+export const ledgerAnchors = pgTable("ledger_anchors", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull(),
+  label: text("label").notNull(), // sha256(workspaceId), the public name of the chain
+  seq: integer("seq").notNull(),
+  hash: text("hash").notNull(),
+  prevAnchorHash: text("prev_anchor_hash").notNull(),
+  anchorHash: text("anchor_hash").notNull(),
+  signature: text("signature").notNull(),
+  keyId: text("key_id").notNull(),
+  signedAt: timestamp("signed_at", { withTimezone: true }).notNull(),
+  n: integer("n").notNull(), // position in the global anchor chain
+}, (t) => [uniqueIndex("ledger_anchors_n_idx").on(t.n), index("ledger_anchors_ws_idx").on(t.workspaceId, t.seq)]);
+
+// Generic API proxy targets: any HTTP API an agent may call with a proxy
+// key. The real credential is stored encrypted and injected as a header;
+// each call is priced by the target's rule and authorised like a purchase.
+export const proxyTargets = pgTable("proxy_targets", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(), // in the proxy URL: /api/proxy/t/<slug>/...
+  baseUrl: text("base_url").notNull(),
+  authHeader: text("auth_header").notNull().default("authorization"),
+  authCiphertext: text("auth_ciphertext").notNull(), // full header value, e.g. "Bearer sk-…"
+  authHint: text("auth_hint").notNull(),
+  currency: text("currency").notNull().default("USD"),
+  // per_call: every call costs priceAmount. header: pre-authorise priceAmount,
+  // settle from the response header priceKey (minor units). json: same, from
+  // a dotted path in the JSON body.
+  pricing: text("pricing").notNull().default("per_call"),
+  priceAmount: integer("price_amount").notNull().default(1),
+  priceKey: text("price_key").notNull().default(""),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (t) => [uniqueIndex("proxy_targets_ws_slug_idx").on(t.workspaceId, t.slug)]);
 
 export type Agent = typeof agents.$inferSelect;
 export type Mandate = typeof mandates.$inferSelect;
@@ -424,3 +536,7 @@ export type Note = typeof notes.$inferSelect;
 export type MandateOverride = typeof mandateOverrides.$inferSelect;
 export type Plan = typeof plans.$inferSelect;
 export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+export type Dispute = typeof disputes.$inferSelect;
+export type ApprovalRoute = typeof approvalRoutes.$inferSelect;
+export type LedgerAnchor = typeof ledgerAnchors.$inferSelect;
+export type ProxyTarget = typeof proxyTargets.$inferSelect;

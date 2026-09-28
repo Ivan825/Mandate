@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluate, merchantMatches, validateTerms, validateVetoTerms, validateAutonomyTerms, endOfLocalDay, localHour, effectiveTerms, replayHistory, type Facts } from "../lib/policy";
+import { evaluate, merchantMatches, validateTerms, validateVetoTerms, validateAutonomyTerms, validateCosignTerms, validateChildTerms, endOfLocalDay, localHour, effectiveTerms, replayHistory, type Facts } from "../lib/policy";
 import type { Mandate, Approval } from "../lib/schema";
 
 const base: Mandate = {
   id: "m1", agentId: "a1", name: "t", status: "active", currency: "USD",
   perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
   allowedMerchants: JSON.stringify(["OpenAI", "Vercel*"]), blockedCategories: JSON.stringify(["gambling"]),
-  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null, vetoAbove: null, vetoMinutes: 15, mode: "enforce", autonomyStep: 0, autonomyEvery: 10, autonomyCeiling: null, autonomyLevel: 0, autonomyStreak: 0,
+  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null, vetoAbove: null, vetoMinutes: 15, mode: "enforce", autonomyStep: 0, autonomyEvery: 10, autonomyCeiling: null, autonomyLevel: 0, autonomyStreak: 0, cosignAbove: null, cosignCount: 2, parentId: null, depth: 0, sandbox: 0,
   workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null,
   createdAt: new Date(), revokedAt: null,
 };
@@ -32,7 +32,7 @@ test("rule order: scope before limits, limits before escalation", () => {
 });
 
 test("allowance must match exact amount and merchant and be unexpired", () => {
-  const mk = (o: Partial<Approval>): Approval => ({ id: "ap1", workspaceId: "ws1", mandateId: "m1", decidedBy: null, amount: 4500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", kind: "ask", vetoUntil: null, signedWith: null, signature: null, ...o });
+  const mk = (o: Partial<Approval>): Approval => ({ id: "ap1", workspaceId: "ws1", mandateId: "m1", decidedBy: null, amount: 4500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", kind: "ask", vetoUntil: null, signedWith: null, signature: null, requiredApprovers: 1, signoffs: "[]", routeId: null, ...o });
   assert.equal(evaluate(base, { amount: 4500, merchant: "OpenAI" }, facts({ approvedAllowances: [mk({})] })).rule, "allowance");
   assert.equal(evaluate(base, { amount: 4400, merchant: "OpenAI" }, facts({ approvedAllowances: [mk({})] })).decision, "pending");
   assert.equal(evaluate(base, { amount: 4500, merchant: "openai" }, facts({ approvedAllowances: [mk({})] })).rule, "allowance");
@@ -141,7 +141,7 @@ test("veto window: pending with retry, matured veto passes, cancel blocks; ask w
   assert.equal(v.decision, "pending"); assert.equal(v.rule, "veto"); assert.equal(v.remedy?.approvalRequired, false);
   assert.equal(evaluate(m, { amount: 4500, merchant: "OpenAI" }, facts()).rule, "approval"); // above ask threshold: ask, not veto
   assert.equal(evaluate(m, { amount: 900, merchant: "OpenAI" }, facts()).decision, "approved");
-  const matured = { id: "v1", workspaceId: "ws1", mandateId: "m1", decidedBy: "silence", amount: 1500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", kind: "veto", vetoUntil: new Date(), signedWith: null, signature: null };
+  const matured = { id: "v1", workspaceId: "ws1", mandateId: "m1", decidedBy: "silence", amount: 1500, currency: "USD", merchant: "OpenAI", purpose: "", status: "approved", requestedAt: new Date(), decidedAt: new Date(), expiresAt: new Date(Date.now() + 3600e3), usedAt: null, flags: "[]", kind: "veto", vetoUntil: new Date(), signedWith: null, signature: null, requiredApprovers: 1, signoffs: "[]", routeId: null };
   const ok = evaluate(m, { amount: 1500, merchant: "OpenAI" }, facts({ approvedAllowances: [matured] }));
   assert.equal(ok.decision, "approved"); assert.equal(ok.rule, "veto_passed"); assert.equal(ok.allowanceId, "v1");
   assert.equal(evaluate(m, { amount: 1500, merchant: "OpenAI" }, facts({ recentlyDenied: true })).rule, "denied_recently");
@@ -183,4 +183,41 @@ test("policy time-travel replays history against hypothetical terms", () => {
   const tighter = replayHistory({ ...base, allowedMerchants: "[]", dailyLimit: 3000, totalLimit: 3000 }, history);
   assert.deepEqual(tighter.outcomes.map((o) => o.decision), ["approved", "approved", "declined", "declined"]);
   assert.equal(tighter.outcomes[2].rule, "daily"); assert.equal(tighter.changed, 1);
+});
+
+test("the panic button wins over everything, even a valid allowance", () => {
+  const frozen = facts({ frozen: { at: new Date(), by: "owner@example.com" } });
+  const d = evaluate(base, { amount: 100, merchant: "OpenAI" }, frozen);
+  assert.equal(d.decision, "declined"); assert.equal(d.rule, "frozen"); assert.equal(d.remedy?.approvalRequired, true);
+  assert.equal(evaluate({ ...base, status: "paused" }, { amount: 100, merchant: "OpenAI" }, frozen).rule, "frozen"); // checked before paused
+  assert.equal(evaluate(base, { amount: 100, merchant: "OpenAI" }, facts({ frozen: null })).decision, "approved");
+});
+
+test("a sub-mandate must also fit inside every ancestor, with the family's spend counted", () => {
+  const parent = { ...base, id: "p", name: "Parent", dailyLimit: 6000, totalLimit: 50000, approvalAbove: 1000 };
+  const child = { ...base, id: "c", parentId: "p", depth: 1, perTxnLimit: 2000, dailyLimit: 4000, totalLimit: 10000, approvalAbove: 1000 };
+  const ok = evaluate(child, { amount: 900, merchant: "OpenAI" }, facts({ ancestors: [{ mandate: parent, spentToday: 1000, spentTotal: 1000 }] }));
+  assert.equal(ok.decision, "approved");
+  const parentDaily = evaluate(child, { amount: 900, merchant: "OpenAI" }, facts({ ancestors: [{ mandate: parent, spentToday: 5500, spentTotal: 5500 }] }));
+  assert.equal(parentDaily.decision, "declined"); assert.equal(parentDaily.rule, "parent_daily"); assert.match(parentDaily.reason, /Parent mandate “Parent”/);
+  const parentPaused = evaluate(child, { amount: 900, merchant: "OpenAI" }, facts({ ancestors: [{ mandate: { ...parent, status: "paused" }, spentToday: 0, spentTotal: 0 }] }));
+  assert.equal(parentPaused.rule, "parent_paused");
+  // The parent's own escalation is not re-run: the child asked (or not) by its own threshold.
+  assert.equal(evaluate(child, { amount: 900, merchant: "OpenAI" }, facts({ ancestors: [{ mandate: { ...parent, approvalAbove: 100 }, spentToday: 0, spentTotal: 0 }] })).decision, "approved");
+  // Child terms are validated against the parent when delegating.
+  const errs = validateChildTerms(parent, { perTxnLimit: 9000, dailyLimit: 4000, totalLimit: 10000, approvalAbove: null, allowedMerchants: ["Namecheap"], blockedCategories: [], expiresAt: null, currency: "USD" });
+  assert.ok(errs.some((e) => e.field === "perTxnLimit")); assert.ok(errs.some((e) => e.field === "approvalAbove")); assert.ok(errs.some((e) => e.field === "allowedMerchants")); assert.ok(errs.some((e) => e.field === "blockedCategories"));
+  assert.deepEqual(validateChildTerms(parent, { perTxnLimit: 2000, dailyLimit: 4000, totalLimit: 10000, approvalAbove: 500, allowedMerchants: ["OpenAI"], blockedCategories: ["gambling"], expiresAt: null, currency: "USD" }), []);
+});
+
+test("co-signing: above the threshold the ask names how many approvers it needs", () => {
+  const m = { ...base, cosignAbove: 4000, cosignCount: 3 };
+  const two = evaluate(m, { amount: 3000, merchant: "OpenAI" }, facts());
+  assert.equal(two.decision, "pending"); assert.doesNotMatch(two.reason, /approvers/);
+  const three = evaluate(m, { amount: 4500, merchant: "OpenAI" }, facts());
+  assert.equal(three.decision, "pending"); assert.match(three.reason, /3 approvers/);
+  assert.ok(validateCosignTerms({ cosignAbove: 1000, cosignCount: 2, approvalAbove: null, perTxnLimit: 5000 }).length > 0); // needs an ask threshold
+  assert.ok(validateCosignTerms({ cosignAbove: 1000, cosignCount: 2, approvalAbove: 2000, perTxnLimit: 5000 }).some((e) => e.field === "cosignAbove")); // below ask threshold
+  assert.ok(validateCosignTerms({ cosignAbove: 4000, cosignCount: 9, approvalAbove: 2000, perTxnLimit: 5000 }).some((e) => e.field === "cosignCount"));
+  assert.deepEqual(validateCosignTerms({ cosignAbove: 4000, cosignCount: 2, approvalAbove: 2000, perTxnLimit: 5000 }), []);
 });

@@ -143,6 +143,19 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
             {err("vetoMinutes") && <span className="hint" style={{ color: "var(--bad)" }}>{err("vetoMinutes")}</span>}
           </div>
         </div>
+        <label className="check"><input type="checkbox" name="cosignOn" defaultChecked={v("cosignOn") === "on"} /> Require more than one approver for the biggest asks (co-signing)</label>
+        <div className="row">
+          <div className="field">
+            <label htmlFor="cosignAbove">Co-sign above ({currency})</label>
+            <input id="cosignAbove" name="cosignAbove" type="number" min="0" step={step} defaultValue={v("cosignAbove", "")} aria-invalid={Boolean(err("cosignAbove"))} placeholder="blank = same as ask me above" />
+            <span className="hint" style={err("cosignAbove") ? { color: "var(--bad)" } : undefined}>{err("cosignAbove") ?? "At or above the ask threshold, below the per-transaction limit. Above it, an approval needs several distinct approvers; one denial ends it."}</span>
+          </div>
+          <div className="field">
+            <label htmlFor="cosignCount">Approvers needed</label>
+            <input id="cosignCount" name="cosignCount" type="number" min="2" max="5" step="1" defaultValue={v("cosignCount", "2")} aria-invalid={Boolean(err("cosignCount"))} />
+            {err("cosignCount") && <span className="hint" style={{ color: "var(--bad)" }}>{err("cosignCount")}</span>}
+          </div>
+        </div>
         <div className="field">
           <label htmlFor="mode">Mode</label>
           <select id="mode" name="mode" defaultValue={v("mode", "enforce")}>
@@ -191,6 +204,12 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
             <span className="hint">Release suits agents that always capture; capture suits agents you don't fully trust to report.</span>
           </div>
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Sandbox</legend>
+        <label className="check"><input type="checkbox" name="sandbox" defaultChecked={v("sandbox") === "on"} /> Sandbox mandate — for integration tests</label>
+        <span className="hint">Its token starts with <code>mnd_test_</code>. Decisions, approvals, plans and the ledger behave exactly as live; it never gets a card or a proxy key, its spend stays out of the workspace's totals, and it can be reset from its page.</span>
       </fieldset>
 
       <fieldset>

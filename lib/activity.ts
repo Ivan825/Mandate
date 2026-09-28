@@ -10,10 +10,10 @@ import type { LedgerEvent, Note } from "./schema";
 // structure to filter by; the same line goes into webhook envelopes and
 // emails so everyone reads the same words.
 
-export type Group = "decisions" | "approvals" | "mandates" | "agents" | "proxy" | "cards" | "workspace" | "webhooks" | "alerts" | "system";
+export type Group = "decisions" | "approvals" | "disputes" | "mandates" | "agents" | "proxy" | "cards" | "workspace" | "webhooks" | "alerts" | "system";
 
 export const GROUPS: { key: Group; label: string }[] = [
-  { key: "decisions", label: "Decisions" }, { key: "approvals", label: "Approvals" }, { key: "mandates", label: "Mandates" }, { key: "agents", label: "Agents" },
+  { key: "decisions", label: "Decisions" }, { key: "approvals", label: "Approvals" }, { key: "disputes", label: "Disputes" }, { key: "mandates", label: "Mandates" }, { key: "agents", label: "Agents" },
   { key: "proxy", label: "API proxy" }, { key: "cards", label: "Cards & balance" }, { key: "workspace", label: "Workspace" }, { key: "webhooks", label: "Webhooks" }, { key: "alerts", label: "Alerts" },
 ];
 
@@ -27,6 +27,8 @@ const money = (p: P, key = "amount") => { const a = n(p[key]); const c = s(p.cur
 export function groupOf(type: string): Group {
   if (type.startsWith("authorization.")) return "decisions";
   if (type.startsWith("approval.") || type.startsWith("plan.")) return "approvals";
+  if (type.startsWith("dispute.")) return "disputes";
+  if (type.startsWith("routing.") || type.startsWith("ledger.")) return "workspace";
   if (type.startsWith("mandate.card") || type.startsWith("stripe.") || type.startsWith("balance.")) return "cards";
   if (type.startsWith("mandate.")) return "mandates";
   if (type.startsWith("agent.")) return "agents";
@@ -56,12 +58,12 @@ function describe(type: string, p: P, names: { mandate?: string; agent?: string 
   const via = s(p.source) ? ` via ${s(p.source) === "agent_api" ? "the API" : s(p.source) === "mcp" ? `MCP${s(p.actor) ? ` (${s(p.actor)})` : ""}` : s(p.source)}` : "";
   switch (type) {
     case "authorization.approved": { const sh = p.shadow as { decision?: string; rule?: string } | undefined; return { ...base, outcome: "approved", tone: sh && sh.decision !== "approved" ? "warn" : "ok", summary: `${who} was allowed ${money(p)} at ${s(p.merchant)}${m}${via}${s(p.rule) === "plan" ? " — inside an approved plan" : s(p.rule) === "veto_passed" ? " — veto window passed" : ""}${p.settlement === "held" ? " — held until captured" : ""}${sh && sh.decision !== "approved" ? ` (shadow: would have ${sh.decision === "pending" ? "asked" : "declined"}, ${sh.rule})` : ""}.` }; }
-    case "authorization.declined": return { ...base, outcome: "declined", tone: "bad", summary: `${who} was refused ${money(p)} at ${s(p.merchant)}${m}: ${s(p.reason)}` };
+    case "authorization.declined": return { ...base, outcome: "declined", tone: "bad", summary: `${who} was refused ${money(p)} at ${s(p.merchant)}${m}: ${s(p.reason)}${s(p.rule) === "frozen" ? " (workspace frozen)" : ""}` };
     case "authorization.pending": return { ...base, outcome: "pending", tone: "warn", summary: `${who} asked for ${money(p)} at ${s(p.merchant)}${m} — waiting for approval.` };
     case "authorization.captured": { const cap = n(p.capturedAmount), auth = n(p.authorizedAmount), rel = n(p.released) ?? 0; const c = s(p.currency); return { ...base, amount: cap ?? undefined, outcome: "captured", tone: "ok", summary: `${s(p.by) === "system" ? "Hold" : `${s(p.by) === "agent" ? who : s(p.by)} captured`}${s(p.by) === "system" ? " closed" : ""} ${cap != null && c ? fmt(cap, c) : ""} at ${s(p.merchant)}${rel > 0 && c ? ` (${fmt(rel, c)} of ${auth != null ? fmt(auth, c) : ""} released)` : ""}${s(p.reason) === "hold expired" ? " — hold expired, captured by policy" : ""}.` }; }
     case "authorization.voided": return { ...base, amount: n(p.authorizedAmount) ?? n(p.amount) ?? undefined, outcome: "voided", tone: "", summary: `${s(p.by) === "agent" ? who : s(p.by) || "Someone"} voided the ${n(p.authorizedAmount) != null && s(p.currency) ? fmt(n(p.authorizedAmount)!, s(p.currency)) : ""} hold at ${s(p.merchant)}${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
     case "authorization.released": return { ...base, amount: n(p.authorizedAmount) ?? undefined, outcome: "released", tone: "", summary: `Hold of ${n(p.authorizedAmount) != null && s(p.currency) ? fmt(n(p.authorizedAmount)!, s(p.currency)) : ""} at ${s(p.merchant)} expired unsettled and was released${m}.` };
-    case "authorization.settled": return { ...base, amount: n(p.actualAmount) ?? undefined, outcome: "captured", tone: "ok", summary: `Proxy call to ${s(p.provider)} (${s(p.model)}) settled at ${n(p.actualAmount) != null ? fmt(n(p.actualAmount)!, "USD") : ""}${n(p.estimatedAmount) != null ? ` (estimated ${fmt(n(p.estimatedAmount)!, "USD")})` : ""}.` };
+    case "authorization.settled": { const c = s(p.currency) || "USD"; return { ...base, amount: n(p.actualAmount) ?? undefined, outcome: "captured", tone: "ok", summary: `Proxy call to ${s(p.provider).replace(/^target:/, "")} (${s(p.model)}) settled at ${n(p.actualAmount) != null ? fmt(n(p.actualAmount)!, c) : ""}${n(p.estimatedAmount) != null ? ` (pre-authorised ${fmt(n(p.estimatedAmount)!, c)})` : ""}.` }; }
     case "approval.requested": return s(p.kind) === "veto"
       ? { ...base, outcome: "pending", tone: "warn", summary: `${who} announced ${money(p)} at ${s(p.merchant)} — goes through at ${s(p.vetoUntil)} unless cancelled${s(p.purpose) ? ` (“${s(p.purpose)}”)` : ""}.` }
       : { ...base, outcome: "pending", tone: "warn", summary: `${who} asked you to approve ${money(p)} at ${s(p.merchant)}${s(p.purpose) ? ` — “${s(p.purpose)}”` : ""}.` };
@@ -78,10 +80,25 @@ function describe(type: string, p: P, names: { mandate?: string; agent?: string 
     case "mandate.mode_changed": return { ...base, tone: "warn", summary: s(p.mode) === "observe" ? `${s(p.by)} switched the mandate to shadow mode: nothing is declined, verdicts are recorded.` : `${s(p.by)} switched the mandate to enforcing.` };
     case "mandate.autonomy_up": return { ...base, tone: "ok", summary: `Trust track: after ${n(p.after) ?? ""} clean decisions the per-transaction limit rose to ${n(p.perTxnNow) != null && s(p.currency) ? fmt(n(p.perTxnNow)!, s(p.currency)) : ""}.` };
     case "mandate.autonomy_down": return { ...base, tone: "warn", summary: s(p.by) ? `${s(p.by)} reset the trust track to probation.` : `Trust track stepped down (${s(p.reason)}); per-transaction limit now ${n(p.perTxnNow) != null && s(p.currency) ? fmt(n(p.perTxnNow)!, s(p.currency)) : ""}.` };
+    case "approval.cosigned": return { ...base, outcome: "pending", tone: "warn", summary: `${s(p.by)} co-signed ${money(p)} at ${s(p.merchant)}${m} — ${n(p.have) ?? ""} of ${n(p.need) ?? ""} signatures${p.humanSigned ? ", with a passkey" : ""}.` };
+    case "workspace.frozen": return { ...base, tone: "bad", summary: `${s(p.by)} pressed the panic button: every agent in the workspace is frozen${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
+    case "workspace.unfrozen": return { ...base, tone: "ok", summary: `${s(p.by)} lifted the freeze; agents can spend again under their mandates.` };
+    case "dispute.opened": return { ...base, outcome: "disputed", tone: "warn", summary: `${s(p.by)} disputed ${money(p)} at ${s(p.merchant)}${m}${s(p.reason) ? ` — “${s(p.reason)}”` : ""}.` };
+    case "dispute.refunded": return { ...base, outcome: "refunded", tone: "ok", summary: `Dispute over ${money(p)} at ${s(p.merchant)} resolved in your favour by ${s(p.by)}: refunded, limits netted down${s(p.note) ? ` — ${s(p.note)}` : ""}.` };
+    case "dispute.upheld": return { ...base, outcome: "upheld", tone: "", summary: `Dispute over ${money(p)} at ${s(p.merchant)} upheld by ${s(p.by)}: the charge stands${s(p.note) ? ` — ${s(p.note)}` : ""}.` };
+    case "dispute.withdrawn": return { ...base, tone: "", summary: `${s(p.by)} withdrew the dispute over ${money(p)} at ${s(p.merchant)}.` };
+    case "routing.added": return { ...base, tone: "", summary: `${s(p.by)} added the approval route “${s(p.name)}” (${n(p.members) ?? ""} member${n(p.members) === 1 ? "" : "s"}).` };
+    case "routing.removed": return { ...base, tone: "", summary: `${s(p.by)} removed the approval route “${s(p.name)}”.` };
+    case "routing.enabled": return { ...base, tone: "", summary: `${s(p.by)} enabled the approval route “${s(p.name)}”.` };
+    case "routing.disabled": return { ...base, tone: "", summary: `${s(p.by)} disabled the approval route “${s(p.name)}”.` };
+    case "ledger.anchored": return { ...base, tone: "ok", summary: `Ledger head #${n(p.seq) ?? ""} anchored publicly as anchor ${n(p.n) ?? ""} (${s(p.anchorHash).slice(0, 12)}…).` };
+    case "mandate.sandbox_reset": return { ...base, tone: "", summary: `${s(p.by)} reset the sandbox: ${n(p.transactions) ?? 0} decisions and ${n(p.approvals) ?? 0} requests wiped.` };
+    case "proxy.target_added": return { ...base, tone: "ok", summary: `API target “${s(p.name)}” (${s(p.baseUrl)}) added by ${s(p.by)}; ${s(p.pricing) === "per_call" ? `${n(p.priceAmount) != null && s(p.currency) ? fmt(n(p.priceAmount)!, s(p.currency)) : ""} per call` : `pre-authorises ${n(p.priceAmount) != null && s(p.currency) ? fmt(n(p.priceAmount)!, s(p.currency)) : ""} per call`}.` };
+    case "proxy.target_removed": return { ...base, tone: "", summary: `API target “${s(p.name)}” removed by ${s(p.by)}; its keys were revoked.` };
     case "approval.expired": return { ...base, outcome: "expired", tone: "", summary: `Request for ${money(p)} at ${s(p.merchant)} expired (${s(p.reason)}).` };
     case "approval.notified": return { ...base, tone: "", summary: `Approvers were notified (${Array.isArray(p.channels) ? (p.channels as { channel: string; ok: boolean }[]).map((c) => `${c.channel} ${c.ok ? "✓" : "✗"}`).join(", ") : ""}).` };
-    case "mandate.issued": return { ...base, tone: "ok", summary: `Mandate “${s(p.name)}” issued: ${money(p, "perTxnLimit")} per purchase, ${money(p, "dailyLimit")} a day, ${money(p, "totalLimit")} in total${n(p.approvalAbove) != null ? `, ask above ${money(p, "approvalAbove")}` : ""}.` };
-    case "mandate.revoked": return { ...base, tone: "bad", summary: `Mandate revoked by ${s(p.by) || "the owner"}. The agent is cut off.` };
+    case "mandate.issued": return { ...base, tone: "ok", summary: `${s(p.parentId) ? `Sub-mandate “${s(p.name)}” delegated${s(p.delegatedBy) ? ` by ${s(p.delegatedBy)}` : ""}` : `${p.sandbox ? "Sandbox mandate" : "Mandate"} “${s(p.name)}” issued`}: ${money(p, "perTxnLimit")} per purchase, ${money(p, "dailyLimit")} a day, ${money(p, "totalLimit")} in total${n(p.approvalAbove) != null ? `, ask above ${money(p, "approvalAbove")}` : ""}${p.cosign ? `, ${(p.cosign as { count?: number }).count ?? 2} approvers above ${fmt((p.cosign as { above: number }).above, s(p.currency))}` : ""}.` };
+    case "mandate.revoked": return { ...base, tone: "bad", summary: s(p.reason) === "parent revoked" ? "Sub-mandate revoked with its parent." : `Mandate revoked by ${s(p.by) || "the owner"}. The agent is cut off.` };
     case "mandate.paused": return { ...base, tone: "warn", summary: `Mandate paused by ${s(p.by)}${s(p.until) ? ` until ${s(p.until)}` : " until further notice"}${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
     case "mandate.resumed": return { ...base, tone: "ok", summary: s(p.by) === "system" ? "Mandate resumed: the pause ran out." : `Mandate resumed by ${s(p.by)}.` };
     case "mandate.raised": return { ...base, tone: "warn", summary: `${s(p.by)} raised ${s(p.field).replace("_", " ")} to ${n(p.amount) != null && s(p.currency) ? fmt(n(p.amount)!, s(p.currency)) : ""} until ${s(p.endsAt)}${s(p.reason) ? ` — ${s(p.reason)}` : ""}.` };
@@ -124,8 +141,8 @@ export type ActivityFilter = { q?: string; group?: Group | ""; outcome?: string;
 export type ActivityRow = { e: LedgerEvent; d: Described; payload: P; notes: Note[] };
 
 const TYPE_PREFIX: Record<Group, string[]> = {
-  decisions: ["authorization."], approvals: ["approval."], mandates: ["mandate.issued", "mandate.revoked"], agents: ["agent."], proxy: ["proxy."],
-  cards: ["mandate.card", "stripe.", "balance."], workspace: ["workspace.", "member.", "invitation."], webhooks: ["webhook."], alerts: ["warning."], system: [],
+  decisions: ["authorization."], approvals: ["approval.", "plan."], disputes: ["dispute."], mandates: ["mandate.issued", "mandate.revoked", "mandate.paused", "mandate.resumed", "mandate.raised", "mandate.sandbox_reset"], agents: ["agent."], proxy: ["proxy."],
+  cards: ["mandate.card", "stripe.", "balance."], workspace: ["workspace.", "member.", "invitation.", "routing.", "ledger."], webhooks: ["webhook."], alerts: ["warning."], system: [],
 };
 
 export async function listActivity(workspaceId: string, f: ActivityFilter = {}): Promise<{ rows: ActivityRow[]; more: boolean }> {

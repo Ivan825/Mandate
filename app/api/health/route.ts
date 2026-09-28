@@ -16,6 +16,7 @@ export async function GET() {
     after(async () => {
       try { const { dispatchDue } = await import("@/lib/webhooks"); await dispatchDue({ limit: 10, budgetMs: 8000 }); } catch (e) { console.error("health: webhooks", (e as Error).message); }
       try { const { sweepAllHolds } = await import("@/lib/service"); await sweepAllHolds(50); } catch (e) { console.error("health: holds", (e as Error).message); }
+      try { const { anchorIfDue } = await import("@/lib/anchors"); await anchorIfDue(); } catch (e) { console.error("health: anchors", (e as Error).message); }
     });
     return NextResponse.json({ ok: true }, { headers: { "cache-control": "no-store" } });
   } catch {

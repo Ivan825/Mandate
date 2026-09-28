@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
 import { appendEvent, recordEvent } from "./ledger";
-import { evaluate, localDayStart, validateTerms, validateHoldTerms, validateVetoTerms, validateAutonomyTerms, parsePlanItems, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, type AuthRequest, type Decision, type Facts, type TermsError, type PlanItem } from "./policy";
+import { evaluate, localDayStart, validateTerms, validateHoldTerms, validateVetoTerms, validateAutonomyTerms, validateCosignTerms, validateChildTerms, parsePlanItems, ALLOWANCE_TTL_MS, DENIAL_COOLOFF_MS, MAX_DELEGATION_DEPTH, type AuthRequest, type Decision, type Facts, type AncestorFacts, type TermsError, type PlanItem } from "./policy";
+import { routeFor } from "./routing";
 import { isCurrencyCode } from "./money";
 import { computeFlags, type Flag } from "./anomaly";
-import type { MandateOverride, Plan } from "./schema";
+import type { MandateOverride, Plan, Dispute } from "./schema";
 import { sendApprovalRequested } from "./notify";
 import { checkWarnings } from "./warnings";
 import { sweepReveals } from "./reveal";
@@ -20,7 +21,7 @@ const { agents, mandates, transactions, approvals, idempotencyKeys } = schema;
 
 export const PENDING_TTL_MS = Number(process.env.APPROVAL_TTL_HOURS ?? 24) * 3600 * 1000;
 
-export function newToken(): string { return "mnd_" + randomBytes(24).toString("base64url"); }
+export function newToken(sandbox = false): string { return (sandbox ? "mnd_test_" : "mnd_") + randomBytes(24).toString("base64url"); }
 function dedupe(errs: TermsError[]): TermsError[] { const seen = new Set<string>(); return errs.filter((e) => { const k = e.field + "|" + e.message; if (seen.has(k)) return false; seen.add(k); return true; }); }
 export function hashToken(token: string): string { return createHash("sha256").update(token).digest("hex"); }
 
@@ -106,6 +107,10 @@ export type MandateInput = {
   vetoAbove?: number | null; vetoMinutes?: number;
   autonomyStep?: number; autonomyEvery?: number; autonomyCeiling?: number | null;
   mode?: "enforce" | "observe";
+  cosignAbove?: number | null; cosignCount?: number;
+  sandbox?: boolean;
+  // Set only by delegateMandate.
+  parent?: Mandate; delegatedBy?: string;
 };
 
 export type CreateResult = { ok: true; mandate: Mandate; token: string } | { ok: false; errors: TermsError[] };
@@ -120,21 +125,31 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
   const autonomyEvery = input.autonomyEvery ?? 10;
   const autonomyCeiling = autonomyStep > 0 ? input.autonomyCeiling ?? null : null;
   const mode = input.mode === "observe" ? "observe" : "enforce";
-  const errors = [...validateTerms({ ...input, currency }), ...validateHoldTerms({ holdTtlHours, holdPolicy }), ...validateVetoTerms({ vetoAbove, vetoMinutes, approvalAbove: input.approvalAbove, perTxnLimit: input.perTxnLimit }), ...validateAutonomyTerms({ autonomyStep, autonomyEvery, autonomyCeiling, perTxnLimit: input.perTxnLimit })];
+  const cosignAbove = input.cosignAbove ?? null;
+  const cosignCount = input.cosignCount ?? 2;
+  const parent = input.parent ?? null;
+  const sandbox = parent ? parent.sandbox === 1 : Boolean(input.sandbox);
+  const errors = [...validateTerms({ ...input, currency }), ...validateHoldTerms({ holdTtlHours, holdPolicy }), ...validateVetoTerms({ vetoAbove, vetoMinutes, approvalAbove: input.approvalAbove, perTxnLimit: input.perTxnLimit }), ...validateAutonomyTerms({ autonomyStep, autonomyEvery, autonomyCeiling, perTxnLimit: input.perTxnLimit }), ...validateCosignTerms({ cosignAbove, cosignCount, approvalAbove: input.approvalAbove, perTxnLimit: input.perTxnLimit })];
   if (!isCurrencyCode(currency)) errors.push({ field: "currency", message: "Currency must be a 3-letter ISO code." });
+  if (parent) {
+    errors.push(...validateChildTerms(parent, { ...input, currency }));
+    if (parent.depth >= MAX_DELEGATION_DEPTH) errors.push({ field: "parent", message: `Delegation goes at most ${MAX_DELEGATION_DEPTH} levels deep.` });
+    if (parent.status !== "active") errors.push({ field: "parent", message: `The parent mandate is ${parent.status}.` });
+  }
   const [agent] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, workspaceId))).limit(1);
   if (!agent) errors.push({ field: "agentId", message: "Pick an agent in this workspace." });
   if (errors.length) return { ok: false, errors: dedupe(errors) };
-  const token = newToken();
+  const token = newToken(sandbox);
   const row: Mandate = {
     id: randomUUID(), workspaceId, agentId: input.agentId, name: input.name.trim().slice(0, 80), status: "active", currency,
+    cosignAbove, cosignCount, parentId: parent?.id ?? null, depth: parent ? parent.depth + 1 : 0, sandbox: sandbox ? 1 : 0,
     perTxnLimit: input.perTxnLimit, dailyLimit: input.dailyLimit, totalLimit: input.totalLimit, approvalAbove: input.approvalAbove,
     allowedMerchants: JSON.stringify(input.allowedMerchants.map((s) => s.trim().slice(0, 80)).filter(Boolean).slice(0, 50)),
     blockedCategories: JSON.stringify(input.blockedCategories.map((s) => s.trim().slice(0, 64)).filter(Boolean).slice(0, 50)),
     activeHoursStart: input.activeHoursStart, activeHoursEnd: input.activeHoursEnd, timezone: input.timezone, expiresAt: input.expiresAt,
     holdTtlHours, holdPolicy, pausedUntil: null, pausedBy: null,
     vetoAbove, vetoMinutes, mode, autonomyStep, autonomyEvery, autonomyCeiling, autonomyLevel: 0, autonomyStreak: 0,
-    tokenHash: hashToken(token), tokenPrefix: token.slice(0, 10), tokenReveal: token,
+    tokenHash: hashToken(token), tokenPrefix: token.slice(0, sandbox ? 14 : 10), tokenReveal: token,
     stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null, createdAt: new Date(), revokedAt: null,
   };
   await db.transaction(async (tx) => {
@@ -147,6 +162,8 @@ export async function createMandate(workspaceId: string, input: MandateInput): P
       expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null, tokenPrefix: row.tokenPrefix,
       holdTtlHours: row.holdTtlHours, holdPolicy: row.holdPolicy, vetoAbove: row.vetoAbove, vetoMinutes: row.vetoMinutes, mode: row.mode,
       autonomy: row.autonomyStep > 0 ? { step: row.autonomyStep, every: row.autonomyEvery, ceiling: row.autonomyCeiling } : null,
+      cosign: row.cosignAbove != null ? { above: row.cosignAbove, count: row.cosignCount } : null, sandbox: sandbox || undefined,
+      parentId: row.parentId ?? undefined, depth: row.depth || undefined, delegatedBy: input.delegatedBy || undefined,
     });
   });
   // Any plaintext older than the reveal window is cleared right now, not
@@ -224,7 +241,83 @@ export async function revokeMandate(workspaceId: string, id: string, by: string)
     if (r.length === 0) return;
     await tx.update(approvals).set({ status: "expired" }).where(and(eq(approvals.mandateId, id), sql`${approvals.status} in ('pending','approved')`));
     await appendEvent(tx, workspaceId, "mandate.revoked", { mandateId: id, by });
+    // Sub-mandates die with their parent: they spend its money.
+    for (const child of (await familyIds(id, tx)).filter((x) => x !== id)) {
+      const c = await tx.update(mandates).set({ status: "revoked", revokedAt: new Date(), tokenReveal: null }).where(and(eq(mandates.id, child), sql`${mandates.status} in ('active','paused')`)).returning({ id: mandates.id });
+      if (!c.length) continue;
+      await tx.update(approvals).set({ status: "expired" }).where(and(eq(approvals.mandateId, child), sql`${approvals.status} in ('pending','approved')`));
+      await appendEvent(tx, workspaceId, "mandate.revoked", { mandateId: child, by, reason: "parent revoked", parentId: id });
+    }
   });
+}
+
+// ---------- Delegation (sub-mandates) ----------
+
+// The mandate and every mandate delegated from it, transitively.
+export async function familyIds(mandateId: string, conn: Q = db): Promise<string[]> {
+  const r = await conn.execute(sql`with recursive fam as (select id from mandates where id = ${mandateId} union all select m.id from mandates m join fam on m.parent_id = fam.id) select id from fam`);
+  return (r.rows as { id: string }[]).map((x) => x.id);
+}
+
+export async function listChildren(workspaceId: string, parentId: string) {
+  return db.select({ m: mandates, agentName: agents.name }).from(mandates).innerJoin(agents, eq(agents.id, mandates.agentId)).where(and(eq(mandates.workspaceId, workspaceId), eq(mandates.parentId, parentId))).orderBy(desc(mandates.createdAt));
+}
+
+export type DelegateInput = { name: string; perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove?: number | null; allowedMerchants?: string[]; blockedCategories?: string[]; expiresAt?: Date | null; agentName?: string; by?: string };
+
+// An agent carves a narrower mandate out of its own for a helper it runs.
+// The child's terms must fit inside the parent's (validateChildTerms); its
+// spend counts against the parent; it is revoked with the parent. The token
+// is returned once, to the delegating agent, which hands it on.
+export async function delegateMandate(parent: Mandate, input: DelegateInput): Promise<CreateResult> {
+  let agentId = parent.agentId;
+  const agentName = (input.agentName ?? "").trim().slice(0, 80);
+  if (agentName) {
+    const [existing] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.workspaceId, parent.workspaceId), sql`lower(${agents.name}) = lower(${agentName})`)).limit(1);
+    agentId = existing ? existing.id : (await createAgent(parent.workspaceId, { name: agentName, description: `Delegated helper of ${parent.name}` })).id;
+  }
+  const approvalAbove = input.approvalAbove === undefined ? parent.approvalAbove : input.approvalAbove;
+  // The parent's escalation styles carry over where they still make sense
+  // inside the child's smaller limits; otherwise the child simply asks.
+  const vetoAbove = parent.vetoAbove != null && parent.vetoAbove < input.perTxnLimit && (approvalAbove == null || parent.vetoAbove < approvalAbove) ? parent.vetoAbove : null;
+  const cosignAbove = parent.cosignAbove != null && approvalAbove != null && parent.cosignAbove >= approvalAbove && parent.cosignAbove < input.perTxnLimit ? parent.cosignAbove : null;
+  return createMandate(parent.workspaceId, {
+    agentId, name: input.name, currency: parent.currency,
+    perTxnLimit: input.perTxnLimit, dailyLimit: input.dailyLimit, totalLimit: input.totalLimit,
+    approvalAbove,
+    allowedMerchants: input.allowedMerchants ?? parseListSafe(parent.allowedMerchants), blockedCategories: [...new Set([...(input.blockedCategories ?? []), ...parseListSafe(parent.blockedCategories)])],
+    activeHoursStart: parent.activeHoursStart, activeHoursEnd: parent.activeHoursEnd, timezone: parent.timezone,
+    expiresAt: input.expiresAt === undefined ? parent.expiresAt : input.expiresAt,
+    holdTtlHours: parent.holdTtlHours, holdPolicy: parent.holdPolicy as "capture" | "release",
+    vetoAbove, vetoMinutes: parent.vetoMinutes, cosignAbove, cosignCount: parent.cosignCount,
+    parent, delegatedBy: input.by,
+  });
+}
+
+function parseListSafe(json: string): string[] { try { const v = JSON.parse(json); return Array.isArray(v) ? v.map(String) : []; } catch { return []; } }
+
+// The chain of ancestors, nearest first, each with its family's spend.
+async function ancestorFacts(m: Mandate, now: Date, conn: Q): Promise<AncestorFacts[]> {
+  const out: AncestorFacts[] = [];
+  let cur: Mandate = m;
+  for (let i = 0; cur.parentId && i < MAX_DELEGATION_DEPTH + 1; i++) {
+    const [p] = await conn.select().from(mandates).where(eq(mandates.id, cur.parentId)).limit(1);
+    if (!p) break;
+    const fam = await familySpend(p, now, conn);
+    out.push({ mandate: p, spentToday: fam.spentToday, spentTotal: fam.spentTotal, overrides: await activeOverrides(p.id, now, conn) });
+    cur = p;
+  }
+  return out;
+}
+
+async function familySpend(m: Mandate, now: Date, conn: Q): Promise<{ spentToday: number; spentTotal: number }> {
+  const ids = await familyIds(m.id, conn);
+  const dayStart = localDayStart(now, m.timezone);
+  const [today] = await conn.select({ s: sql<number>`coalesce(sum(${transactions.amount}), 0)::int` }).from(transactions)
+    .where(and(inArray(transactions.mandateId, ids), eq(transactions.decision, "approved"), gte(transactions.createdAt, dayStart)));
+  const [total] = await conn.select({ s: sql<number>`coalesce(sum(${transactions.amount}), 0)::int` }).from(transactions)
+    .where(and(inArray(transactions.mandateId, ids), eq(transactions.decision, "approved")));
+  return { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0) };
 }
 
 // ---------- Pause, resume, temporary raises ----------
@@ -302,11 +395,8 @@ export async function withdrawRaise(workspaceId: string, mandateId: string, over
 type Q = Tx | typeof db;
 
 export async function factsFor(m: Mandate, now = new Date(), conn: Q = db, req?: { amount: number; merchant: string }) {
-  const dayStart = localDayStart(now, m.timezone);
-  const [today] = await conn.select({ s: sql<number>`coalesce(sum(${transactions.amount}), 0)::int` }).from(transactions)
-    .where(and(eq(transactions.mandateId, m.id), eq(transactions.decision, "approved"), gte(transactions.createdAt, dayStart)));
-  const [total] = await conn.select({ s: sql<number>`coalesce(sum(${transactions.amount}), 0)::int` }).from(transactions)
-    .where(and(eq(transactions.mandateId, m.id), eq(transactions.decision, "approved")));
+  // A mandate that delegated sub-mandates is charged for their spend too.
+  const { spentToday, spentTotal } = await familySpend(m, now, conn);
   const allowances = await conn.select().from(approvals).where(and(eq(approvals.mandateId, m.id), eq(approvals.status, "approved")));
   const [pend] = await conn.select({ c: sql<number>`count(*)::int` }).from(approvals).where(and(eq(approvals.mandateId, m.id), eq(approvals.status, "pending")));
   let recentlyDenied = false;
@@ -322,7 +412,10 @@ export async function factsFor(m: Mandate, now = new Date(), conn: Q = db, req?:
   }
   const overrides = await activeOverrides(m.id, now, conn);
   const plans = await conn.select().from(schema.plans).where(and(eq(schema.plans.mandateId, m.id), eq(schema.plans.status, "approved")));
-  const facts: Facts = { spentToday: Number(today?.s ?? 0), spentTotal: Number(total?.s ?? 0), approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null, overrides, plans };
+  const [ws] = await conn.select({ frozenAt: schema.workspaceSettings.frozenAt, frozenBy: schema.workspaceSettings.frozenBy, frozenReason: schema.workspaceSettings.frozenReason }).from(schema.workspaceSettings).where(eq(schema.workspaceSettings.workspaceId, m.workspaceId)).limit(1);
+  const frozen = ws?.frozenAt ? { at: new Date(ws.frozenAt), by: ws.frozenBy ?? "", reason: ws.frozenReason ?? undefined } : null;
+  const ancestors = m.parentId ? await ancestorFacts(m, now, conn) : [];
+  const facts: Facts = { spentToday, spentTotal, approvedAllowances: allowances, openPending: Number(pend?.c ?? 0), recentlyDenied, recentlyDeniedAt, availableBalance: null, overrides, plans, frozen, ancestors };
   return facts;
 }
 
@@ -368,7 +461,7 @@ export async function countPending(workspaceId: string): Promise<number> {
 
 // ---------- Authorisation ----------
 
-export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy";
+export type Source = "simulation" | "agent_api" | "mcp" | "stripe" | "proxy" | "dispute";
 export type Settlement = "held" | "captured" | "voided" | "released";
 export type AuthResult = Decision & { transactionId: string; approvalId?: string; notified?: boolean; settlement: Settlement | null; holdExpiresAt: Date | null; flags: Flag[]; shadow: { decision: string; rule: string; reason: string } | null };
 // Postgres int4; also a sanity ceiling no mandate should ever reach.
@@ -393,6 +486,9 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
     const [mandate] = await tx.select().from(mandates).where(eq(mandates.id, m.id)).for("update").limit(1);
     if (!mandate) throw new Error("Mandate vanished.");
     const ws = mandate.workspaceId;
+    // A sub-mandate also locks its ancestors (always upward, so two branches
+    // of one family never deadlock): their family sums must be fresh too.
+    for (let pid = mandate.parentId, i = 0; pid && i <= MAX_DELEGATION_DEPTH; i++) { const [p] = await tx.select({ parentId: mandates.parentId }).from(mandates).where(eq(mandates.id, pid)).for("update").limit(1); pid = p?.parentId ?? null; }
     await expireStale(tx, ws, now);
     const facts = await factsFor(mandate, now, tx, { amount, merchant });
     if (source === "stripe") {
@@ -447,12 +543,14 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       if (existing) { approvalId = existing.id; if (existing.vetoUntil) d.remedy.retryAt = new Date(existing.vetoUntil).toISOString(); }
       else {
         const vetoUntil = veto ? new Date(now.getTime() + mandate.vetoMinutes * 60_000) : null;
-        const a: Approval = { id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, decidedBy: null, expiresAt: null, usedAt: null, flags: JSON.stringify(flags), kind: veto ? "veto" : "ask", vetoUntil, signedWith: null, signature: null };
+        const requiredApprovers = !veto && mandate.cosignAbove != null && amount > mandate.cosignAbove ? mandate.cosignCount : 1;
+        const route = await routeFor(ws, { amount, category, merchant, mandateId: mandate.id }, tx);
+        const a: Approval = { id: randomUUID(), workspaceId: ws, mandateId: mandate.id, amount, currency: mandate.currency, merchant, purpose, status: "pending", requestedAt: now, decidedAt: null, decidedBy: null, expiresAt: null, usedAt: null, flags: JSON.stringify(flags), kind: veto ? "veto" : "ask", vetoUntil, signedWith: null, signature: null, requiredApprovers, signoffs: "[]", routeId: route?.id ?? null };
         await tx.insert(approvals).values(a);
         approvalId = a.id;
         newApproval = a;
         if (vetoUntil) d.remedy.retryAt = vetoUntil.toISOString();
-        await appendEvent(tx, ws, "approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source, actor, flags, kind: a.kind, vetoUntil: vetoUntil ? vetoUntil.toISOString() : null });
+        await appendEvent(tx, ws, "approval.requested", { approvalId: a.id, mandateId: mandate.id, amount, currency: a.currency, merchant, purpose, source, actor, flags, kind: a.kind, vetoUntil: vetoUntil ? vetoUntil.toISOString() : null, requiredApprovers: requiredApprovers > 1 ? requiredApprovers : undefined, route: route ? { id: route.id, name: route.name } : undefined });
       }
     }
 
@@ -477,7 +575,7 @@ export async function authorize(m: Mandate, req: AuthRequest, source: Source, ex
       settledAt: settlement === "captured" ? now : null, settledBy: settlement === "captured" ? "system" : null,
       settlementNote: settlement === "captured" ? (source === "simulation" ? "Simulated purchase; settled at once." : "Mandate settles at once (hold TTL 0).") : null,
       flags: JSON.stringify(flags), shareToken: null,
-      shadowDecision: shadow?.decision ?? null, shadowRule: shadow?.rule ?? null, shadowReason: shadow?.reason ?? null, planId,
+      shadowDecision: shadow?.decision ?? null, shadowRule: shadow?.rule ?? null, shadowReason: shadow?.reason ?? null, planId, disputeId: null,
       createdAt: now,
     };
     await tx.insert(transactions).values(t);
@@ -667,17 +765,37 @@ export async function getApproval(id: string) {
 
 export type HumanSignature = { credentialId: string; alg: number; challenge: string; clientDataJSON: string; authenticatorData: string; signature: string; publicKey: string; userId: string; verifiedAt: string };
 
+export type Signoff = { by: string; at: string; signedWith?: string };
+export function parseSignoffs(json: string): Signoff[] { try { const v = JSON.parse(json); return Array.isArray(v) ? v.filter((x) => x && typeof x.by === "string") : []; } catch { return []; } }
+
 export async function decideApproval(workspaceId: string | null, id: string, decision: "approved" | "denied", by: string, signed?: HumanSignature) {
   const now = new Date();
   return db.transaction(async (tx) => {
     const [a] = await tx.select().from(approvals).where(eq(approvals.id, id)).for("update").limit(1);
     if (!a || (workspaceId && a.workspaceId !== workspaceId)) return null;
+    if (a.status !== "pending") return null;
+    // Co-signing: an approval is one signature of several. Any denial ends
+    // the request; the same person cannot sign twice; the last signature
+    // needed turns the request into an allowance.
+    if (decision === "approved" && a.requiredApprovers > 1) {
+      const signoffs = parseSignoffs(a.signoffs);
+      if (signoffs.some((x) => x.by.toLowerCase() === by.toLowerCase())) return { ...a, status: "pending" as const, cosigned: true, have: signoffs.length, need: a.requiredApprovers, alreadySigned: true };
+      signoffs.push({ by, at: now.toISOString(), signedWith: signed?.credentialId });
+      if (signoffs.length < a.requiredApprovers) {
+        await tx.update(approvals).set({ signoffs: JSON.stringify(signoffs) }).where(eq(approvals.id, id));
+        await appendEvent(tx, a.workspaceId, "approval.cosigned", { approvalId: id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, by, have: signoffs.length, need: a.requiredApprovers, humanSigned: signed ? { credentialId: signed.credentialId, alg: signed.alg, challenge: signed.challenge, signatureSha256: createHash("sha256").update(signed.signature).digest("hex") } : undefined });
+        return { ...a, status: "pending" as const, signoffs: JSON.stringify(signoffs), cosigned: true, have: signoffs.length, need: a.requiredApprovers };
+      }
+      await tx.update(approvals).set({ signoffs: JSON.stringify(signoffs) }).where(eq(approvals.id, id));
+      by = signoffs.map((x) => x.by).join(" + ");
+    }
     const r = await tx.update(approvals)
       .set({ status: decision, decidedAt: now, decidedBy: by, expiresAt: decision === "approved" ? new Date(now.getTime() + ALLOWANCE_TTL_MS) : null, signedWith: signed?.credentialId ?? null, signature: signed ? JSON.stringify(signed) : null })
       .where(and(eq(approvals.id, id), eq(approvals.status, "pending"))).returning({ id: approvals.id });
     if (r.length === 0) return null;
     await appendEvent(tx, a.workspaceId, `approval.${decision}`, {
       approvalId: id, mandateId: a.mandateId, amount: a.amount, currency: a.currency, merchant: a.merchant, by, validForMs: decision === "approved" ? ALLOWANCE_TTL_MS : null, kind: a.kind,
+      cosigned: a.requiredApprovers > 1 ? a.requiredApprovers : undefined,
       humanSigned: signed ? { credentialId: signed.credentialId, alg: signed.alg, challenge: signed.challenge, signatureSha256: createHash("sha256").update(signed.signature).digest("hex") } : undefined,
     });
     // A denial is the owner saying "no": earned autonomy steps back down.
@@ -901,9 +1019,108 @@ export async function unshareTransaction(workspaceId: string, transactionId: str
 
 // ---------- Workspace settings ----------
 
-export async function getWorkspaceSettings(workspaceId: string): Promise<{ currency: string }> {
+export type WorkspaceSettingsView = { currency: string; frozen: { at: Date; by: string; reason: string } | null };
+
+export async function getWorkspaceSettings(workspaceId: string): Promise<WorkspaceSettingsView> {
   const [s] = await db.select().from(schema.workspaceSettings).where(eq(schema.workspaceSettings.workspaceId, workspaceId)).limit(1);
-  return { currency: s?.currency ?? "USD" };
+  return { currency: s?.currency ?? "USD", frozen: s?.frozenAt ? { at: new Date(s.frozenAt), by: s.frozenBy ?? "", reason: s.frozenReason ?? "" } : null };
+}
+
+// ---------- The panic button ----------
+
+// One press stops every agent in the workspace on every rail: cards, API,
+// MCP, proxy. Mandates are untouched (nothing is revoked, no token changes);
+// the freeze is a workspace fact the policy engine checks first, so lifting
+// it puts everything back exactly as it was.
+export async function freezeWorkspace(workspaceId: string, by: string, reason = "") {
+  const now = new Date();
+  await db.transaction(async (tx) => {
+    const [cur] = await tx.select({ frozenAt: schema.workspaceSettings.frozenAt }).from(schema.workspaceSettings).where(eq(schema.workspaceSettings.workspaceId, workspaceId)).limit(1);
+    if (cur?.frozenAt) return;
+    await tx.insert(schema.workspaceSettings).values({ workspaceId, currency: "USD", frozenAt: now, frozenBy: by.slice(0, 120), frozenReason: reason.trim().slice(0, 300), updatedAt: now })
+      .onConflictDoUpdate({ target: schema.workspaceSettings.workspaceId, set: { frozenAt: now, frozenBy: by.slice(0, 120), frozenReason: reason.trim().slice(0, 300), updatedAt: now } });
+    await appendEvent(tx, workspaceId, "workspace.frozen", { by, reason: reason.trim().slice(0, 300), at: now.toISOString() });
+  });
+}
+
+export async function unfreezeWorkspace(workspaceId: string, by: string) {
+  await db.transaction(async (tx) => {
+    const r = await tx.update(schema.workspaceSettings).set({ frozenAt: null, frozenBy: null, frozenReason: null, updatedAt: new Date() }).where(and(eq(schema.workspaceSettings.workspaceId, workspaceId), sql`${schema.workspaceSettings.frozenAt} is not null`)).returning({ id: schema.workspaceSettings.workspaceId });
+    if (r.length) await appendEvent(tx, workspaceId, "workspace.unfrozen", { by });
+  });
+}
+
+// ---------- Disputes ----------
+
+export type DisputeResult = { ok: true; dispute: Dispute } | { ok: false; error: string };
+
+// The owner contests a decision: the agent bought something it should not
+// have, or the merchant did not deliver. Opening one marks the transaction,
+// optionally pauses the mandate, and tells the approvers. Resolving it as
+// refunded posts a negative approved row (like a card refund) so the
+// mandate's limits net down; upheld keeps the money; withdrawn closes it.
+export async function openDispute(workspaceId: string, transactionId: string, input: { reason: string; by: string; pause?: boolean }): Promise<DisputeResult> {
+  const now = new Date();
+  return db.transaction(async (tx): Promise<DisputeResult> => {
+    const [t] = await tx.select().from(transactions).where(and(eq(transactions.id, transactionId), eq(transactions.workspaceId, workspaceId))).for("update").limit(1);
+    if (!t) return { ok: false, error: "No such decision in this workspace." };
+    if (t.decision !== "approved") return { ok: false, error: "Only an approved decision can be disputed; nothing was spent here." };
+    if (t.disputeId) return { ok: false, error: "This decision is already under dispute." };
+    if (t.amount <= 0) return { ok: false, error: "Nothing was charged for this decision." };
+    const row: Dispute = { id: randomUUID(), workspaceId, transactionId: t.id, mandateId: t.mandateId, amount: t.amount, currency: t.currency, merchant: t.merchant, reason: input.reason.trim().slice(0, 500), status: "open", openedBy: input.by.slice(0, 120), openedAt: now, resolvedAt: null, resolvedBy: null, resolution: "" };
+    await tx.insert(schema.disputes).values(row);
+    await tx.update(transactions).set({ disputeId: row.id }).where(eq(transactions.id, t.id));
+    await appendEvent(tx, workspaceId, "dispute.opened", { disputeId: row.id, transactionId: t.id, mandateId: t.mandateId, amount: t.amount, currency: t.currency, merchant: t.merchant, reason: row.reason, by: input.by });
+    if (input.pause) {
+      const r = await tx.update(mandates).set({ status: "paused", pausedUntil: null, pausedBy: input.by.slice(0, 120) }).where(and(eq(mandates.id, t.mandateId), eq(mandates.status, "active"))).returning({ id: mandates.id });
+      if (r.length) await appendEvent(tx, workspaceId, "mandate.paused", { mandateId: t.mandateId, by: input.by, until: null, reason: `dispute ${row.id.slice(0, 8)} opened` });
+    }
+    return { ok: true, dispute: row };
+  });
+}
+
+export async function resolveDispute(workspaceId: string, id: string, outcome: "refunded" | "upheld" | "withdrawn", by: string, note = ""): Promise<DisputeResult> {
+  const now = new Date();
+  return db.transaction(async (tx): Promise<DisputeResult> => {
+    const [d] = await tx.select().from(schema.disputes).where(and(eq(schema.disputes.id, id), eq(schema.disputes.workspaceId, workspaceId))).for("update").limit(1);
+    if (!d) return { ok: false, error: "No such dispute." };
+    if (d.status !== "open") return { ok: false, error: `This dispute is already ${d.status}.` };
+    const [updated] = await tx.update(schema.disputes).set({ status: outcome, resolvedAt: now, resolvedBy: by.slice(0, 120), resolution: note.trim().slice(0, 500) }).where(eq(schema.disputes.id, id)).returning();
+    if (outcome === "refunded") {
+      const [t] = await tx.select().from(transactions).where(eq(transactions.id, d.transactionId)).limit(1);
+      if (t) await tx.insert(transactions).values({ id: randomUUID(), workspaceId, mandateId: t.mandateId, amount: -d.amount, currency: t.currency, merchant: t.merchant, category: t.category, purpose: `Refund after dispute ${d.id.slice(0, 8)}`, decision: "approved", reason: "Dispute resolved in the owner's favour.", source: "dispute", actor: by.slice(0, 120), stripeAuthorizationId: null, approvalId: null, authorizedAmount: -d.amount, settlement: "captured", holdExpiresAt: null, settledAt: now, settledBy: by.slice(0, 120), settlementNote: `Refund of ${d.amount} after dispute.`, flags: "[]", shareToken: null, shadowDecision: null, shadowRule: null, shadowReason: null, planId: null, disputeId: d.id, createdAt: now });
+    }
+    if (outcome === "withdrawn") await tx.update(transactions).set({ disputeId: null }).where(eq(transactions.id, d.transactionId));
+    await appendEvent(tx, workspaceId, `dispute.${outcome}`, { disputeId: d.id, transactionId: d.transactionId, mandateId: d.mandateId, amount: d.amount, currency: d.currency, merchant: d.merchant, by, note: note.trim().slice(0, 500) });
+    return { ok: true, dispute: updated };
+  });
+}
+
+export async function listDisputes(workspaceId: string, opts: { status?: string; mandateId?: string } = {}) {
+  return db.select({ d: schema.disputes, mandateName: mandates.name, agentName: agents.name }).from(schema.disputes)
+    .innerJoin(mandates, eq(mandates.id, schema.disputes.mandateId)).innerJoin(agents, eq(agents.id, mandates.agentId))
+    .where(and(eq(schema.disputes.workspaceId, workspaceId), opts.status ? eq(schema.disputes.status, opts.status) : undefined, opts.mandateId ? eq(schema.disputes.mandateId, opts.mandateId) : undefined))
+    .orderBy(desc(schema.disputes.openedAt)).limit(200);
+}
+
+// ---------- Sandbox ----------
+
+// Wipe a sandbox mandate's decisions so an integration test starts clean.
+// The ledger is append-only: the wipe itself is recorded, the rows go.
+export async function resetSandbox(workspaceId: string, id: string, by: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [m] = await tx.select({ sandbox: mandates.sandbox }).from(mandates).where(and(eq(mandates.id, id), eq(mandates.workspaceId, workspaceId))).for("update").limit(1);
+    if (!m || m.sandbox !== 1) return false;
+    const fam = await familyIds(id, tx);
+    const t = await tx.delete(transactions).where(inArray(transactions.mandateId, fam)).returning({ id: transactions.id });
+    const a = await tx.delete(approvals).where(inArray(approvals.mandateId, fam)).returning({ id: approvals.id });
+    await tx.delete(schema.plans).where(inArray(schema.plans.mandateId, fam));
+    await tx.delete(schema.disputes).where(inArray(schema.disputes.mandateId, fam));
+    await tx.delete(idempotencyKeys).where(inArray(idempotencyKeys.mandateId, fam));
+    await tx.update(mandates).set({ autonomyLevel: 0, autonomyStreak: 0 }).where(eq(mandates.id, id));
+    await appendEvent(tx, workspaceId, "mandate.sandbox_reset", { mandateId: id, by, transactions: t.length, approvals: a.length });
+    return true;
+  });
 }
 
 export async function saveWorkspaceSettings(workspaceId: string, input: { currency: string }, by: string) {
@@ -916,6 +1133,12 @@ export async function saveWorkspaceSettings(workspaceId: string, input: { curren
 }
 
 export async function purgeWorkspace(tx: Tx, workspaceId: string) {
+  await tx.delete(schema.disputes).where(eq(schema.disputes.workspaceId, workspaceId));
+  await tx.delete(schema.approvalRoutes).where(eq(schema.approvalRoutes.workspaceId, workspaceId));
+  await tx.delete(schema.proxyTargets).where(eq(schema.proxyTargets.workspaceId, workspaceId));
+  await tx.delete(schema.ledgerAnchors).where(eq(schema.ledgerAnchors.workspaceId, workspaceId));
+  await tx.delete(schema.plans).where(eq(schema.plans.workspaceId, workspaceId));
+  await tx.delete(schema.mandateOverrides).where(eq(schema.mandateOverrides.workspaceId, workspaceId));
   await tx.delete(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.workspaceId, workspaceId));
   await tx.delete(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.workspaceId, workspaceId));
   await tx.delete(schema.notes).where(eq(schema.notes.workspaceId, workspaceId));

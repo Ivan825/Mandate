@@ -18,7 +18,7 @@ export default async function DocsPage() {
           <h3>1. Connect with one click (MCP + OAuth) — Claude, ChatGPT, Cursor, and any MCP client</h3>
           <p className="muted" style={{ marginTop: 8 }}>Mandate is a remote MCP server. Add it in your agent's connectors or MCP settings using this URL; the agent will send you here to sign in and approve, and receives a scoped token automatically. Nothing to copy.</p>
           <pre>{MCP_RESOURCE}</pre>
-          <p className="muted">The agent gets eight tools: <code>list_mandates</code>, <code>check_mandate</code>, <code>request_purchase</code>, then <code>capture_purchase</code> / <code>void_purchase</code> to settle what it actually paid, <code>get_purchase</code>, and <code>propose_plan</code> / <code>get_plan</code> to get a whole shopping list approved once. Scopes: <code>mandate:read</code> to see limits, <code>mandate:spend</code> to ask to spend. You can disconnect any agent from Settings.</p>
+          <p className="muted">The agent gets nine tools: <code>list_mandates</code>, <code>check_mandate</code>, <code>request_purchase</code>, then <code>capture_purchase</code> / <code>void_purchase</code> to settle what it actually paid, <code>get_purchase</code>, <code>propose_plan</code> / <code>get_plan</code> to get a whole shopping list approved once, and <code>delegate</code> to carve a narrower sub-mandate out for a helper. Scopes: <code>mandate:read</code> to see limits, <code>mandate:spend</code> to ask to spend. You can disconnect any agent from Settings.</p>
           <pre>{`# Claude Code
 claude mcp add --transport http mandate ${MCP_RESOURCE}
 
@@ -45,15 +45,26 @@ GET  ${base}/api/agent/plans/:id   # proposed | approved | denied | completed �
 POST ${base}/api/agent/capture     { "transactionId": "…", "amount": 940, "note": "order #1234" }
 POST ${base}/api/agent/void        { "transactionId": "…", "reason": "checkout failed" }
 GET  ${base}/api/agent/transactions/:id                  # held | captured | voided | released
-GET  ${base}/api/agent/mandate                           # limits, what's left, open holds`}</pre>
+GET  ${base}/api/agent/transactions/:id/voucher          # signed voucher to hand the merchant
+POST ${base}/api/agent/delegate    { "name": "Price checker", "perTxnLimit": 500, "dailyLimit": 2000, "totalLimit": 5000, "allowedMerchants": ["OpenAI"] }
+GET  ${base}/api/agent/mandate                           # limits, what's left, open holds, sub-mandates`}</pre>
+          <p className="muted" style={{ marginTop: 10 }}><strong>Vouchers.</strong> An approved hold's answer includes <code>voucher</code>: a signed token the agent hands to the merchant. The merchant verifies it offline with the key at <code>/.well-known/mandate-receipt-key</code> (or <code>POST /api/vouchers/verify</code>) and redeems it at <code>POST /api/vouchers/redeem</code> for what was actually sold — no account, no card network. A decline with rule <code>frozen</code> means the owner pressed the panic button: stop and tell the user. A decline with rule <code>parent_…</code> means a sub-mandate ran into its parent's terms.</p>
+          <pre>{`# merchant side, no account needed
+POST ${base}/api/vouchers/verify   { "voucher": "mv1.…" }                       → valid, redeemable, amount, expiresAt
+POST ${base}/api/vouchers/redeem   { "voucher": "mv1.…", "amount": 1800, "merchant": "Acme", "reference": "INV-42" }
+# offline: Ed25519.verify(publicKey, "mandate-voucher|" + base64urlDecode(payload), signature)`}</pre>
+          <p className="muted" style={{ marginTop: 10 }}><strong>Sandbox.</strong> A mandate issued as a sandbox has a <code>mnd_test_</code> token; it decides, asks and records exactly like a live one, never touches a card or a real API, and can be reset from its page. Use it in your integration tests.</p>
         </div>
 
         <div className="card">
-          <h3>3. Meter LLM API spend with a proxy key (OpenAI, Anthropic, Gemini)</h3>
+          <h3>3. Meter LLM API spend with a proxy key (OpenAI, Anthropic, Gemini) — or govern any API</h3>
           <p className="muted" style={{ marginTop: 8 }}>Store your provider key once on the <Link href="/proxy">API proxy</Link> page and hand the agent a proxy key bound to a USD mandate. Point the SDK's base URL at Mandate and change nothing else: each call is priced from the request, pre-authorised against the mandate, forwarded with the real key, and settled on the tokens the provider reports. The agent never holds the real key, so it cannot spend past the mandate.</p>
           <pre>{`OPENAI_BASE_URL=${base}/api/proxy/openai      OPENAI_API_KEY=mpx_...
 ANTHROPIC_BASE_URL=${base}/api/proxy/anthropic ANTHROPIC_API_KEY=mpx_...
-# Gemini: base URL ${base}/api/proxy/gemini with x-goog-api-key: mpx_...`}</pre>
+# Gemini: base URL ${base}/api/proxy/gemini with x-goog-api-key: mpx_...
+
+# any other API, added as a custom target on the API proxy page (credential injected, priced per call or from the response):
+GET  ${base}/api/proxy/t/<slug>/<path>     Authorization: Bearer mpx_...   # any method`}</pre>
         </div>
 
         <div className="card">

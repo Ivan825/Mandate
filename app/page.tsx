@@ -16,7 +16,9 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
     exposureBook(ctx.workspaceId), recentTransactions(ctx.workspaceId, 12), listAgents(ctx.workspaceId),
     listChannels(ctx.userId), listConnectedAgents(ctx.userId),
   ]);
-  const active = book.filter((b) => b.effectiveStatus === "active");
+  // Sandbox mandates and sub-mandates stay out of the headline totals: the
+  // first are tests, the second already count inside their parents.
+  const active = book.filter((b) => b.effectiveStatus === "active" && b.mandate.sandbox !== 1 && !b.mandate.parentId);
   const byCcy = new Map<string, { limit: number; used: number }>();
   for (const b of active) {
     const c = byCcy.get(b.mandate.currency) ?? { limit: 0, used: 0 };
@@ -82,12 +84,13 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
             {book.length === 0 && (
               <tr><td colSpan={7} className="empty">No mandates yet. <Link href="/mandates/new">Issue one</Link> to an agent.</td></tr>
             )}
-            {book.map((b) => (
+            {ordered(book).map((b) => (
               <tr key={b.mandate.id}>
                 <td>
-                  <div style={{ fontWeight: 500 }}>{b.agentName}</div>
-                  <Link href={`/mandates/${b.mandate.id}`}>{b.mandate.name}</Link>
+                  <div style={{ fontWeight: 500 }}>{b.mandate.parentId && <span className="tree">{"└ ".repeat(1)}</span>}{b.agentName}</div>
+                  {b.mandate.parentId && <span className="tree" style={{ visibility: "hidden" }}>└ </span>}<Link href={`/mandates/${b.mandate.id}`}>{b.mandate.name}</Link>
                   {b.mandate.cardLast4 && <span className="faint mono"> · card ···{b.mandate.cardLast4}</span>}
+                  {b.mandate.sandbox === 1 && <> <Pill v="sandbox" /></>}
                 </td>
                 <td><Pill v={b.effectiveStatus} />{b.pendingApprovals > 0 && <div style={{ marginTop: 4 }}><Pill v="pending" /> <span className="faint num">{b.pendingApprovals}</span></div>}{b.openHolds > 0 && <div style={{ marginTop: 4 }}><Pill v="held" /> <span className="faint num">{b.openHolds}</span></div>}</td>
                 <td><Util used={b.spentToday} limit={b.mandate.dailyLimit} currency={b.mandate.currency} label="daily" /></td>
@@ -123,4 +126,14 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
       </div>
     </>
   );
+}
+
+// Parents first, each followed by its sub-mandates, so the family reads as a tree.
+function ordered<T extends { mandate: { id: string; parentId: string | null } }>(book: T[]): T[] {
+  const byParent = new Map<string | null, T[]>();
+  for (const b of book) { const k = b.mandate.parentId && book.some((x) => x.mandate.id === b.mandate.parentId) ? b.mandate.parentId : null; byParent.set(k, [...(byParent.get(k) ?? []), b]); }
+  const out: T[] = [];
+  const walk = (parent: string | null) => { for (const b of byParent.get(parent) ?? []) { out.push(b); walk(b.mandate.id); } };
+  walk(null);
+  return out;
 }

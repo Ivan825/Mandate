@@ -4,6 +4,30 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-25
+
+Authority that travels, authority that is shared, and a history nobody can quietly rewrite: vouchers a merchant verifies without an account, sub-mandates an agent delegates, co-signed approvals, routed inboxes, disputes, a panic button, public anchoring, sandboxes, and a proxy for any API.
+
+### Added
+- **Panic button** ("Freeze all" in the top bar, two clicks): `workspace_settings.frozen_*`; the engine's first rule is now `frozen`, so every rail declines with `approvalRequired` until unfrozen. Nothing is revoked. Ledger events `workspace.frozen` / `workspace.unfrozen`.
+- **Authorisation vouchers**: an approved hold's answer carries `voucher` (`mv1.<payload>.<Ed25519 sig>`), also at `GET /api/agent/transactions/:id/voucher`, MCP `get_voucher`, SDK `voucher()`. Merchants verify offline with `/.well-known/mandate-receipt-key` (or `POST /api/vouchers/verify`) and redeem at `POST /api/vouchers/redeem` for at most the authorised amount, once; the capture is recorded as `merchant:<name>`.
+- **Co-signing**: `cosign_above` / `cosign_count` (2–5) on a mandate; asks above the threshold need that many distinct approvers (`approvals.required_approvers`, `signoffs`); one denial ends the request; passkey-signed co-signatures are recorded; the inbox shows progress and hides the button once you have signed. Event `approval.cosigned`.
+- **Approval routing** (`/settings/routing`): routes by amount band, category, merchant pattern and mandate to chosen deciders, in priority order; the matching route is stored on the request (`approvals.route_id`), notifications and push go to its members, and the inbox marks the request as theirs. Everyone who may decide still may.
+- **Sub-mandates**: `POST /api/agent/delegate`, MCP `delegate`, SDK `delegate()`. Terms must fit inside the parent (`validateChildTerms`); the parent's veto, co-sign, hold and hours carry over where they still make sense; `mandates.parent_id` / `depth` (max 3); a family's spend counts against every ancestor (`parent_<rule>` declines); revocation cascades; the exposure page draws the tree.
+- **Disputes**: open one from a decision row (optionally pausing the mandate); resolve from the inbox or the mandate page as refunded (a negative approved row nets the limits down), upheld or withdrawn. Table `disputes`, `transactions.dispute_id`, events `dispute.*`.
+- **Ledger anchoring**: `ledger_anchors` — a public, deployment-wide chain of signed ledger heads (`/anchors`, `GET /api/ledger/anchors`), written by the daily cron and by the health ping when a day has passed; a workspace appears as `sha256("mandate-ws:" + id)`. The ledger page shows the latest anchor; transaction receipts carry the anchor covering their decision rows; anchor verification tolerates key rotation.
+- **Sandbox mandates**: `mandates.sandbox`, `mnd_test_` tokens, no cards or proxy keys, excluded from stats and headline totals, "Reset sandbox" wipes decisions (event `mandate.sandbox_reset`).
+- **Generic API proxy**: `proxy_targets` (any https API, credential injected in a chosen header, priced per call or from a response header / JSON path); `/api/proxy/t/<slug>/…` for any method; proxy keys can bind to a target (`proxy_keys.target_id`); settlement caps at the pre-authorised amount and warns on overrun. `PROXY_TARGET_ALLOW_PRIVATE=1` permits private base URLs for self-hosted internal APIs.
+- Activity feed group **Disputes**; sentences for every new event; MCP server and stdio server 0.7.0; SDKs 0.7.0 (`voucher`, `delegate`, `sandbox`).
+
+### Changed
+- `proxy_keys.provider_key_id` is now nullable (a key is bound to a provider key or a target).
+- `GET /api/agent/mandate` reports `sandbox`, `frozen`, `parentId`, `subMandates` and co-sign terms.
+- The engine's rule order is now: frozen, paused, status, expiry, hours, merchant, category, per-transaction, daily, total, balance, **ancestors**, plan, escalation, veto.
+
+### Migration
+`npm run db:migrate` (adds `0010`). Optional: `PROXY_TARGET_ALLOW_PRIVATE=1`. The daily cron (`/api/cron/cleanup`) now also anchors ledgers.
+
 ## [0.6.0] — 2026-09-25
 
 The ideas nobody else has shipped: approval by silence, plans approved once, terms you can rehearse, history you can replay, limits that are earned, and approvals a human provably signed.

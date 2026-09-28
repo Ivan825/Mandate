@@ -8,7 +8,7 @@
 // Amounts are integers in the mandate's minor unit (cents, paise). Uses the
 // global fetch; no dependencies.
 
-export const VERSION = "0.6.0";
+export const VERSION = "0.7.0";
 export const DEFAULT_BASE_URL = "https://mandate-ashen.vercel.app";
 
 export type Remedy = { message: string; retryAt?: string; maxAmountNow?: number; approvalRequired?: boolean; allowedMerchants?: string[] };
@@ -16,11 +16,16 @@ export type Settlement = "held" | "captured" | "voided" | "released";
 export type Decision = {
   decision: "approved" | "declined" | "pending"; reason: string; rule: string; transactionId: string; approvalId: string | null;
   settlement: Settlement | null; holdExpiresAt: string | null; remedy?: Remedy; next?: string;
+  /** Signed authorisation voucher (mv1.…) to hand the merchant; present on approved holds. */
+  voucher?: string;
   remaining?: { today: number; total: number; perTransaction: number; currency: string };
 };
+export type Voucher = { voucher: string; payload: { tx: string; mandate: string; agent: string; amount: number; currency: string; merchant: string; expiresAt: string }; expiresAt: string; verifyUrl: string; redeemUrl: string; publicKeyUrl: string };
+export type DelegateInput = { name: string; perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove?: number | null; allowedMerchants?: string[]; blockedCategories?: string[]; expiresAt?: string | null; agentName?: string };
+export type Delegated = { mandateId: string; parentId: string; name: string; token: string; currency: string; depth: number; limits: { perTransaction: number; daily: number; total: number; approvalAbove: number | null }; expiresAt: string | null; next: string };
 export type SettledState = { transactionId: string; settlement: Settlement | null; authorizedAmount: number; capturedAmount: number | null; released: number; currency: string; merchant: string; settledAt: string | null; settledBy: string | null; note: string | null };
 export type PlanState = { planId: string; title: string; status: "proposed" | "approved" | "denied" | "expired" | "completed" | "cancelled"; currency: string; totalMax: number; items: { index: number; merchant: string; amount: number; purpose: string; used: boolean; transactionId: string | null }[]; expiresAt: string | null };
-export type MandateInfo = { mandate: string; mandateId: string; status: string; currency: string; limits: { perTransaction: number; daily: number; total: number; approvalAbove: number | null }; remaining: { today: number; total: number }; scope: { allowedMerchants: string[]; blockedCategories: string[]; activeHours: [number, number]; timezone: string }; holds: { ttlHours: number; onExpiry: string; open: SettledState[] }; pendingApprovals: number; expiresAt: string | null };
+export type MandateInfo = { mandate: string; mandateId: string; status: string; currency: string; sandbox?: boolean; frozen?: boolean; parentId?: string | null; subMandates?: { mandateId: string; name: string; agent: string; status: string }[]; limits: { perTransaction: number; daily: number; total: number; approvalAbove: number | null; cosignAbove?: number | null; cosignCount?: number | null }; remaining: { today: number; total: number }; scope: { allowedMerchants: string[]; blockedCategories: string[]; activeHours: [number, number]; timezone: string }; holds: { ttlHours: number; onExpiry: string; open: SettledState[] }; pendingApprovals: number; expiresAt: string | null };
 
 export class MandateError extends Error {
   constructor(message: string, public status?: number, public body?: Record<string, unknown>) { super(message); this.name = "MandateError"; }
@@ -43,7 +48,7 @@ export class Mandate {
   private readonly fetchImpl: typeof fetch;
 
   constructor(token: string, opts: { baseUrl?: string; timeoutMs?: number; fetch?: typeof fetch } = {}) {
-    if (!token || !token.startsWith("mnd_")) throw new MandateAuthError("A mandate token (mnd_…) is required.");
+    if (!token || !token.startsWith("mnd_")) throw new MandateAuthError("A mandate token (mnd_… or mnd_test_…) is required.");
     this.token = token;
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.timeoutMs = opts.timeoutMs ?? 15_000;
@@ -132,6 +137,27 @@ export class Mandate {
     if (status !== 200) throw new MandateError(body.error ?? `HTTP ${status}`, status, body as Record<string, unknown>);
     return body;
   }
+
+  /** The signed voucher for an approved hold, to hand to the merchant (who verifies offline and redeems it). */
+  async voucher(transactionId: string): Promise<Voucher> {
+    const { status, body } = await this.request<Voucher>("GET", `/api/agent/transactions/${encodeURIComponent(transactionId)}/voucher`);
+    if (status !== 200) throw new MandateError(body.error ?? `HTTP ${status}`, status, body as Record<string, unknown>);
+    return body;
+  }
+
+  /**
+   * Carve a narrower sub-mandate out of this one for a helper agent. Terms must fit inside this
+   * mandate's; the helper's spend counts against these limits; revoking this mandate revokes it.
+   * Returns a ready-to-use client for the helper (and the raw token once, in `.token`).
+   */
+  async delegate(input: DelegateInput): Promise<Delegated & { client: Mandate }> {
+    const { status, body } = await this.request<Delegated & { errors?: unknown }>("POST", "/api/agent/delegate", input);
+    if (status !== 201) throw new MandateError(body.error ?? `HTTP ${status}`, status, body as Record<string, unknown>);
+    return { ...body, client: new Mandate(body.token, { baseUrl: this.baseUrl, timeoutMs: this.timeoutMs, fetch: this.fetchImpl }) };
+  }
+
+  /** Is this a sandbox (mnd_test_) token? Decisions are real, money never is. */
+  get sandbox(): boolean { return this.token.startsWith("mnd_test_"); }
 
   /** Limits, what is left, open holds — so the agent can plan. */
   async mandate(): Promise<MandateInfo> {

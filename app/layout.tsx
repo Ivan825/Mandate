@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
-import { countPending } from "@/lib/service";
+import { countPending, getWorkspaceSettings } from "@/lib/service";
+import { PanicButton } from "./panic";
 import { configProblems } from "@/lib/db";
 import { getCtx } from "@/lib/session";
 import { headers } from "next/headers";
 import { auth } from "@/lib/auth";
-import { signOutAction, switchWorkspaceAction } from "./actions";
+import { signOutAction, switchWorkspaceAction, freezeWorkspaceAction, unfreezeWorkspaceAction } from "./actions";
 import { WorkspaceSwitcher } from "./switcher";
 import { ThemeToggle, type Theme } from "./theme";
 import { LiveRefresh } from "./live";
@@ -35,8 +36,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const ctx = await getCtx();
   let pending = 0;
   let orgs: { id: string; name: string }[] = [];
+  let frozen: { at: Date; by: string; reason: string } | null = null;
   if (ctx) {
     try { pending = await countPending(ctx.workspaceId); } catch { /* db not ready yet */ }
+    try { frozen = (await getWorkspaceSettings(ctx.workspaceId)).frozen; } catch { /* ignore */ }
     try { orgs = (await auth.api.listOrganizations({ headers: await headers() })).map((o) => ({ id: o.id, name: o.name })); } catch { /* ignore */ }
   }
   const problems = configProblems();
@@ -69,6 +72,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             {ctx ? (
               <>
                 <WorkspaceSwitcher current={ctx.workspaceId} orgs={orgs} action={switchWorkspaceAction} />
+                {(ctx.role === "owner" || ctx.role === "admin") && !frozen && <PanicButton action={freezeWorkspaceAction} />}
                 {(ctx.role === "owner" || ctx.role === "admin") && <Link href="/mandates/new" className="btn accent sm">Issue mandate</Link>}
                 <form action={signOutAction}><button className="btn secondary sm" type="submit" title={ctx.email}>Sign out</button></form>
               </>
@@ -82,6 +86,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         </div>
         <main className="main">
           {problems.length > 0 && isOperator(ctx?.email) && <div className="notice bad" style={{ marginBottom: 20 }}><strong>Configuration problem (shown to operators only).</strong> {problems.join(" ")}</div>}
+          {ctx && frozen && (
+            <div className="notice bad frozen" style={{ marginBottom: 20 }}>
+              <div className="page-head" style={{ marginBottom: 0 }}>
+                <div><strong>Everything is frozen.</strong> {frozen.by} pressed the panic button {new Date(frozen.at).toUTCString().replace(" GMT", " UTC")}{frozen.reason ? <> — “{frozen.reason}”</> : null}. Every agent in this workspace is declined on every rail — cards, API, MCP, proxy — until someone unfreezes. Nothing was revoked; lifting the freeze puts everything back as it was.</div>
+                {(ctx.role === "owner" || ctx.role === "admin") && <form action={unfreezeWorkspaceAction}><button className="btn ok" type="submit">Unfreeze</button></form>}
+              </div>
+            </div>
+          )}
           {children}
         </main>
         <footer className="sitefoot">

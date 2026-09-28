@@ -17,10 +17,11 @@ export async function statsRows(workspaceId: string): Promise<{ rows: StatRow[];
   }).from(schema.transactions)
     .innerJoin(schema.mandates, eq(schema.mandates.id, schema.transactions.mandateId))
     .innerJoin(schema.agents, eq(schema.agents.id, schema.mandates.agentId))
-    .where(and(eq(schema.transactions.workspaceId, workspaceId), gte(schema.transactions.createdAt, since)))
+    // Sandbox mandates are for testing; their decisions stay out of the numbers.
+    .where(and(eq(schema.transactions.workspaceId, workspaceId), gte(schema.transactions.createdAt, since), eq(schema.mandates.sandbox, 0)))
     .orderBy(desc(schema.transactions.createdAt)).limit(STATS_CAP + 1);
   const mandates = await db.select({ id: schema.mandates.id, name: schema.mandates.name, agent: schema.agents.name, status: schema.mandates.status, totalLimit: schema.mandates.totalLimit, currency: schema.mandates.currency })
-    .from(schema.mandates).innerJoin(schema.agents, eq(schema.agents.id, schema.mandates.agentId)).where(eq(schema.mandates.workspaceId, workspaceId));
+    .from(schema.mandates).innerJoin(schema.agents, eq(schema.agents.id, schema.mandates.agentId)).where(and(eq(schema.mandates.workspaceId, workspaceId), eq(schema.mandates.sandbox, 0)));
   return {
     // A voided or released hold spent nothing; the stats treat it like the old "voided" decision.
     rows: rows.slice(0, STATS_CAP).map((r) => ({ t: new Date(r.t).getTime(), a: r.a, c: r.c, d: (r.st === "voided" || r.st === "released" ? "voided" : r.d) as StatRow["d"], r: r.r, m: r.m, s: r.s, ag: r.ag, md: r.md, mid: r.mid })),

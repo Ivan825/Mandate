@@ -28,8 +28,12 @@ else:
 - `authorize(amount, merchant, purpose=None, category=None, idempotency_key=None, wait_for=0, poll_every=5)` — with `wait_for` seconds, a *pending* answer is polled (same key) until the owner decides.
 - `capture(transaction_id, amount=None, note=None)`, `void(transaction_id, reason=None)`, `get(transaction_id)`, `mandate()`.
 - `hold(...)` raises `MandateDeclined` (with `.remedy`) or `MandatePending` instead of returning a non-approval.
+- `propose_plan(title, items, wait_for=0)`, `get_plan(plan_id)` — get a whole shopping list approved once.
+- `voucher(transaction_id)` — the signed authorisation voucher for an approved hold (also on the answer as `raw["voucher"]`): hand it to the merchant, who verifies it offline and redeems it for what was actually sold.
+- `delegate(name, per_txn_limit, daily_limit, total_limit, ...)` — carve a narrower sub-mandate out of yours for a helper; returns a client for it (token on `.token`). Its spend counts against your limits; revoking yours revokes it.
+- `sandbox` — True for a `mnd_test_` token (decisions are real, money never is).
 
-Amounts are integers in the mandate's minor unit (cents, paise).
+Amounts are integers in the mandate's minor unit (cents, paise). A decline with rule `frozen` means the owner pressed the panic button — stop and tell the user.
 
 ## Agent frameworks
 

@@ -32,7 +32,16 @@ export type Facts = {
   overrides?: MandateOverride[];
   // Approved, unexpired plans on this mandate (lib/service loads them).
   plans?: Plan[];
+  // The workspace's panic button, when pressed.
+  frozen?: { at: Date; by: string; reason?: string } | null;
+  // For a sub-mandate: every ancestor up to the root, each with the spend of
+  // its whole family (itself and all descendants). A request must fit inside
+  // each of them too; ancestors are checked on scope and limits only, since
+  // escalation is the child's job (its thresholds are at or below theirs).
+  ancestors?: AncestorFacts[];
 };
+
+export type AncestorFacts = { mandate: Mandate; spentToday: number; spentTotal: number; overrides?: MandateOverride[] };
 
 export type PlanItem = { merchant: string; amount: number; purpose?: string; usedBy?: string | null };
 export function parsePlanItems(json: string): PlanItem[] {
@@ -180,6 +189,39 @@ export function validateVetoTerms(t: { vetoAbove: number | null; vetoMinutes: nu
   return errs;
 }
 
+export function validateCosignTerms(t: { cosignAbove: number | null; cosignCount: number; approvalAbove: number | null; perTxnLimit: number }): TermsError[] {
+  const errs: TermsError[] = [];
+  if (t.cosignAbove != null) {
+    if (t.approvalAbove == null) errs.push({ field: "cosignAbove", message: "Co-signing needs an ask-me-above threshold: only requests that ask can be co-signed." });
+    else if (!Number.isInteger(t.cosignAbove) || t.cosignAbove < t.approvalAbove) errs.push({ field: "cosignAbove", message: "The co-sign threshold must be at or above the ask-me-above threshold." });
+    else if (t.cosignAbove >= t.perTxnLimit) errs.push({ field: "cosignAbove", message: "The co-sign threshold must be below the per-transaction limit." });
+    if (!Number.isInteger(t.cosignCount) || t.cosignCount < 2 || t.cosignCount > 5) errs.push({ field: "cosignCount", message: "Between 2 and 5 approvers can be required." });
+  }
+  return errs;
+}
+
+// A sub-mandate must fit inside its parent: every limit at or below the
+// parent's, merchants within the parent's list, the parent's blocks kept,
+// the parent's ask threshold not exceeded, and no later expiry.
+export function validateChildTerms(parent: Mandate, child: { perTxnLimit: number; dailyLimit: number; totalLimit: number; approvalAbove: number | null; allowedMerchants: string[]; blockedCategories: string[]; expiresAt: Date | null; currency: string }): TermsError[] {
+  const errs: TermsError[] = [];
+  if (child.currency !== parent.currency) errs.push({ field: "currency", message: `A sub-mandate is denominated like its parent (${parent.currency}).` });
+  if (child.perTxnLimit > parent.perTxnLimit) errs.push({ field: "perTxnLimit", message: `Per-transaction limit cannot exceed the parent's ${parent.perTxnLimit}.` });
+  if (child.dailyLimit > parent.dailyLimit) errs.push({ field: "dailyLimit", message: `Daily limit cannot exceed the parent's ${parent.dailyLimit}.` });
+  if (child.totalLimit > parent.totalLimit) errs.push({ field: "totalLimit", message: `Total limit cannot exceed the parent's ${parent.totalLimit}.` });
+  if (parent.approvalAbove != null && (child.approvalAbove == null || child.approvalAbove > parent.approvalAbove)) errs.push({ field: "approvalAbove", message: `The parent asks above ${parent.approvalAbove}; the sub-mandate must ask at or below that.` });
+  const pAllowed = parseList(parent.allowedMerchants);
+  if (pAllowed.length > 0) {
+    if (child.allowedMerchants.length === 0) errs.push({ field: "allowedMerchants", message: "The parent restricts merchants; the sub-mandate must list a subset of them." });
+    for (const m of child.allowedMerchants) if (!pAllowed.some((p) => merchantMatches(p, m.replace(/\*$/, "")) || p.trim().toLowerCase() === m.trim().toLowerCase())) errs.push({ field: "allowedMerchants", message: `"${m}" is not within the parent's allowed merchants (${pAllowed.join(", ")}).` });
+  }
+  for (const c of parseList(parent.blockedCategories)) if (!child.blockedCategories.some((x) => x.toLowerCase() === c.toLowerCase())) errs.push({ field: "blockedCategories", message: `The parent blocks "${c}"; the sub-mandate must too.` });
+  if (parent.expiresAt && (!child.expiresAt || child.expiresAt > new Date(parent.expiresAt))) errs.push({ field: "expiresAt", message: "A sub-mandate cannot outlive its parent." });
+  return errs;
+}
+
+export const MAX_DELEGATION_DEPTH = 3;
+
 export function validateAutonomyTerms(t: { autonomyStep: number; autonomyEvery: number; autonomyCeiling: number | null; perTxnLimit: number }): TermsError[] {
   const errs: TermsError[] = [];
   if (!Number.isInteger(t.autonomyStep) || t.autonomyStep < 0) errs.push({ field: "autonomyStep", message: "The autonomy step must be zero (off) or more." });
@@ -225,6 +267,9 @@ export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision 
 
   if (!Number.isInteger(amt) || amt <= 0) {
     return declined("amount", "Amount must be a positive integer number of minor units.", { message: "Send amount as a positive integer in minor units (1299 for 12.99)." });
+  }
+  if (facts.frozen) {
+    return declined("frozen", `All spending in this workspace is frozen${facts.frozen.by ? ` (by ${facts.frozen.by})` : ""}.`, { message: "The owner pressed the panic button: nothing in this workspace is authorised until they unfreeze it. Stop and tell the user.", approvalRequired: true });
   }
   if (isPaused(mandate, now)) {
     const until = mandate.pausedUntil ? new Date(mandate.pausedUntil).toISOString() : null;
@@ -276,6 +321,18 @@ export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision 
     return declined("balance", `Prepaid balance too low: ${fmt(Math.max(0, facts.availableBalance), ccy)} available. Add funds to the workspace.`, { message: "The workspace's prepaid balance cannot cover this. The owner needs to add funds.", maxAmountNow: maxNow, approvalRequired: true });
   }
 
+  // A sub-mandate spends its parent's money: the request has to fit inside
+  // every ancestor's scope and limits (with the whole family's spend counted),
+  // or it is refused with the ancestor's reason.
+  for (const anc of facts.ancestors ?? []) {
+    const bare = { ...anc.mandate, approvalAbove: null, vetoAbove: null };
+    const pd = evaluate(bare, req, { spentToday: anc.spentToday, spentTotal: anc.spentTotal, approvedAllowances: [], openPending: 0, recentlyDenied: false, availableBalance: facts.availableBalance, overrides: anc.overrides ?? [] });
+    if (pd.decision !== "approved") {
+      const r = pd as Extract<Decision, { decision: "declined" }>;
+      return declined(`parent_${r.rule}`, `Parent mandate “${anc.mandate.name}”: ${r.reason}`, { ...r.remedy, message: `This is a sub-mandate of “${anc.mandate.name}”, whose terms also apply. ${r.remedy.message}`, maxAmountNow: Math.min(maxNow, r.remedy.maxAmountNow ?? maxNow) });
+    }
+  }
+
   // A purchase inside an approved plan was pre-approved as part of the list:
   // same merchant, at most the listed amount, item not yet used. It passes
   // without asking (and without a veto wait); the limits above still apply.
@@ -304,7 +361,8 @@ export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision 
     if (facts.openPending >= MAX_OPEN_PENDING) {
       return declined("too_many_pending", `Too many requests already waiting on you (${facts.openPending}). Decide those first.`, { message: `${facts.openPending} requests are already waiting for the owner. Wait for those to be decided; anything up to ${fmt(Math.min(maxNow, mandate.approvalAbove), ccy)} still passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.approvalAbove) });
     }
-    return { decision: "pending", reason: `Above the ${fmt(mandate.approvalAbove, ccy)} threshold — needs your approval before the agent can retry.`, rule: "approval", remedy: { message: `Amounts above ${fmt(mandate.approvalAbove, ccy)} need the owner's approval. They have been notified; retry the identical request (same idempotency key) once approved. Approvals lapse after ${ALLOWANCE_TTL_MS / 3600_000} hours. Up to ${fmt(Math.min(maxNow, mandate.approvalAbove), ccy)} passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.approvalAbove) } };
+    const cosign = mandate.cosignAbove != null && amt > mandate.cosignAbove ? mandate.cosignCount : 1;
+    return { decision: "pending", reason: cosign > 1 ? `Above the ${fmt(mandate.cosignAbove!, ccy)} co-sign threshold — needs ${cosign} approvers before the agent can retry.` : `Above the ${fmt(mandate.approvalAbove, ccy)} threshold — needs your approval before the agent can retry.`, rule: "approval", remedy: { message: `Amounts above ${fmt(mandate.approvalAbove, ccy)} need the owner's approval${cosign > 1 ? ` (${cosign} approvers must co-sign above ${fmt(mandate.cosignAbove!, ccy)})` : ""}. They have been notified; retry the identical request (same idempotency key) once approved. Approvals lapse after ${ALLOWANCE_TTL_MS / 3600_000} hours. Up to ${fmt(Math.min(maxNow, mandate.approvalAbove), ccy)} passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.approvalAbove) } };
   }
 
   // Veto window: announced, then goes through after the window unless the

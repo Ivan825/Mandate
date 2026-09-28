@@ -3,7 +3,8 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
-import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings, pauseMandate, resumeMandate, raiseLimit, withdrawRaise, shareTransaction, unshareTransaction, decidePlan, cancelPlan, setMandateMode, resetAutonomy } from "@/lib/service";
+import { createAgent, createMandate, getMandate, authorize, revokeMandate, decideApproval, attachCard, recordCardError, getCardholderProfile, saveCardholderProfile, captureTransaction, voidTransaction, saveWorkspaceSettings, pauseMandate, resumeMandate, raiseLimit, withdrawRaise, shareTransaction, unshareTransaction, decidePlan, cancelPlan, setMandateMode, resetAutonomy, freezeWorkspace, unfreezeWorkspace, openDispute, resolveDispute, resetSandbox } from "@/lib/service";
+import { addRoute, removeRoute, toggleRoute } from "@/lib/routing";
 import { issueCardForMandate, deactivateCard, stripeEnabled, simulateStripeAuthorization, cardholderProblem, ensureCardholder, issuingRegion, createTopupSession, freezeCard } from "@/lib/stripe";
 import { endOfLocalDay } from "@/lib/policy";
 import { toMinor as toMinorIn } from "@/lib/money";
@@ -71,10 +72,13 @@ export async function createMandateAction(_prev: MandateFormState, form: FormDat
     autonomyEvery: Math.floor(num(form.get("autonomyEvery"), 10)),
     autonomyCeiling: form.get("autonomyOn") === "on" && String(form.get("autonomyCeiling") ?? "").trim() !== "" ? minor(form.get("autonomyCeiling")) : null,
     mode: form.get("mode") === "observe" ? "observe" : "enforce",
+    cosignAbove: form.get("cosignOn") === "on" && String(form.get("cosignAbove") ?? "").trim() !== "" ? minor(form.get("cosignAbove")) : form.get("cosignOn") === "on" ? (approvalRaw === "" ? null : minor(approvalRaw)) : null,
+    cosignCount: Math.floor(num(form.get("cosignCount"), 2)),
+    sandbox: form.get("sandbox") === "on",
   });
   if (!res.ok) return { errors: res.errors, values };
   const m = res.mandate;
-  if (form.get("issueCard") === "on" && stripeEnabled()) {
+  if (form.get("issueCard") === "on" && stripeEnabled() && m.sandbox !== 1) {
     const profile = await getCardholderProfile(ctx.workspaceId);
     const problem = cardholderProblem(profile);
     const region = issuingRegion();
@@ -552,7 +556,8 @@ export async function createProxyKeyAction(form: FormData) {
   try {
     // No revalidatePath here: the page is dynamic, and revalidating the same
     // route before redirecting renders it twice, consuming the show-once reveal.
-    const k = await createProxyKey(ctx.workspaceId, { mandateId: String(form.get("mandateId") ?? ""), providerKeyId: String(form.get("providerKeyId") ?? ""), name: String(form.get("name") ?? "") }, ctx.email);
+    const source = String(form.get("providerKeyId") ?? "");
+    const k = await createProxyKey(ctx.workspaceId, { mandateId: String(form.get("mandateId") ?? ""), ...(source.startsWith("target:") ? { targetId: source.slice(7) } : { providerKeyId: source }), name: String(form.get("name") ?? "") }, ctx.email);
     redirect(`/proxy?reveal=${k.id}&g=${grant(k.id)}`);
   } catch (e) {
     if ((e as Error).message === "NEXT_REDIRECT" || String((e as { digest?: string }).digest ?? "").startsWith("NEXT_REDIRECT")) throw e;
@@ -567,6 +572,106 @@ export async function revokeProxyKeyAction(form: FormData) {
   if (id) await revokeProxyKey(ctx.workspaceId, id, ctx.email);
   revalidatePath("/proxy");
   redirect("/proxy");
+}
+
+export async function addTargetAction(form: FormData) {
+  const ctx = await requirePermission({ proxy: ["manage"] }, "managing API targets");
+  const { addTarget } = await import("@/lib/proxy");
+  const pricing = String(form.get("pricing") ?? "per_call");
+  const currency = String(form.get("currency") ?? "USD").toUpperCase();
+  const r = await addTarget(ctx.workspaceId, {
+    name: String(form.get("name") ?? ""), slug: String(form.get("slug") ?? ""), baseUrl: String(form.get("baseUrl") ?? ""), authHeader: String(form.get("authHeader") ?? "authorization"), authValue: String(form.get("authValue") ?? ""),
+    currency, pricing: pricing === "header" ? "header" : pricing === "json" ? "json" : "per_call", priceAmount: toMinorIn(num(form.get("priceAmount")), currency), priceKey: String(form.get("priceKey") ?? ""),
+  }, ctx.email);
+  if (!r.ok) redirect("/proxy?error=" + encodeURIComponent(r.error) + "#targets");
+  revalidatePath("/proxy");
+  redirect("/proxy?added=target#targets");
+}
+
+export async function removeTargetAction(form: FormData) {
+  const ctx = await requirePermission({ proxy: ["manage"] }, "managing API targets");
+  const { removeTarget } = await import("@/lib/proxy");
+  const id = String(form.get("id") ?? "");
+  if (isUuid(id)) await removeTarget(ctx.workspaceId, id, ctx.email);
+  revalidatePath("/proxy");
+  redirect("/proxy#targets");
+}
+
+// ---------- Panic button ----------
+
+export async function freezeWorkspaceAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["revoke"] }, "freezing the workspace");
+  await freezeWorkspace(ctx.workspaceId, ctx.email, String(form.get("reason") ?? ""));
+  revalidatePath("/", "layout");
+  redirect(String(form.get("back") ?? "/") || "/");
+}
+
+export async function unfreezeWorkspaceAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["revoke"] }, "unfreezing the workspace");
+  await unfreezeWorkspace(ctx.workspaceId, ctx.email);
+  revalidatePath("/", "layout");
+  redirect(String(form.get("back") ?? "/") || "/");
+}
+
+// ---------- Disputes ----------
+
+export async function openDisputeAction(form: FormData) {
+  const ctx = await requirePermission({ approval: ["decide"] }, "raising disputes");
+  const id = String(form.get("transactionId") ?? ""); const mandateId = String(form.get("mandateId") ?? "");
+  if (!isUuid(id) || !isUuid(mandateId)) return;
+  const r = await openDispute(ctx.workspaceId, id, { reason: String(form.get("reason") ?? ""), by: ctx.email, pause: form.get("pause") === "on" });
+  revalidatePath(`/mandates/${mandateId}`); revalidatePath("/approvals"); revalidatePath("/");
+  redirect(r.ok ? `/mandates/${mandateId}?disputed=1#tx-${id}` : `/mandates/${mandateId}?error=${encodeURIComponent(r.error)}`);
+}
+
+export async function resolveDisputeAction(form: FormData) {
+  const ctx = await requirePermission({ approval: ["decide"] }, "resolving disputes");
+  const id = String(form.get("disputeId") ?? ""); const back = String(form.get("back") ?? "/approvals");
+  if (!isUuid(id)) return;
+  const outcome = String(form.get("outcome") ?? "");
+  if (outcome !== "refunded" && outcome !== "upheld" && outcome !== "withdrawn") return;
+  const r = await resolveDispute(ctx.workspaceId, id, outcome, ctx.email, String(form.get("note") ?? ""));
+  revalidatePath(back); revalidatePath("/approvals"); revalidatePath("/");
+  redirect(r.ok ? back : `${back}${back.includes("?") ? "&" : "?"}error=${encodeURIComponent(r.error)}`);
+}
+
+// ---------- Approval routing ----------
+
+export async function addRouteAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "approval routing");
+  const currency = String(form.get("currency") ?? "USD").toUpperCase();
+  const amt = (k: string) => { const v = String(form.get(k) ?? "").trim(); return v === "" ? null : toMinorIn(num(v), currency); };
+  const mandateId = String(form.get("mandateId") ?? "");
+  const r = await addRoute(ctx.workspaceId, { name: String(form.get("name") ?? ""), minAmount: amt("minAmount"), maxAmount: amt("maxAmount"), category: String(form.get("category") ?? ""), merchantPattern: String(form.get("merchantPattern") ?? ""), mandateId: isUuid(mandateId) ? mandateId : null, userIds: form.getAll("userIds").map(String), priority: Math.floor(num(form.get("priority"), 100)) }, ctx.email);
+  revalidatePath("/settings/routing");
+  redirect(r.ok ? "/settings/routing?added=1" : "/settings/routing?error=" + encodeURIComponent(r.error));
+}
+
+export async function removeRouteAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "approval routing");
+  const id = String(form.get("id") ?? "");
+  if (isUuid(id)) await removeRoute(ctx.workspaceId, id, ctx.email);
+  revalidatePath("/settings/routing");
+  redirect("/settings/routing");
+}
+
+export async function toggleRouteAction(form: FormData) {
+  const ctx = await requirePermission({ workspace: ["settings"] }, "approval routing");
+  const id = String(form.get("id") ?? "");
+  if (isUuid(id)) await toggleRoute(ctx.workspaceId, id, form.get("enabled") === "1", ctx.email);
+  revalidatePath("/settings/routing");
+  redirect("/settings/routing");
+}
+
+// ---------- Sandbox ----------
+
+export async function resetSandboxAction(form: FormData) {
+  const ctx = await requirePermission({ mandate: ["issue"] }, "resetting a sandbox");
+  const id = String(form.get("mandateId") ?? "");
+  if (!isUuid(id)) return;
+  await resetSandbox(ctx.workspaceId, id, ctx.email);
+  revalidatePath(`/mandates/${id}`); revalidatePath("/");
+  redirect(`/mandates/${id}`);
 }
 
 export async function saveCardholderProfileAction(form: FormData) {

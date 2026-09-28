@@ -28,6 +28,8 @@ function privateKey(): KeyObject {
   if (!priv) priv = createPrivateKey({ key: Buffer.concat([PKCS8_ED25519_PREFIX, seed()]), format: "der", type: "pkcs8" });
   return priv;
 }
+// The receipt key also signs vouchers (lib/vouchers.ts) and anchors (lib/anchors.ts).
+export function signingKey(): KeyObject { return privateKey(); }
 export function publicKeyPem(): string {
   return createPublicKey(privateKey()).export({ type: "spki", format: "pem" }).toString();
 }
@@ -84,6 +86,9 @@ export type TxReceipt = {
   transaction: Record<string, unknown>; mandate: Record<string, unknown>; agent: { name: string }; approval: Record<string, unknown> | null;
   events: { seq: number; type: string; createdAt: string; prevHash: string; hash: string; payload: unknown }[];
   chain: { workspaceId: string; head: { seq: number; hash: string }; verified: boolean };
+  // The first public anchor covering the last event in this receipt, when
+  // one exists: independent evidence that the history was published by then.
+  anchor?: { n: number; label: string; seq: number; hash: string; coversSeq: number; anchorHash: string; signedAt: string; url: string } | null;
   signature: { alg: "Ed25519"; keyId: string; publicKeyPem: string; signedAt: string; coreHash: string; message: string; signature: string };
 };
 
@@ -119,7 +124,17 @@ export async function buildTransactionReceipt(txId: string, shareToken: string, 
   const coreHash = createHash("sha256").update(canonical(core)).digest("hex");
   const message = txReceiptMessage(t.id, coreHash, signedAt);
   const signature = edSign(null, Buffer.from(message), privateKey()).toString("base64");
-  return { version: 1, kind: "mandate-transaction-receipt", issuedAt: signedAt, issuer, ...core, signature: { alg: "Ed25519", keyId: keyId(), publicKeyPem: publicKeyPem(), signedAt, coreHash, message, signature } };
+  let anchor: TxReceipt["anchor"] = null;
+  try {
+    const { anchorCovering } = await import("./anchors");
+    // The anchor that covers the decision itself (its authorization rows);
+    // sharing the receipt later adds rows that no anchor may cover yet.
+    const decisionRows = rows.filter((r) => r.type.startsWith("authorization."));
+    const upTo = (decisionRows.length ? decisionRows : rows).reduce((m, r) => Math.max(m, r.seq), 0);
+    const a = upTo ? await anchorCovering(t.workspaceId, upTo) : null;
+    if (a) anchor = { n: a.n, label: a.label, seq: a.seq, hash: a.hash, coversSeq: upTo, anchorHash: a.anchorHash, signedAt: new Date(a.signedAt).toISOString(), url: `${issuer}/anchors?label=${a.label}` };
+  } catch { /* anchors are optional evidence */ }
+  return { version: 1, kind: "mandate-transaction-receipt", issuedAt: signedAt, issuer, ...core, anchor, signature: { alg: "Ed25519", keyId: keyId(), publicKeyPem: publicKeyPem(), signedAt, coreHash, message, signature } };
 }
 
 // Server-side check of a receipt someone pastes back: recompute the core

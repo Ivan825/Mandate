@@ -85,6 +85,7 @@ export default async function PublicReceiptPage(props: Props) {
         </table>
       </div>
 
+      {r.anchor && <p className="faint" style={{ fontSize: 12.5, margin: "8px 0 0" }}>Publicly anchored: ledger head #{r.anchor.seq} (which includes the decision rows above, through #{r.anchor.coversSeq}) was signed into the <a href={r.anchor.url}>public anchor chain</a> as anchor {r.anchor.n} on {when(r.anchor.signedAt)} — so this history existed, unchanged, by then.</p>}
       <Verify jsonUrl={jsonUrl} keyUrl={`${base}/.well-known/mandate-receipt-key`} id={l.id} />
       <p className="faint" style={{ fontSize: 12.5, marginTop: 12 }}>Signed by <span className="mono">{r.issuer}</span> (key {r.signature.keyId}) at {when(r.signature.signedAt)}. <a href={jsonUrl}>Download the JSON</a>. Made with <a href={base}>Mandate</a> — scoped, revocable spending authority for AI agents.</p>
     </div>

@@ -9,6 +9,8 @@ export const TOOL_SCHEMAS = [
   { name: "propose_plan", description: "Before a multi-step task, list what you intend to buy (merchant, maximum amount in minor units, purpose) as one plan. The owner approves the list once; each purchase inside it then passes request_purchase without asking. Poll get_plan until status is approved.", parameters: { type: "object", properties: { title: { type: "string" }, items: { type: "array", items: { type: "object", properties: { merchant: { type: "string" }, amount: { type: "integer" }, purpose: { type: "string" } }, required: ["merchant", "amount"] } } }, required: ["title", "items"], additionalProperties: false } },
   { name: "get_plan", description: "Read a plan's status and which items are still available.", parameters: { type: "object", properties: { plan_id: { type: "string" } }, required: ["plan_id"], additionalProperties: false } },
   { name: "void_purchase", description: "Nothing was paid: release the approved hold back to the limits.", parameters: { type: "object", properties: { transaction_id: { type: "string" }, reason: { type: "string" } }, required: ["transaction_id"], additionalProperties: false } },
+  { name: "get_voucher", description: "The signed authorisation voucher for an approved hold, to hand to the merchant; they verify it offline and redeem it for what was actually sold.", parameters: { type: "object", properties: { transaction_id: { type: "string" } }, required: ["transaction_id"], additionalProperties: false } },
+  { name: "delegate", description: "Carve a narrower sub-mandate out of yours for a helper: limits at or below yours (minor units), merchants within your list. Returns the helper's token once; its spend counts against your limits.", parameters: { type: "object", properties: { name: { type: "string" }, per_txn_limit: { type: "integer" }, daily_limit: { type: "integer" }, total_limit: { type: "integer" }, allowed_merchants: { type: "array", items: { type: "string" } }, agent_name: { type: "string" } }, required: ["name", "per_txn_limit", "daily_limit", "total_limit"], additionalProperties: false } },
 ] as const;
 
 export function openaiTools() { return TOOL_SCHEMAS.map((s) => ({ type: "function" as const, function: s })); }
@@ -22,6 +24,8 @@ export async function dispatch(m: Mandate, name: string, args: unknown): Promise
     case "void_purchase": return m.void(String(a.transaction_id), a.reason ? String(a.reason) : undefined);
     case "propose_plan": return m.proposePlan({ title: String(a.title), items: a.items as { merchant: string; amount: number; purpose?: string }[] });
     case "get_plan": return m.getPlan(String(a.plan_id));
+    case "get_voucher": return m.voucher(String(a.transaction_id));
+    case "delegate": { const d = await m.delegate({ name: String(a.name), perTxnLimit: Number(a.per_txn_limit), dailyLimit: Number(a.daily_limit), totalLimit: Number(a.total_limit), allowedMerchants: Array.isArray(a.allowed_merchants) ? (a.allowed_merchants as string[]) : undefined, agentName: a.agent_name ? String(a.agent_name) : undefined }); const { client: _c, ...rest } = d; void _c; return rest; }
     default: throw new Error(`Unknown tool ${name}`);
   }
 }

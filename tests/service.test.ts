@@ -492,3 +492,231 @@ test("human-signed approval: a real ES256 passkey assertion verifies and is reco
   const tampered = { ...JSON.parse(row.signature!), signature: Buffer.from("nope").toString("base64url") };
   assert.equal(await recheckHumanSignature(tampered), false);
 });
+
+test("panic button: freezes every rail at once, records who and why, unfreeze restores", async () => {
+  const { freezeWorkspace, unfreezeWorkspace, getWorkspaceSettings, getMandate } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null });
+  assert.equal((await authorize(r.mandate, { amount: 100, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  await freezeWorkspace(ws, "owner@example.com", "agent is looping");
+  const s = await getWorkspaceSettings(ws);
+  assert.equal(s.frozen?.by, "owner@example.com"); assert.equal(s.frozen?.reason, "agent is looping");
+  const d = await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  assert.equal(d.decision, "declined"); assert.equal(d.rule, "frozen");
+  const mcp = await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "mcp");
+  assert.equal(mcp.rule, "frozen");
+  await freezeWorkspace(ws, "someone else", "again"); // idempotent: the first press stands
+  assert.equal((await getWorkspaceSettings(ws)).frozen?.by, "owner@example.com");
+  await unfreezeWorkspace(ws, "owner@example.com");
+  assert.equal((await getWorkspaceSettings(ws)).frozen, null);
+  assert.equal((await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  const { eq } = await import("drizzle-orm");
+  const events = await db.select({ type: schema.ledger.type }).from(schema.ledger).where(eq(schema.ledger.workspaceId, ws));
+  assert.ok(events.some((e) => e.type === "workspace.frozen")); assert.ok(events.some((e) => e.type === "workspace.unfrozen"));
+});
+
+test("co-signing: N distinct approvers, no double signing, one denial ends it, the last signature grants the allowance", async () => {
+  const { decideApproval, getApproval } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: 2000, cosignAbove: 4000, cosignCount: 2 });
+  const small = await authorize(r.mandate, { amount: 3000, merchant: "OpenAI" }, "agent_api");
+  assert.equal(small.decision, "pending"); assert.equal((await getApproval(small.approvalId!))!.a.requiredApprovers, 1);
+  const big = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
+  assert.equal(big.decision, "pending"); assert.match(big.reason, /2 approvers/);
+  assert.equal((await getApproval(big.approvalId!))!.a.requiredApprovers, 2);
+  const first = await decideApproval(ws, big.approvalId!, "approved", "alice@example.com") as { status: string; cosigned?: boolean; have?: number; need?: number } | null;
+  assert.equal(first?.status, "pending"); assert.equal(first?.cosigned, true); assert.equal(first?.have, 1); assert.equal(first?.need, 2);
+  assert.equal((await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api")).decision, "pending"); // one signature is not an allowance
+  const again = await decideApproval(ws, big.approvalId!, "approved", "Alice@Example.com") as { alreadySigned?: boolean } | null;
+  assert.equal(again?.alreadySigned, true);
+  const second = await decideApproval(ws, big.approvalId!, "approved", "bob@example.com");
+  assert.equal(second?.status, "approved");
+  const done = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
+  assert.equal(done.rule, "allowance");
+  assert.equal((await getApproval(big.approvalId!))!.a.decidedBy, "alice@example.com + bob@example.com");
+  // A denial by anyone ends a half-signed request.
+  const other = await authorize(r.mandate, { amount: 4800, merchant: "OpenAI" }, "agent_api");
+  await decideApproval(ws, other.approvalId!, "approved", "alice@example.com");
+  const denied = await decideApproval(ws, other.approvalId!, "denied", "bob@example.com");
+  assert.equal(denied?.status, "denied");
+  assert.equal((await authorize(r.mandate, { amount: 4800, merchant: "OpenAI" }, "agent_api")).rule, "denied_recently");
+});
+
+test("delegation: a sub-mandate fits inside its parent, spends the parent's money, and dies with it", async () => {
+  const { delegateMandate, getMandate, getMandateByToken, revokeMandate, listChildren, familyIds } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null, perTxnLimit: 2000, dailyLimit: 5000, totalLimit: 20000, allowedMerchants: ["OpenAI", "Vercel*"] });
+  const bad = await delegateMandate(r.mandate, { name: "too big", perTxnLimit: 3000, dailyLimit: 5000, totalLimit: 20000, allowedMerchants: ["Namecheap"] });
+  assert.equal(bad.ok, false);
+  if (!bad.ok) { assert.ok(bad.errors.some((e) => e.field === "perTxnLimit")); assert.ok(bad.errors.some((e) => e.field === "allowedMerchants")); }
+  const child = await delegateMandate(r.mandate, { name: "helper", perTxnLimit: 1000, dailyLimit: 3000, totalLimit: 3000, allowedMerchants: ["OpenAI"], agentName: "helper-1", by: "agent" });
+  assert.ok(child.ok);
+  if (!child.ok) return;
+  assert.equal(child.mandate.parentId, r.mandate.id); assert.equal(child.mandate.depth, 1);
+  assert.equal((await getMandateByToken(child.token))?.id, child.mandate.id);
+  assert.deepEqual((await familyIds(r.mandate.id)).sort(), [r.mandate.id, child.mandate.id].sort());
+  assert.equal((await listChildren(ws, r.mandate.id)).length, 1);
+  // The child spends: its own limits and the parent's family limits both count.
+  assert.equal((await authorize(child.mandate, { amount: 900, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  assert.equal((await authorize(child.mandate, { amount: 900, merchant: "Vercel Pro" }, "agent_api")).rule, "merchant"); // child's own narrower list
+  assert.equal((await authorize(r.mandate, { amount: 2000, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  assert.equal((await authorize(r.mandate, { amount: 2000, merchant: "OpenAI" }, "agent_api")).decision, "approved"); // parent at 4900 of 5000 with the child's 900
+  const parentBinds = await authorize(child.mandate, { amount: 500, merchant: "OpenAI" }, "agent_api");
+  assert.equal(parentBinds.decision, "declined"); assert.equal(parentBinds.rule, "parent_daily"); assert.match(parentBinds.reason, /Parent mandate/);
+  const facts = await factsForTest(r.mandate.id);
+  assert.equal(facts.spentToday, 4900);
+  // Depth and revocation.
+  const grandchild = await delegateMandate((await getMandate(ws, child.mandate.id))!, { name: "gc", perTxnLimit: 100, dailyLimit: 100, totalLimit: 100, allowedMerchants: ["OpenAI"] });
+  assert.ok(grandchild.ok);
+  await revokeMandate(ws, r.mandate.id, "owner");
+  assert.equal((await getMandate(ws, child.mandate.id))!.status, "revoked");
+  if (grandchild.ok) assert.equal((await getMandate(ws, grandchild.mandate.id))!.status, "revoked");
+});
+
+async function factsForTest(mandateId: string) {
+  const { factsFor, getMandate } = await import("../lib/service");
+  return factsFor((await getMandate(ws, mandateId))!);
+}
+
+test("disputes: open marks the decision (and can pause), refunded nets the limits down, upheld leaves them", async () => {
+  const { openDispute, resolveDispute, listDisputes, getTransaction, getMandate } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null, holdTtlHours: 0 });
+  const t = await authorize(r.mandate, { amount: 1200, merchant: "OpenAI" }, "agent_api");
+  const declined = await authorize(r.mandate, { amount: 1200, merchant: "Namecheap" }, "agent_api");
+  assert.equal((await openDispute(ws, declined.transactionId, { reason: "x", by: "owner" })).ok, false); // nothing was spent
+  const d = await openDispute(ws, t.transactionId, { reason: "never delivered", by: "owner@example.com", pause: true });
+  assert.ok(d.ok);
+  assert.equal((await getTransaction({ workspaceId: ws }, t.transactionId))!.disputeId, d.ok ? d.dispute.id : "");
+  assert.equal((await getMandate(ws, r.mandate.id))!.status, "paused");
+  await (await import("../lib/service")).resumeMandate(ws, r.mandate.id, "owner");
+  assert.equal((await openDispute(ws, t.transactionId, { reason: "again", by: "owner" })).ok, false); // already disputed
+  assert.equal((await factsForTest(r.mandate.id)).spentTotal, 1200);
+  if (d.ok) {
+    const res = await resolveDispute(ws, d.dispute.id, "refunded", "owner@example.com", "merchant refunded");
+    assert.ok(res.ok);
+    assert.equal((await factsForTest(r.mandate.id)).spentTotal, 0); // negative row nets it out
+    assert.equal((await resolveDispute(ws, d.dispute.id, "upheld", "x")).ok, false); // already resolved
+  }
+  assert.equal((await listDisputes(ws, { mandateId: r.mandate.id })).length, 1);
+  const t2 = await authorize(r.mandate, { amount: 500, merchant: "OpenAI" }, "agent_api");
+  const d2 = await openDispute(ws, t2.transactionId, { reason: "wrong item", by: "owner" });
+  if (d2.ok) await resolveDispute(ws, d2.dispute.id, "upheld", "owner");
+  assert.equal((await factsForTest(r.mandate.id)).spentTotal, 500);
+});
+
+test("vouchers: signed, verifiable offline, redeemable once by the merchant for at most the authorised amount", async () => {
+  const { issueVoucher, verifyVoucher, voucherStatus, redeemVoucher } = await import("../lib/vouchers");
+  const { getTransaction } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null });
+  const a = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api");
+  const t = (await getTransaction({ mandateId: r.mandate.id }, a.transactionId))!;
+  const v = issueVoucher(t, r.mandate, "Test agent", "https://mandate.test")!;
+  assert.ok(v.startsWith("mv1."));
+  const c = verifyVoucher(v);
+  assert.equal(c.valid, true); assert.equal(c.payload?.amount, 1500); assert.equal(c.payload?.tx, t.id);
+  const [tag, p, s] = v.split(".");
+  const tampered = `${tag}.${Buffer.from(Buffer.from(p, "base64url").toString().replace("1500", "9500")).toString("base64url")}.${s}`;
+  assert.equal(verifyVoucher(tampered).valid, false);
+  assert.equal(verifyVoucher("nonsense").valid, false);
+  const st = await voucherStatus(v);
+  assert.equal(st.redeemable, true); assert.equal(st.settlement, "held");
+  assert.equal((await redeemVoucher(v, { amount: 2000, merchant: "OpenAI" })).ok, false); // above the authorisation
+  const red = await redeemVoucher(v, { amount: 1400, merchant: "OpenAI", reference: "INV-1" });
+  assert.ok(red.ok);
+  if (red.ok) { assert.equal(red.result.transaction.settlement, "captured"); assert.equal(red.result.transaction.amount, 1400); assert.equal(red.result.released, 100); assert.equal(red.result.transaction.settledBy, "merchant:OpenAI"); }
+  const twice = await redeemVoucher(v, { merchant: "OpenAI" });
+  assert.equal(twice.ok, false); if (!twice.ok) assert.equal(twice.status, 409);
+  assert.equal((await voucherStatus(v)).redeemable, false);
+  // Expired vouchers are refused even though the signature is fine.
+  const old = issueVoucher({ ...t, holdExpiresAt: new Date(Date.now() - 1000) }, r.mandate, "Test agent", "x")!;
+  assert.equal(verifyVoucher(old).expired, true);
+});
+
+test("ledger anchoring: heads are signed into a public chain, verified, and cover receipts", async () => {
+  const { anchorWorkspace, verifyAnchors, anchorCovering, latestAnchor, anchorHashOf, verifyAnchorSignature, anchorAll } = await import("../lib/anchors");
+  const a1 = await anchorWorkspace(ws);
+  assert.ok(a1); if (!a1) return;
+  assert.equal(anchorHashOf(a1), a1.anchorHash); assert.equal(verifyAnchorSignature(a1), true);
+  assert.equal(verifyAnchorSignature({ ...a1, anchorHash: "0".repeat(64) }), false);
+  // The anchor's own ledger entry does not warrant another anchor; a real event does.
+  assert.equal(await anchorWorkspace(ws), null);
+  await mandate({ approvalAbove: null });
+  const a2 = await anchorWorkspace(ws);
+  assert.ok(a2 && a2.n === a1.n + 1 && a2.prevAnchorHash === a1.anchorHash && a2.seq > a1.seq);
+  assert.equal(await anchorWorkspace(ws), null);
+  const v = await verifyAnchors();
+  assert.equal(v.ok, true); assert.ok(v.checked >= 2);
+  const cover = await anchorCovering(ws, a1.seq);
+  assert.equal(cover?.n, a1.n);
+  assert.equal((await latestAnchor(ws))?.n, a2!.n);
+  assert.equal(await anchorWorkspace(ws), null);
+  assert.equal(typeof (await anchorAll()), "number");
+  const { buildTransactionReceipt } = await import("../lib/receipts");
+  const { shareTransaction, getTransaction } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null });
+  const t = await authorize(r.mandate, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  await anchorWorkspace(ws);
+  const token = (await shareTransaction(ws, t.transactionId, "owner"))!;
+  const receipt = await buildTransactionReceipt(t.transactionId, token, "https://mandate.test");
+  assert.ok(receipt?.anchor && receipt.anchor.seq >= receipt.anchor.coversSeq && receipt.events.some((e) => e.seq === receipt.anchor!.coversSeq && e.type.startsWith("authorization.")), "receipt carries the anchor covering its decision rows");
+  void getTransaction;
+});
+
+test("approval routing: the first matching route decides who is notified and is recorded on the request", async () => {
+  const { addRoute, removeRoute, routeFor, toggleRoute } = await import("../lib/routing");
+  const { notifyUserIds, deciderUserIds } = await import("../lib/notify");
+  const { getApproval } = await import("../lib/service");
+  const [u] = await db.select({ id: schema.user.id }).from(schema.member).innerJoin(schema.user, (await import("drizzle-orm")).eq(schema.user.id, schema.member.userId)).where((await import("drizzle-orm")).eq(schema.member.organizationId, ws)).limit(1);
+  const uid2 = "test-user-" + randomUUID();
+  await db.insert(schema.user).values({ id: uid2, name: "Viewer", email: `${uid2}@example.com`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+  await db.insert(schema.member).values({ id: randomUUID(), organizationId: ws, userId: uid2, role: "viewer", createdAt: new Date() });
+  assert.equal((await addRoute(ws, { name: "to a viewer", userIds: [uid2] }, "owner")).ok, false); // viewers cannot decide
+  const big = await addRoute(ws, { name: "big spends", minAmount: 4000, userIds: [u.id], priority: 10 }, "owner");
+  assert.ok(big.ok);
+  const r = await mandate({ approvalAbove: 2000 });
+  assert.equal(await routeFor(ws, { amount: 3000, merchant: "OpenAI", mandateId: r.mandate.id }), null);
+  assert.equal((await routeFor(ws, { amount: 4500, merchant: "OpenAI", mandateId: r.mandate.id }))?.name, "big spends");
+  const ask = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
+  assert.equal((await getApproval(ask.approvalId!))!.a.routeId, big.ok ? big.route.id : "");
+  assert.deepEqual(await notifyUserIds(ws, big.ok ? big.route.id : null), [u.id]);
+  assert.deepEqual((await notifyUserIds(ws, null)).sort(), (await deciderUserIds(ws)).sort());
+  if (big.ok) { await toggleRoute(ws, big.route.id, false, "owner"); assert.equal(await routeFor(ws, { amount: 4500, merchant: "OpenAI", mandateId: r.mandate.id }), null); await removeRoute(ws, big.route.id, "owner"); }
+});
+
+test("sandbox mandates: test tokens, no proxy keys, out of the stats, resettable", async () => {
+  const { resetSandbox, getMandateByToken, recentTransactions } = await import("../lib/service");
+  const { statsRows } = await import("../lib/stats");
+  const r = await mandate({ approvalAbove: null, sandbox: true });
+  assert.ok(r.token.startsWith("mnd_test_")); assert.equal(r.mandate.sandbox, 1); assert.equal(r.mandate.tokenPrefix.length, 14);
+  assert.equal((await getMandateByToken(r.token))?.id, r.mandate.id);
+  assert.equal((await authorize(r.mandate, { amount: 700, merchant: "OpenAI" }, "agent_api")).decision, "approved");
+  assert.equal((await statsRows(ws)).rows.some((x) => x.mid === r.mandate.id), false);
+  const { createProxyKey, addProviderKey } = await import("../lib/proxy");
+  const pk = await addProviderKey(ws, "openai", "sk-REAL-test-key-0000000000", "t", "owner");
+  await assert.rejects(createProxyKey(ws, { mandateId: r.mandate.id, providerKeyId: pk.id, name: "x" }, "owner"), /sandbox/);
+  assert.equal(await resetSandbox(ws, r.mandate.id, "owner"), true);
+  assert.equal((await recentTransactions(ws, 10, r.mandate.id)).length, 0);
+  const live = await mandate({ approvalAbove: null });
+  assert.equal(await resetSandbox(ws, live.mandate.id, "owner"), false); // never wipes a live mandate
+});
+
+test("generic API targets: public https only, priced per call or from the response, keys bound to the target", async () => {
+  const { addTarget, listTargets, createProxyKey, resolveTargetToken, targetCost, removeTarget, listProxyKeys } = await import("../lib/proxy");
+  assert.equal((await addTarget(ws, { name: "Local", baseUrl: "http://10.0.0.5", authValue: "Bearer secret-1", pricing: "per_call", priceAmount: 5 }, "owner")).ok, false);
+  const t = await addTarget(ws, { name: "SerpAPI", baseUrl: "https://example.com/api/", authHeader: "X-Api-Key", authValue: "sk-live-000000", pricing: "header", priceAmount: 50, priceKey: "x-cost-cents" }, "owner");
+  assert.ok(t.ok); if (!t.ok) return;
+  assert.equal(t.target.slug, "serpapi"); assert.equal(t.target.baseUrl, "https://example.com/api"); assert.equal(t.target.authHeader, "x-api-key");
+  assert.equal((await addTarget(ws, { name: "SerpAPI", baseUrl: "https://example.com", authValue: "Bearer xx-yy-zz", pricing: "per_call", priceAmount: 1 }, "owner")).ok, false); // duplicate slug
+  assert.equal(targetCost(t.target, { status: 200, headers: new Headers({ "x-cost-cents": "37" }), body: null }).amount, 37);
+  assert.equal(targetCost(t.target, { status: 200, headers: new Headers(), body: null }).amount, 50); // estimate when missing
+  assert.equal(targetCost(t.target, { status: 500, headers: new Headers({ "x-cost-cents": "37" }), body: null }).amount, 0);
+  assert.equal(targetCost({ ...t.target, pricing: "json", priceKey: "usage.cost" }, { status: 200, headers: new Headers(), body: JSON.stringify({ usage: { cost: 12 } }) }).amount, 12);
+  assert.equal(targetCost({ ...t.target, pricing: "per_call", priceAmount: 9 }, { status: 200, headers: new Headers(), body: null }).amount, 9);
+  const m = await mandate({ approvalAbove: null, allowedMerchants: [] });
+  const k = await createProxyKey(ws, { mandateId: m.mandate.id, targetId: t.target.id, name: "scraper" }, "owner");
+  assert.ok(k.token.startsWith("mpx_"));
+  const resolved = await resolveTargetToken(k.token, "serpapi");
+  assert.equal(resolved?.authValue, "sk-live-000000"); assert.equal(resolved?.target.id, t.target.id);
+  assert.equal(await resolveTargetToken(k.token, "other"), null);
+  assert.ok((await listProxyKeys(ws)).some((x) => x.k.id === k.id && x.targetName === "SerpAPI"));
+  assert.equal((await listTargets(ws)).length, 1);
+  await removeTarget(ws, t.target.id, "owner");
+  assert.equal(await resolveTargetToken(k.token, "serpapi"), null); // keys die with the target
+});

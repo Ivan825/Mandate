@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 __all__ = ["Mandate", "Hold", "Decision", "Remedy", "MandateError", "MandateDeclined", "MandatePending", "MandateAuthError"]
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 DEFAULT_BASE_URL = "https://mandate-ashen.vercel.app"
 
@@ -106,7 +106,7 @@ class Mandate:
 
     def __init__(self, token: str, base_url: str = DEFAULT_BASE_URL, timeout: float = 15.0, user_agent: str = f"mandate-agent-python/{__version__}"):
         if not token or not token.startswith("mnd_"):
-            raise MandateAuthError("A mandate token (mnd_...) is required.")
+            raise MandateAuthError("A mandate token (mnd_... or mnd_test_...) is required.")
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -214,6 +214,42 @@ class Mandate:
         if status != 200:
             raise MandateError(payload.get("error", f"HTTP {status}"), status, payload)
         return payload
+
+    def voucher(self, transaction_id: str) -> Dict[str, Any]:
+        """The signed authorisation voucher (mv1....) for an approved hold, to hand to the merchant.
+        The merchant verifies it offline with Mandate's public key and redeems it at redeemUrl."""
+        status, payload, _ = self._request("GET", f"/api/agent/transactions/{transaction_id}/voucher")
+        if status != 200:
+            raise MandateError(payload.get("error", f"HTTP {status}"), status, payload)
+        return payload
+
+    def delegate(self, name: str, per_txn_limit: int, daily_limit: int, total_limit: int, approval_above: Any = "inherit",
+                 allowed_merchants: Optional[list] = None, blocked_categories: Optional[list] = None, expires_at: Any = "inherit", agent_name: Optional[str] = None) -> "Mandate":
+        """Carve a narrower sub-mandate out of this one for a helper. Every term must fit inside this
+        mandate's; the helper's spend counts against these limits; revoking this mandate revokes it.
+        Returns a client for the helper; the raw token is on `.token` (shown once by the server)."""
+        body: Dict[str, Any] = {"name": name, "perTxnLimit": per_txn_limit, "dailyLimit": daily_limit, "totalLimit": total_limit}
+        if approval_above != "inherit":
+            body["approvalAbove"] = approval_above
+        if allowed_merchants is not None:
+            body["allowedMerchants"] = allowed_merchants
+        if blocked_categories is not None:
+            body["blockedCategories"] = blocked_categories
+        if expires_at != "inherit":
+            body["expiresAt"] = expires_at
+        if agent_name:
+            body["agentName"] = agent_name
+        status, payload, _ = self._request("POST", "/api/agent/delegate", body)
+        if status != 201:
+            raise MandateError(payload.get("error", f"HTTP {status}"), status, payload)
+        child = Mandate(payload["token"], base_url=self.base_url, timeout=self.timeout, user_agent=self.user_agent)
+        child.info = payload  # type: ignore[attr-defined]
+        return child
+
+    @property
+    def sandbox(self) -> bool:
+        """True for a sandbox (mnd_test_) token: decisions are real, money never is."""
+        return self.token.startswith("mnd_test_")
 
     def hold(self, amount: int, merchant: str, **kwargs: Any) -> "Hold":
         """Context manager: authorise on entry, capture inside, void on exit if nothing was captured."""

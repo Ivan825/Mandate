@@ -229,3 +229,16 @@ table.mini td,table.mini th{padding:6px 8px}
 .pill.cancelled{opacity:.7}
 .track{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin:6px 0}
 .track>div{height:100%;background:var(--ok)}
+.notice.frozen{border-width:2px}
+.pill.sandbox{background:var(--surface-2);color:var(--ink-2);border:1px dashed var(--rule)}
+.pill.open{background:var(--warn-soft);color:var(--warn)}
+.pill.refunded{background:var(--ok-soft);color:var(--ok)}
+.pill.upheld,.pill.withdrawn{background:var(--surface-2);color:var(--ink-2)}
+.pill.disputed{background:var(--warn-soft);color:var(--warn)}
+.cosign{display:inline-flex;gap:3px;margin-left:6px;vertical-align:middle}
+.cosign i{width:9px;height:9px;border-radius:50%;border:1px solid var(--ink-2);display:inline-block}
+.cosign i.on{background:var(--ok);border-color:var(--ok)}
+.tree{color:var(--ink-2);font-family:var(--mono);font-size:12px;margin-right:4px}
+.anchor-line{font-family:var(--mono);font-size:11.5px;word-break:break-all;color:var(--ink-2)}
+.panic>summary{white-space:nowrap}
+.approval.mine{border-left:3px solid var(--accent)}

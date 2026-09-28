@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
   // Holds nobody settled, across every workspace (each workspace also sweeps
   // its own on every authorisation, so this is the backstop for idle ones).
   try { const { sweepAllHolds } = await import("@/lib/service"); out.holds_closed = await sweepAllHolds(500); } catch (e) { out.holds_closed = -1; console.error(`cleanup holds: ${(e as Error).message}`); }
+  try { const { anchorAll } = await import("@/lib/anchors"); out.ledgers_anchored = await anchorAll(); } catch (e) { out.ledgers_anchored = -1; console.error(`cleanup anchors: ${(e as Error).message}`); }
   try { const { dispatchDue } = await import("@/lib/webhooks"); out.webhooks_dispatched = (await dispatchDue({ limit: 200, budgetMs: 40_000 })).sent; } catch (e) { out.webhooks_dispatched = -1; console.error(`cleanup webhooks: ${(e as Error).message}`); }
   return NextResponse.json({ ok: true, deleted: out, at: new Date().toISOString() });
 }

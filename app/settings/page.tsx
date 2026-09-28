@@ -104,6 +104,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <p className="muted" style={{ fontSize: 13.5 }}>Push every ledger event in this workspace — decisions, captures, approvals, revocations — as signed JSON to your own endpoints, with retries. {endpoints.length > 0 ? <>{endpoints.length} endpoint{endpoints.length === 1 ? "" : "s"} configured.</> : "None configured yet."}</p>
           <Link className="btn secondary sm" href="/settings/webhooks">Manage event webhooks</Link>
         </div>
+        <div className="card">
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Approval routing</div>
+          <p className="muted" style={{ fontSize: 13.5 }}>By default every owner, admin and approver hears about every request. Routes send particular requests — by amount band, category, merchant or mandate — to particular people instead.</p>
+          <Link className="btn secondary sm" href="/settings/routing">Manage routing</Link>
+        </div>
       </div>
 
       <h2 style={{ marginBottom: 8 }}>Connected agents</h2>

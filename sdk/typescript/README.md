@@ -26,8 +26,12 @@ else console.log(a.decision, a.reason, a.remedy);   // retryAt, maxAmountNow, al
 - `authorize(input)` — `waitForMs` polls a *pending* answer (same idempotency key) until the owner decides.
 - `mustAuthorize(input)` throws `MandateDeclined` (with `.remedy`) or `MandatePending`.
 - `capture(id, { amount?, note? })`, `void(id, reason?)`, `get(id)`, `mandate()`.
+- `proposePlan({ title, items, waitForMs? })`, `getPlan(id)` — get a whole shopping list approved once.
+- `voucher(id)` — the signed authorisation voucher for an approved hold (`a.voucher` is already on the answer): hand it to the merchant, who verifies it offline and redeems it for what was actually sold.
+- `delegate({ name, perTxnLimit, dailyLimit, totalLimit, … })` — carve a narrower sub-mandate out of yours for a helper; returns `{ token, client }`. Its spend counts against your limits; revoking yours revokes it.
+- `sandbox` — true for a `mnd_test_` token (decisions are real, money never is).
 
-Amounts are integers in the mandate's minor unit (cents, paise).
+Amounts are integers in the mandate's minor unit (cents, paise). A decline with rule `frozen` means the owner pressed the panic button — stop and tell the user.
 
 ## Agent frameworks
 

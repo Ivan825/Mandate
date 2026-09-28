@@ -9,8 +9,8 @@ import { stripeEnabled } from "@/lib/stripe";
 import { Pill, Util, When, Flags } from "@/app/components";
 import { simulatePurchaseAction, revokeMandateAction, freezeCardAction, settleHoldAction, pauseMandateAction, resumeMandateAction, raiseLimitAction, withdrawRaiseAction, shareReceiptAction } from "@/app/actions";
 import { effectiveTerms, isPaused, OVERRIDE_FIELDS } from "@/lib/policy";
-import { listOverrides, shadowReport, listPlans, planView } from "@/lib/service";
-import { setModeAction, resetAutonomyAction, cancelPlanAction } from "@/app/actions";
+import { listOverrides, shadowReport, listPlans, planView, listChildren, listDisputes, parseSignoffs } from "@/lib/service";
+import { setModeAction, resetAutonomyAction, cancelPlanAction, openDisputeAction, resolveDisputeAction, resetSandboxAction } from "@/app/actions";
 import { WhatIf } from "./whatif";
 import { inputStep, toMajor } from "@/lib/money";
 import { stripePublishableKey } from "@/lib/stripe";
@@ -19,17 +19,18 @@ import { CardReveal } from "./card";
 import { grantValid, sweepReveals } from "@/lib/reveal";
 import { appUrl } from "@/lib/env";
 
-export default async function MandatePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ new?: string; g?: string; error?: string; raised?: string }> }) {
+export default async function MandatePage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ new?: string; g?: string; error?: string; raised?: string; disputed?: string }> }) {
   const ctx = await requireCtx();
   const { id } = await params;
-  const { new: isNew, g, error: actionError, raised } = await searchParams;
+  const { new: isNew, g, error: actionError, raised, disputed } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const m = await getMandate(ctx.workspaceId, id);
   if (!m) notFound();
   await sweepReveals();
   const revealed = isNew && grantValid(m.id, g) ? await revealToken(ctx.workspaceId, m.id) : null;
   const [agent] = await db.select().from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
-  const [facts, txns, approvals, overrides, shadow, plans] = await Promise.all([factsFor(m), recentTransactions(ctx.workspaceId, 50, m.id), listApprovals(ctx.workspaceId), listOverrides(ctx.workspaceId, m.id), m.mode === "observe" ? shadowReport(ctx.workspaceId, m.id) : null, listPlans(ctx.workspaceId, { mandateId: m.id })]);
+  const [facts, txns, approvals, overrides, shadow, plans, children, disputes, parent] = await Promise.all([factsFor(m), recentTransactions(ctx.workspaceId, 50, m.id), listApprovals(ctx.workspaceId), listOverrides(ctx.workspaceId, m.id), m.mode === "observe" ? shadowReport(ctx.workspaceId, m.id) : null, listPlans(ctx.workspaceId, { mandateId: m.id }), listChildren(ctx.workspaceId, m.id), listDisputes(ctx.workspaceId, { mandateId: m.id }), m.parentId ? getMandate(ctx.workspaceId, m.parentId) : null]);
+  const openDisputes = disputes.filter((d) => d.d.status === "open");
   const autonomyMax = m.autonomyStep > 0 ? Math.max(0, (m.autonomyCeiling ?? m.perTxnLimit) - m.perTxnLimit) : 0;
   const now = new Date();
   const eff = effectiveTerms(m, overrides, now);
@@ -52,8 +53,8 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
       <div className="page-head">
         <div>
           <div className="eyebrow">{agent?.name ?? "Agent"} · mandate</div>
-          <h1>{m.name} <Pill v={status} />{m.mode === "observe" && <> <Pill v="observe" /></>}</h1>
-          <p className="muted">{m.currency} · issued <When d={m.createdAt} />{m.expiresAt && <> · valid to end of {new Date(m.expiresAt).toLocaleDateString("en-GB", { timeZone: m.timezone, day: "2-digit", month: "short", year: "numeric" })} ({m.timezone})</>}{m.revokedAt && <> · revoked <When d={m.revokedAt} /></>}</p>
+          <h1>{m.name} <Pill v={status} />{m.mode === "observe" && <> <Pill v="observe" /></>}{m.sandbox === 1 && <> <Pill v="sandbox" /></>}</h1>
+          <p className="muted">{m.currency} · issued <When d={m.createdAt} />{parent && <> · sub-mandate of <Link href={`/mandates/${parent.id}`}>{parent.name}</Link></>}{m.expiresAt && <> · valid to end of {new Date(m.expiresAt).toLocaleDateString("en-GB", { timeZone: m.timezone, day: "2-digit", month: "short", year: "numeric" })} ({m.timezone})</>}{m.revokedAt && <> · revoked <When d={m.revokedAt} /></>}</p>
         </div>
         <div className="actions">
           <Link className="btn secondary" href={`/mandates/${m.id}/receipt`}>Receipt</Link>
@@ -104,6 +105,16 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         </div>
       )}
       {raised && <div className="notice ok" style={{ marginBottom: 20 }}>Temporary raise in force. The mandate's own terms are unchanged and come back when it ends.</div>}
+      {disputed && <div className="notice" style={{ marginBottom: 20 }}>Dispute opened. It is listed below and in the approval inbox; resolve it as refunded (limits net down), upheld, or withdraw it.</div>}
+      {facts.frozen && <div className="notice bad" style={{ marginBottom: 20 }}><strong>Workspace frozen.</strong> Every request under this mandate is declined until the freeze is lifted (see the banner above).</div>}
+      {m.sandbox === 1 && (
+        <div className="notice" style={{ marginBottom: 20 }}>
+          <div className="page-head" style={{ marginBottom: 0 }}>
+            <div><strong>Sandbox mandate.</strong> Its token starts with <span className="mono">mnd_test_</span>; decisions, approvals and the ledger behave exactly like a live mandate, but it can never get a card or a proxy key, and its spend is left out of the workspace's totals. Use it for integration tests, then reset it.</div>
+            {mayIssue && <form action={resetSandboxAction}><input type="hidden" name="mandateId" value={m.id} /><button className="btn secondary sm" type="submit">Reset sandbox</button></form>}
+          </div>
+        </div>
+      )}
       {paused && <div className="notice" style={{ marginBottom: 20 }}><strong>Paused{m.pausedBy ? ` by ${m.pausedBy}` : ""}.</strong> Every request declines with a resume time; the token still works once it resumes{m.pausedUntil ? <> at <When d={m.pausedUntil} /></> : " — press Resume when ready"}.</div>}
       {m.stripeCardId && (
         <div className="card" style={{ marginBottom: 20 }}>
@@ -143,6 +154,8 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
             <dt>Blocked</dt><dd>{blocked.length ? blocked.join(", ") : <span className="faint">none</span>}</dd>
             <dt>Active hours</dt><dd className="num">{m.activeHoursStart === 0 && m.activeHoursEnd === 24 ? "all day" : `${String(m.activeHoursStart).padStart(2, "0")}:00–${String(m.activeHoursEnd).padStart(2, "0")}:00`} {m.timezone}</dd>
             {m.vetoAbove != null && <><dt>Veto window</dt><dd>above {fmt(m.vetoAbove, m.currency)}: announced, goes through after {m.vetoMinutes} min unless you cancel</dd></>}
+            {m.cosignAbove != null && <><dt>Co-signing</dt><dd>above {fmt(m.cosignAbove, m.currency)}: {m.cosignCount} distinct approvers must sign; one denial ends it</dd></>}
+            {parent && <><dt>Delegated from</dt><dd><Link href={`/mandates/${parent.id}`}>{parent.name}</Link> <span className="faint">— this mandate's spend also counts against it, and it is revoked with it</span></dd></>}
             <dt>Mode</dt><dd>{m.mode === "observe" ? <>observing (nothing declined){mayIssue && <form action={setModeAction} style={{ display: "inline", marginLeft: 8 }}><input type="hidden" name="mandateId" value={m.id} /><input type="hidden" name="mode" value="enforce" /><button className="btn secondary sm" type="submit">enforce</button></form>}</> : <>enforcing{mayIssue && status === "active" && <form action={setModeAction} style={{ display: "inline", marginLeft: 8 }}><input type="hidden" name="mandateId" value={m.id} /><input type="hidden" name="mode" value="observe" /><button className="btn secondary sm" type="submit" title="Let everything through and only record what the terms would have done">observe instead</button></form>}</>}</dd>
             <dt>Holds</dt><dd>{m.holdTtlHours === 0 ? "settle at once" : <>open {m.holdTtlHours} h, then {m.holdPolicy === "release" ? "released" : "captured in full"}</>}{heldCount > 0 && <> · <strong className="num">{heldCount}</strong> open now</>}</dd>
             <dt>Card</dt><dd>{m.cardLast4 ? <span className="mono">Stripe virtual ···{m.cardLast4}{m.cardStatus && m.cardStatus !== "active" ? ` (${m.cardStatus === "inactive" ? "frozen" : m.cardStatus})` : ""}</span> : <span className="faint">none (API and MCP only)</span>}</dd>
@@ -214,6 +227,42 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
         </div>
       )}
 
+      {children.length > 0 && (
+        <>
+          <h2 style={{ marginBottom: 10 }}>Sub-mandates</h2>
+          <p className="faint" style={{ fontSize: 12.5, margin: "0 0 10px" }}>Carved out of this mandate by the agent for helpers it runs. Their terms fit inside these; their spend is counted here; revoking this mandate revokes them.</p>
+          <div className="tbl" style={{ marginBottom: 28 }}>
+            <table>
+              <thead><tr><th>Sub-mandate</th><th>Helper</th><th className="r">Per txn</th><th className="r">Per day</th><th className="r">Total</th><th>Status</th><th>Issued</th></tr></thead>
+              <tbody>{children.map(({ m: c, agentName }) => <tr key={c.id}><td><span className="tree">└</span><Link href={`/mandates/${c.id}`}>{c.name}</Link></td><td>{agentName}</td><td className="r num">{fmt(c.perTxnLimit, c.currency)}</td><td className="r num">{fmt(c.dailyLimit, c.currency)}</td><td className="r num">{fmt(c.totalLimit, c.currency)}</td><td><Pill v={c.status} /></td><td><When d={c.createdAt} /></td></tr>)}</tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {disputes.length > 0 && (
+        <>
+          <h2 style={{ marginBottom: 10 }}>Disputes</h2>
+          <div className="tbl" style={{ marginBottom: 28 }}>
+            <table>
+              <thead><tr><th>Opened</th><th>Merchant</th><th className="r">Amount</th><th>Why</th><th>Status</th><th></th></tr></thead>
+              <tbody>{disputes.map(({ d }) => (
+                <tr key={d.id}><td><When d={d.openedAt} /><div className="faint" style={{ fontSize: 11.5 }}>{d.openedBy}</div></td><td><a href={`#tx-${d.transactionId}`}>{d.merchant}</a></td><td className="r num">{fmt(d.amount, d.currency)}</td><td className="muted" style={{ fontSize: 13 }}>{d.reason || <span className="faint">—</span>}{d.resolution && <div className="faint" style={{ fontSize: 12 }}>{d.resolution}</div>}</td><td><Pill v={d.status} />{d.resolvedBy && <div className="faint" style={{ fontSize: 11.5 }}>by {d.resolvedBy}</div>}</td>
+                  <td>{d.status === "open" && mayRevoke && (
+                    <form action={resolveDisputeAction} className="actions" style={{ gap: 4, flexWrap: "wrap" }}>
+                      <input type="hidden" name="disputeId" value={d.id} /><input type="hidden" name="back" value={`/mandates/${m.id}`} />
+                      <input name="note" placeholder="note (optional)" aria-label="Resolution note" style={{ maxWidth: 150 }} />
+                      <button className="btn ok sm" type="submit" name="outcome" value="refunded" title="The money came back: post a refund so the limits net down">Refunded</button>
+                      <button className="btn secondary sm" type="submit" name="outcome" value="upheld" title="The charge stands">Upheld</button>
+                      <button className="btn secondary sm" type="submit" name="outcome" value="withdrawn">Withdraw</button>
+                    </form>
+                  )}</td></tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </>
+      )}
+
       {plans.length > 0 && (
         <>
           <h2 style={{ marginBottom: 10 }}>Plans</h2>
@@ -241,7 +290,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
               <thead><tr><th>Requested</th><th>Merchant</th><th className="r">Amount</th><th>Status</th><th>Decided</th><th>Valid until</th></tr></thead>
               <tbody>
                 {mine.map(({ a }) => (
-                  <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{a.merchant}{a.kind === "veto" && <span className="faint"> · veto window</span>}{a.purpose && <div className="faint" style={{ fontSize: 12 }}>{a.purpose}</div>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} />{a.signedWith && <span className="pill ok" style={{ marginLeft: 6 }}>signed</span>}</td><td><When d={a.decidedAt} />{a.decidedBy === "silence" && <div className="faint" style={{ fontSize: 11.5 }}>no objection</div>}</td><td><When d={a.status === "approved" ? a.expiresAt : a.status === "pending" && a.vetoUntil ? a.vetoUntil : null} /></td></tr>
+                  <tr key={a.id}><td><When d={a.requestedAt} /></td><td>{a.merchant}{a.kind === "veto" && <span className="faint"> · veto window</span>}{a.purpose && <div className="faint" style={{ fontSize: 12 }}>{a.purpose}</div>}</td><td className="r num">{fmt(a.amount, a.currency)}</td><td><Pill v={a.status} />{a.signedWith && <span className="pill ok" style={{ marginLeft: 6 }}>signed</span>}{a.requiredApprovers > 1 && <span className="cosign" title={`${parseSignoffs(a.signoffs).length} of ${a.requiredApprovers} signatures`}>{Array.from({ length: a.requiredApprovers }, (_, i) => <i key={i} className={i < parseSignoffs(a.signoffs).length ? "on" : ""} />)}</span>}</td><td><When d={a.decidedAt} />{a.decidedBy === "silence" && <div className="faint" style={{ fontSize: 11.5 }}>no objection</div>}{a.requiredApprovers > 1 && a.status === "pending" && <div className="faint" style={{ fontSize: 11.5 }}>{parseSignoffs(a.signoffs).map((x) => x.by).join(", ") || "no signatures yet"}</div>}</td><td><When d={a.status === "approved" ? a.expiresAt : a.status === "pending" && a.vetoUntil ? a.vetoUntil : null} /></td></tr>
                 ))}
               </tbody>
             </table>
@@ -263,7 +312,7 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
                 <td><When d={t.createdAt} /></td>
                 <td>{t.merchant}{t.purpose && <div className="faint" style={{ fontSize: 12 }}>{t.purpose}</div>}<Flags json={t.flags} small /></td>
                 <td className="r num">{t.settlement && t.settlement !== "held" && authorized !== t.amount ? <><s className="faint">{fmt(authorized, t.currency)}</s> {fmt(t.amount, t.currency)}</> : fmt(t.amount, t.currency)}</td>
-                <td><Pill v={t.decision} />{t.shadowDecision && t.shadowDecision !== "approved" && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }} title={t.shadowReason ?? ""}>would {t.shadowDecision === "pending" ? "ask" : "decline"} ({t.shadowRule})</div>}</td>
+                <td><Pill v={t.decision} />{t.disputeId && <> <Pill v={openDisputes.some((d) => d.d.id === t.disputeId) ? "disputed" : disputes.find((d) => d.d.id === t.disputeId)?.d.status ?? "disputed"} /></>}{t.shadowDecision && t.shadowDecision !== "approved" && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }} title={t.shadowReason ?? ""}>would {t.shadowDecision === "pending" ? "ask" : "decline"} ({t.shadowRule})</div>}</td>
                 <td>
                   {t.settlement && <Pill v={t.settlement} />}
                   {t.settlement === "held" && <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>{t.holdExpiresAt ? <>{m.holdPolicy === "release" ? "releases" : "captures"} <When d={t.holdExpiresAt} /></> : "until the card network settles"}</div>}
@@ -296,6 +345,17 @@ export default async function MandatePage({ params, searchParams }: { params: Pr
                   ) : mayShare ? (
                     <form action={shareReceiptAction}><input type="hidden" name="transactionId" value={t.id} /><input type="hidden" name="mandateId" value={m.id} /><button className="btn secondary sm" type="submit" title="Create a public, signed, verifiable receipt for this decision">Share receipt</button></form>
                   ) : null}
+                  {t.decision === "approved" && t.amount > 0 && !t.disputeId && t.source !== "dispute" && mayRevoke && (
+                    <details style={{ marginTop: 6 }}>
+                      <summary className="faint" style={{ cursor: "pointer", fontSize: 12 }}>Dispute…</summary>
+                      <form action={openDisputeAction} className="form" style={{ marginTop: 6, gap: 6 }}>
+                        <input type="hidden" name="transactionId" value={t.id} /><input type="hidden" name="mandateId" value={m.id} />
+                        <input name="reason" placeholder="what went wrong" aria-label="Dispute reason" required style={{ maxWidth: 200 }} />
+                        <label className="check" style={{ fontSize: 12 }}><input type="checkbox" name="pause" /> also pause the mandate</label>
+                        <button className="btn danger sm" type="submit">Open dispute</button>
+                      </form>
+                    </details>
+                  )}
                 </td>
               </tr>
               );

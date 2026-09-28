@@ -46,7 +46,8 @@ try {
   const link = lastLink(new RegExp(`${BASE}/api/auth/magic-link/verify\\?[^\\s]+`, "g"));
   if (!link) throw new Error("no sign-in link in server output");
   await p.goto(link, { waitUntil: "load" });
-  await p.evaluate(() => fetch("/api/dev/seed", { method: "POST" }).then((r) => r.json()));
+  const seeded = await p.evaluate(() => fetch("/api/dev/seed", { method: "POST" }).then(async (r) => ({ status: r.status, text: await r.text() })));
+  if (seeded.status !== 200) throw new Error(`seed failed ${seeded.status}: ${seeded.text.slice(0, 300)}\n${out.slice(-2500)}`);
 
   await p.goto(BASE + "/", { waitUntil: "load" });
   await p.screenshot({ path: `${OUT}/exposure.png` });

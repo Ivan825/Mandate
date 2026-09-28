@@ -5,10 +5,12 @@ import { requireMcpAuth } from "@better-auth/mcp";
 import { and, eq } from "drizzle-orm";
 import { auth, MCP_RESOURCE } from "@/lib/auth";
 import { db, schema } from "@/lib/db";
-import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, proposePlan, getPlan, listPlans, planView, MAX_AMOUNT } from "@/lib/service";
+import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, proposePlan, getPlan, listPlans, planView, delegateMandate, MAX_AMOUNT } from "@/lib/service";
 import { sendPlanProposed } from "@/lib/notify";
 import { grantedWorkspace, isTokenRevoked } from "@/lib/connections";
 import { fmt, parseList } from "@/lib/policy";
+import { issueVoucher } from "@/lib/vouchers";
+import { appUrl } from "@/lib/env";
 
 // Mandate as a remote MCP server. An agent connects with OAuth (the person
 // approves it once on the consent page) and gets three tools. Every call is
@@ -51,7 +53,12 @@ function text(obj: unknown) {
 }
 
 function buildServer(p: Principal) {
-  const server = new McpServer({ name: "mandate", version: "0.6.0" });
+  const server = new McpServer({ name: "mandate", version: "0.7.0" });
+  const spendGuard = () => {
+    if (!p.scopes.has("mandate:spend")) return { ...text({ error: "This connection was granted read-only access (mandate:read). Reconnect with the mandate:spend scope." }), isError: true };
+    if (!p.canSpend) return { ...text({ error: "The person who connected this agent is not an owner or admin of the workspace, so it may read mandates but not settle purchases." }), isError: true };
+    return null;
+  };
 
   server.registerTool("list_mandates", {
     description: "List the active spending mandates in the connected workspace: each mandate's limits, what is left today and overall, allowed merchants and hours. Call this first to pick the mandate a purchase should go under.",
@@ -66,7 +73,7 @@ function buildServer(p: Principal) {
         limits: { perTransaction: m.perTxnLimit, daily: m.dailyLimit, total: m.totalLimit, approvalAbove: m.approvalAbove },
         remaining: { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency) },
         scope: { allowedMerchants: parseList(m.allowedMerchants), blockedCategories: parseList(m.blockedCategories), activeHours: [m.activeHoursStart, m.activeHoursEnd], timezone: m.timezone },
-        expiresAt: m.expiresAt,
+        expiresAt: m.expiresAt, sandbox: m.sandbox === 1 || undefined, parentId: m.parentId ?? undefined,
       });
     }
     return text({ workspace: p.workspaceId, mandates: out, note: "Amounts are integers in minor units (cents, paise)." });
@@ -128,6 +135,10 @@ function buildServer(p: Principal) {
     // Record the committed decision before anything else can fail.
     if (key) { if (r.decision === "pending") await releaseIdempotent(m.id, key); else await completeIdempotent(m.id, key, r.decision === "declined" ? 403 : 200, body); }
     try {
+      if (r.decision === "approved" && r.settlement === "held") {
+        const [t, [ag]] = await Promise.all([getTransaction({ mandateId: m.id }, r.transactionId), db.select({ name: schema.agents.name }).from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1)]);
+        if (t) body.voucher = issueVoucher(t, m, ag?.name ?? "Agent", appUrl()) ?? undefined;
+      }
       const f = await factsFor(m);
       body.remaining = { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), currency: m.currency };
       if (key && r.decision !== "pending") await completeIdempotent(m.id, key, r.decision === "declined" ? 403 : 200, body);
@@ -135,11 +146,17 @@ function buildServer(p: Principal) {
     return { ...text(body), isError: false };
   });
 
-  const spendGuard = () => {
-    if (!p.scopes.has("mandate:spend")) return { ...text({ error: "This connection was granted read-only access (mandate:read). Reconnect with the mandate:spend scope." }), isError: true };
-    if (!p.canSpend) return { ...text({ error: "The person who connected this agent is not an owner or admin of the workspace, so it may read mandates but not settle purchases." }), isError: true };
-    return null;
-  };
+  server.registerTool("delegate", {
+    description: "Carve a narrower sub-mandate out of one you hold, for a helper agent or a one-off job. Every term must fit inside the parent's (limits at or below, merchants within, no later expiry); the helper's spend counts against the parent; revoking the parent revokes the helper. Returns the helper's token once — pass it on, do not store it anywhere the owner did not sanction.",
+    inputSchema: z.object({ mandateId: z.string(), name: z.string().min(1).max(80), perTxnLimit: z.number().int().positive(), dailyLimit: z.number().int().positive(), totalLimit: z.number().int().positive(), approvalAbove: z.number().int().nonnegative().nullable().optional(), allowedMerchants: z.array(z.string()).max(50).optional(), agentName: z.string().max(80).optional().describe("Name for the helper as the owner will see it") }),
+  }, async ({ mandateId, name, perTxnLimit, dailyLimit, totalLimit, approvalAbove, allowedMerchants, agentName }) => {
+    const g = spendGuard(); if (g) return g;
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    const r = await delegateMandate(m, { name, perTxnLimit, dailyLimit, totalLimit, approvalAbove, allowedMerchants, agentName, by: p.clientName });
+    if (!r.ok) return { ...text({ error: "The sub-mandate does not fit inside the parent.", errors: r.errors }), isError: true };
+    return text({ mandateId: r.mandate.id, parentId: m.id, token: r.token, limits: { perTransaction: r.mandate.perTxnLimit, daily: r.mandate.dailyLimit, total: r.mandate.totalLimit, approvalAbove: r.mandate.approvalAbove }, next: `The helper authenticates to ${appUrl()}/api/agent/authorize with this token (Authorization: Bearer).` });
+  });
 
   server.registerTool("capture_purchase", {
     description: "After an approved purchase is complete, record what was actually paid. amount defaults to the full authorised amount; paying less gives the difference back to the mandate's limits; paying more is refused (request a new purchase for the extra). Each hold can be captured once.",

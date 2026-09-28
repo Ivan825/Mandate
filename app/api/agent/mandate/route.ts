@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { factsFor, openHolds, settlementView } from "@/lib/service";
+import { factsFor, openHolds, settlementView, listChildren } from "@/lib/service";
 import { parseList } from "@/lib/policy";
 import { authenticateMandate } from "@/lib/agent-auth";
 
@@ -10,10 +10,11 @@ export async function GET(req: NextRequest) {
   const a = await authenticateMandate(req);
   if (!a.ok) return a.response;
   const m = a.mandate;
-  const [f, holds] = await Promise.all([factsFor(m), openHolds(m.workspaceId, m.id)]);
+  const [f, holds, children] = await Promise.all([factsFor(m), openHolds(m.workspaceId, m.id), listChildren(m.workspaceId, m.id)]);
   return NextResponse.json({
-    mandate: m.name, mandateId: m.id, status: m.status, currency: m.currency,
-    limits: { perTransaction: m.perTxnLimit, daily: m.dailyLimit, total: m.totalLimit, approvalAbove: m.approvalAbove },
+    mandate: m.name, mandateId: m.id, status: m.status, currency: m.currency, sandbox: m.sandbox === 1, frozen: Boolean(f.frozen),
+    parentId: m.parentId, depth: m.depth, subMandates: children.map((c) => ({ mandateId: c.m.id, name: c.m.name, agent: c.agentName, status: c.m.status, perTransaction: c.m.perTxnLimit, daily: c.m.dailyLimit, total: c.m.totalLimit })),
+    limits: { perTransaction: m.perTxnLimit, daily: m.dailyLimit, total: m.totalLimit, approvalAbove: m.approvalAbove, cosignAbove: m.cosignAbove, cosignCount: m.cosignAbove != null ? m.cosignCount : null },
     remaining: { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal) },
     scope: { allowedMerchants: parseList(m.allowedMerchants), blockedCategories: parseList(m.blockedCategories), activeHours: [m.activeHoursStart, m.activeHoursEnd], timezone: m.timezone },
     holds: { ttlHours: m.holdTtlHours, onExpiry: m.holdPolicy, open: holds.map(settlementView) },

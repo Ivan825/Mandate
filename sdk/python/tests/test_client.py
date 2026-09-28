@@ -24,8 +24,10 @@ class Stub(BaseHTTPRequestHandler):
 
     def do_GET(self):
         Stub.calls.append(("GET", self.path, None, {k.lower(): v for k, v in self.headers.items()}))
-        if self.headers.get("authorization") != "Bearer mnd_test":
+        if self.headers.get("authorization") not in ("Bearer mnd_test", "Bearer mnd_child"):
             return self._send(401, {"error": "Unknown mandate token."})
+        if self.path.endswith("/voucher"):
+            return self._send(200, {"voucher": "mv1.abc.def", "payload": {"tx": "t3", "amount": 100}, "expiresAt": "2026-01-02T00:00:00Z"})
         if self.path == "/api/agent/mandate":
             return self._send(200, {"mandate": "M", "remaining": {"today": 5000}})
         if self.path.startswith("/api/agent/plans/"):
@@ -36,8 +38,12 @@ class Stub(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length", "0"))
         body = json.loads(self.rfile.read(n) or b"{}")
         Stub.calls.append(("POST", self.path, body, {k.lower(): v for k, v in self.headers.items()}))
-        if self.headers.get("authorization") != "Bearer mnd_test":
+        if self.headers.get("authorization") not in ("Bearer mnd_test", "Bearer mnd_child"):
             return self._send(401, {"error": "Unknown mandate token."})
+        if self.path == "/api/agent/delegate":
+            if body["perTxnLimit"] > 5000:
+                return self._send(400, {"error": "The sub-mandate does not fit inside this mandate.", "errors": [{"field": "perTxnLimit", "message": "too big"}]})
+            return self._send(201, {"mandateId": "c1", "parentId": "m1", "token": "mnd_child", "name": body["name"], "limits": {"perTransaction": body["perTxnLimit"]}})
         if self.path == "/api/agent/authorize":
             if body["amount"] > 5000:
                 return self._send(403, {"decision": "declined", "rule": "per_txn", "reason": "too big", "transactionId": "t1", "remedy": {"message": "Split it.", "maxAmountNow": 5000}})
@@ -120,10 +126,23 @@ class ClientTests(unittest.TestCase):
 
     def test_tools(self):
         names = [t["function"]["name"] for t in openai_tools()]
-        self.assertEqual(names, ["check_mandate", "request_purchase", "capture_purchase", "propose_plan", "get_plan", "void_purchase"])
+        self.assertEqual(names, ["check_mandate", "request_purchase", "capture_purchase", "propose_plan", "get_plan", "void_purchase", "get_voucher", "delegate"])
         r = dispatch(self.m, "request_purchase", json.dumps({"amount": 100, "merchant": "OpenAI"}))
         self.assertEqual(r["decision"], "approved")
         self.assertEqual(dispatch(self.m, "check_mandate", "{}")["mandate"], "M")
+
+    def test_voucher_and_delegate(self):
+        v = self.m.voucher("t3")
+        self.assertTrue(v["voucher"].startswith("mv1."))
+        self.assertFalse(self.m.sandbox)
+        child = self.m.delegate("helper", 500, 2000, 5000, allowed_merchants=["OpenAI"], agent_name="helper-1")
+        self.assertEqual(child.token, "mnd_child")
+        self.assertEqual(Stub.calls[-1][2]["agentName"], "helper-1")
+        self.assertEqual(child.authorize(100, "OpenAI").decision, "approved")
+        with self.assertRaises(Exception):
+            self.m.delegate("too big", 9000, 9000, 9000)
+        self.assertEqual(dispatch(self.m, "get_voucher", json.dumps({"transaction_id": "t3"}))["voucher"], "mv1.abc.def")
+        self.assertTrue(Mandate("mnd_test_abc", base_url=self.m.base_url).sandbox)
 
     def test_plan(self):
         p = self.m.propose_plan("Q4", [{"merchant": "OpenAI", "amount": 100}], wait_for=1, poll_every=0.01)
