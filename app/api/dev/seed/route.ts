@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCtx, can } from "@/lib/session";
-import { createAgent, createMandate, authorize, listAgents, captureTransaction } from "@/lib/service";
+import { createAgent, createMandate, authorize, listAgents, captureTransaction, delegateMandate, openDispute } from "@/lib/service";
+import { addRoute } from "@/lib/routing";
+import { anchorWorkspace } from "@/lib/anchors";
 
 // Populates the signed-in user's workspace with a demo state. Development
 // only (or ALLOW_SEED=1); runs once per empty workspace. It mutates, so it
@@ -47,5 +49,34 @@ export async function POST() {
   if (seat.decision === "approved") await captureTransaction({ mandateId: dev.mandate.id }, seat.transactionId, { amount: 1000, by: "agent", note: "seat prorated" });
   results.push(seat, await authorize(dev.mandate, { amount: 800, merchant: "OpenAI", purpose: "Embeddings batch" }, "agent_api", { actor: `token ${dev.mandate.tokenPrefix}…` }));
 
-  return NextResponse.json({ seeded: true, workspace: ws, decisions: results.map((r) => r.decision), tokens: { dev: dev.token, home: home.token } });
+  // The newer machinery, so the demo shows it: a team mandate with a veto
+  // window and co-signing, a helper delegated out of it, a sandbox, a
+  // dispute, an approval route, and the first public anchor.
+  const extras: Record<string, unknown> = {};
+  try {
+    await addRoute(ws, { name: "Big spends → owner", minAmount: 30000, userIds: [ctx.userId], priority: 10 }, ctx.email);
+    const booker = await createAgent(ws, { name: "Travel booker", description: "Books flights, hotels and rides for the team offsite." });
+    const travel = await createMandate(ws, {
+      agentId: booker.id, name: "Offsite travel — Q4", currency: "USD",
+      perTxnLimit: 60000, dailyLimit: 150000, totalLimit: 400000, approvalAbove: 20000,
+      allowedMerchants: [], blockedCategories: ["gambling"], activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null,
+      vetoAbove: 10000, vetoMinutes: 30, cosignAbove: 40000, cosignCount: 2,
+    });
+    if (travel.ok) {
+      const t = travel.mandate;
+      await authorize(t, { amount: 8900, merchant: "Uber", purpose: "Airport transfer" }, "agent_api", { actor: `token ${t.tokenPrefix}…` });
+      await authorize(t, { amount: 15500, merchant: "MakeMyTrip", purpose: "Hotel, 2 nights, deposit" }, "agent_api", { actor: `token ${t.tokenPrefix}…` }); // veto window
+      await authorize(t, { amount: 45200, merchant: "IndiGo", purpose: "6 return fares, offsite" }, "agent_api", { actor: `token ${t.tokenPrefix}…` }); // needs two approvers
+      const helper = await delegateMandate(t, { name: "Fare watcher", perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 20000, approvalAbove: 3000, allowedMerchants: ["Skyscanner*", "Google Flights"], agentName: "Fare watcher (sub-agent)", by: `token ${t.tokenPrefix}…` });
+      if (helper.ok) { const h = await authorize(helper.mandate, { amount: 1200, merchant: "Skyscanner API", purpose: "Fare alerts, weekly" }, "agent_api", { actor: `token ${helper.mandate.tokenPrefix}…` }); if (h.decision === "approved") await captureTransaction({ mandateId: helper.mandate.id }, h.transactionId, { by: "agent" }); extras.helper = helper.mandate.id; }
+      extras.travel = t.id;
+    }
+    const sandbox = await createMandate(ws, { agentId: coder.id, name: "CI sandbox", currency: "USD", perTxnLimit: 5000, dailyLimit: 15000, totalLimit: 50000, approvalAbove: 2000, allowedMerchants: [], blockedCategories: [], activeHoursStart: 0, activeHoursEnd: 24, timezone: "UTC", expiresAt: null, sandbox: true });
+    if (sandbox.ok) { await authorize(sandbox.mandate, { amount: 700, merchant: "OpenAI", purpose: "integration test run" }, "agent_api", { actor: "ci" }); extras.sandbox = sandbox.mandate.id; }
+    const grocery = results[5];
+    if (grocery.decision === "approved") await openDispute(ws, grocery.transactionId, { reason: "Two items missing from the delivery", by: ctx.email });
+    await anchorWorkspace(ws);
+  } catch (e) { extras.error = (e as Error).message; }
+
+  return NextResponse.json({ seeded: true, workspace: ws, decisions: results.map((r) => r.decision), tokens: { dev: dev.token, home: home.token }, extras });
 }

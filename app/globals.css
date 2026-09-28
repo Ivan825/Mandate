@@ -49,7 +49,7 @@ p{margin:0 0 10px;max-width:68ch}
 .brand .mark{width:18px;height:18px;border-radius:4px;background:var(--brand);display:inline-block;position:relative}
 .brand .mark::after{content:"";position:absolute;left:5px;top:5px;width:8px;height:8px;border-radius:2px;background:var(--bg)}
 .brand:hover{text-decoration:none}
-.nav{display:flex;gap:16px;font-size:14px;overflow-x:auto;scrollbar-width:none;min-width:0}
+.nav{display:flex;gap:14px;font-size:13.5px;overflow-x:auto;scrollbar-width:none;min-width:0}
 .nav::-webkit-scrollbar{display:none}
 .nav a{color:var(--ink-2);padding:6px 0;border-bottom:2px solid transparent}
 .nav a:hover{text-decoration:none;color:var(--ink)}

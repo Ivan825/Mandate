@@ -16,7 +16,7 @@ export function PanicButton({ action }: { action: (form: FormData) => void | Pro
   }, []);
   return (
     <details ref={ref} className="menu panic" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="btn danger sm" title="Freeze every agent in this workspace, on every rail, right now">Freeze all</summary>
+      <summary className="btn danger sm" title="Freeze every agent in this workspace, on every rail, right now">Freeze</summary>
       <form action={action} className="menu-body form" style={{ minWidth: 280 }}>
         <div style={{ fontSize: 13.5 }}><strong>Stop every agent now?</strong> Every request in this workspace will be declined — cards, API, MCP and proxy — until you unfreeze. Nothing is revoked.</div>
         <div className="field"><label htmlFor="panic-reason">Why (optional)</label><input id="panic-reason" name="reason" placeholder="agent is looping" autoComplete="off" /></div>

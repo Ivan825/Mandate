@@ -18,7 +18,11 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
   ]);
   // Sandbox mandates and sub-mandates stay out of the headline totals: the
   // first are tests, the second already count inside their parents.
-  const active = book.filter((b) => b.effectiveStatus === "active" && b.mandate.sandbox !== 1 && !b.mandate.parentId);
+  const live = book.filter((b) => b.effectiveStatus === "active");
+  const active = live.filter((b) => b.mandate.sandbox !== 1 && !b.mandate.parentId);
+  const inactive = book.length - live.length;
+  const subCount = live.filter((b) => b.mandate.parentId).length;
+  const sandboxCount = live.filter((b) => b.mandate.sandbox === 1).length;
   const byCcy = new Map<string, { limit: number; used: number }>();
   for (const b of active) {
     const c = byCcy.get(b.mandate.currency) ?? { limit: 0, used: 0 };
@@ -67,7 +71,7 @@ export default async function ExposurePage({ searchParams }: { searchParams: Pro
       </div>
 
       <div className="kpis">
-        <div className="kpi"><div className="eyebrow">Active mandates</div><div className="v num">{active.length}</div><div className="s">{agents.length} agent{agents.length === 1 ? "" : "s"} · {book.length - active.length} revoked or expired</div></div>
+        <div className="kpi"><div className="eyebrow">Active mandates</div><div className="v num">{active.length}</div><div className="s">{agents.length} agent{agents.length === 1 ? "" : "s"}{subCount > 0 && <> · {subCount} sub-mandate{subCount === 1 ? "" : "s"}</>}{sandboxCount > 0 && <> · {sandboxCount} sandbox</>} · {inactive} revoked or expired</div></div>
         <div className="kpi"><div className="eyebrow">Sanctioned limit</div>
           <div className="v num">{[...byCcy].map(([c, v]) => fmt(v.limit, c)).join(" + ") || "—"}</div>
           <div className="s">total across active mandates</div></div>

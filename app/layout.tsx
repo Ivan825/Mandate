@@ -61,10 +61,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <Link href="/activity">Activity</Link>
                 <Link href="/ledger">Ledger</Link>
                 <Link href="/stats">Stats</Link>
-                <Link href="/proxy">API proxy</Link>
+                <Link href="/proxy">Proxy</Link>
                 {stripeEnabled() && <Link href="/balance">Balance</Link>}
                 <Link href="/members">Members</Link>
-                <Link href="/connect">Connect agents</Link>
+                <Link href="/connect">Connect</Link>
                 <Link href="/settings">Settings</Link>
               </nav>
             )}
