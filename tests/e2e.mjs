@@ -44,17 +44,26 @@ const upstream = http.createServer(async (req, res) => {
 // ---- app server, stdout captured for sign-in links ----
 let out = "";
 const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: {
-  ...process.env, ALLOW_SEED: "1", APP_URL: BASE, PROXY_UPSTREAM_OPENAI: `http://localhost:${UP}/openai`, PROXY_TARGET_ALLOW_PRIVATE: "1", CRON_SECRET: "e2e-cron-secret-0123456789",
+  ...process.env, ALLOW_SEED: "1", APP_URL: BASE, EMAIL_CONSOLE: "1", PROXY_UPSTREAM_OPENAI: `http://localhost:${UP}/openai`, PROXY_TARGET_ALLOW_PRIVATE: "1", CRON_SECRET: "e2e-cron-secret-0123456789",
   // `next start` is production mode, so the same keys a deployment needs
   // (BETTER_AUTH_SECRET and NOTIFY_SECRET come from .env or the CI env).
   MANDATE_ENCRYPTION_KEY: process.env.MANDATE_ENCRYPTION_KEY ?? Buffer.alloc(32, 7).toString("base64"),
   RECEIPT_SIGNING_KEY: process.env.RECEIPT_SIGNING_KEY ?? Buffer.alloc(32, 9).toString("base64"),
+  // The integration tests sign anchors into the same database with the dev
+  // key; list its public half as a retired key so the chain still verifies
+  // (this is exactly what an operator does after rotating the signing key).
+  RECEIPT_PREVIOUS_PUBLIC_KEYS: process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS ?? (() => {
+    const { createHash, createPrivateKey, createPublicKey } = require("node:crypto");
+    const seed = createHash("sha256").update("mandate-receipt:" + (process.env.BETTER_AUTH_SECRET ?? "dev")).digest();
+    const priv = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]), format: "der", type: "pkcs8" });
+    return createPublicKey(priv).export({ type: "spki", format: "pem" }).toString();
+  })(),
   // Fake Stripe keys: the webhook is exercised with locally signed events;
   // nothing calls Stripe's API.
   STRIPE_SECRET_KEY: "sk_test_e2e_fake", STRIPE_WEBHOOK_SECRET: "whsec_e2e_fake", STRIPE_PUBLISHABLE_KEY: "pk_test_e2e_fake", STRIPE_ISSUING_REGION: "US",
   // Push: real VAPID keys so subscriptions register; nothing is sent to a real browser.
   ...(() => { const { generateVAPIDKeys } = require("web-push"); const k = generateVAPIDKeys(); return { VAPID_PUBLIC_KEY: k.publicKey, VAPID_PRIVATE_KEY: k.privateKey, VAPID_SUBJECT: "mailto:e2e@example.com" }; })(),
-}, stdio: ["ignore", "pipe", "pipe"] });
+}, stdio: ["ignore", "pipe", "pipe"], detached: true });
 app.stdout.on("data", (d) => { out += d.toString(); });
 app.stderr.on("data", (d) => { out += d.toString(); });
 const waitFor = async (url, ms = 60000) => { const t = Date.now(); while (Date.now() - t < ms) { try { const r = await fetch(url); if (r.ok || r.status === 307) return; } catch {} await new Promise((r) => setTimeout(r, 500)); } throw new Error("server did not start:\n" + out.slice(-800)); };
@@ -98,6 +107,10 @@ try {
   await p.locator(".approval", { hasText: "idempotent ask" }).first().getByRole("button", { name: "Approve once", exact: true }).click();
   await p.waitForURL(/\/approvals$/); await p.waitForTimeout(400);
   const a3 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
+  const mismatch = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body: JSON.stringify({ amount: 9999, merchant: "Anthropic", purpose: "same key, other body" }) });
+  check("an idempotency key reused with a different body is refused (422)", mismatch.status === 422, String(mismatch.status));
+  const mcpKey = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: { ...idem, "idempotency-key": "mcp:forged" }, body });
+  check("REST cannot use the MCP idempotency namespace", mcpKey.status === 400, String(mcpKey.status));
   const a4 = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body });
   check("approved answer is replayed exactly", a3.status === 200 && a4.status === 200 && a4.headers.get("idempotent-replayed") === "true");
   const big = await fetch(BASE + "/api/agent/authorize", { method: "POST", headers: idem, body: JSON.stringify({ amount: 2 ** 40, merchant: "Anthropic" }) });
@@ -131,9 +144,10 @@ try {
   const feedText = await p.locator("article").allTextContents();
   check("activity feed renders decisions as sentences", feedText.length >= 5 && feedText.some((t) => /was allowed|captured/.test(t)), String(feedText.length));
   await p.fill("article input[name=body] >> nth=0", "Looked into this — fine.");
-  await Promise.all([p.waitForURL(/\/activity/), p.locator("article form >> nth=0").locator("button", { hasText: "Note" }).first().click()]);
-  await p.waitForTimeout(400);
-  check("a note attaches to an event", (await p.locator("article", { hasText: "Looked into this" }).count()) >= 1);
+  await p.locator("article form >> nth=0").locator("button", { hasText: "Note" }).first().click();
+  // The page is already /activity, so wait for the note itself rather than a URL change.
+  const noted = await p.locator("article", { hasText: "Looked into this" }).first().waitFor({ timeout: 15000 }).then(() => true).catch(() => false);
+  check("a note attaches to an event", noted);
   await p.goto(BASE + "/activity?group=decisions&outcome=captured", { waitUntil: "networkidle" });
   check("activity filters narrow the feed", (await p.locator("article").count()) >= 1 && (await p.locator("article", { hasText: "authorization.captured" }).count()) >= 1);
   // 2d′. pause, raise, share, templates, wizard, push, one-tap API
@@ -192,7 +206,7 @@ try {
   // Push: a subscription registers and lists.
   const pushInfo = await p.evaluate(async () => (await fetch("/api/push/subscribe")).json());
   check("push is configured with a VAPID key", pushInfo.enabled === true && typeof pushInfo.publicKey === "string");
-  const subRes = await p.evaluate(async () => (await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint: "https://push.example.test/sub/" + Math.random(), keys: { p256dh: "BPl", auth: "abc" } }) })).status);
+  const subRes = await p.evaluate(async () => (await fetch("/api/push/subscribe", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint: "https://fcm.googleapis.com/fcm/send/e2e-" + Math.random(), keys: { p256dh: "BPl", auth: "abc" } }) })).status);
   const pushAfter = await p.evaluate(async () => (await fetch("/api/push/subscribe")).json());
   check("push subscription registers and lists", subRes === 200 && pushAfter.devices.length === 1);
   // One-tap API decides with the signed link the (console) email carried — the owner needs an email channel first.
@@ -207,6 +221,10 @@ try {
   const onetap = await fetch(approveLink.replace("/a/", "/api/approvals/onetap/"), { method: "POST" });
   check("one-tap API approves with the signed link", onetap.status === 200 && (await onetap.json()).decision === "approved");
   check("one-tap API refuses a replay", (await fetch(approveLink.replace("/a/", "/api/approvals/onetap/"), { method: "POST" })).status === 409);
+  const forged = approveLink.replace(/&t=[^&]+$/, "&t=" + Math.floor(Date.now() / 1000 + 3600) + ".deadbeef");
+  check("one-tap API refuses a forged token", (await fetch(forged.replace("/a/", "/api/approvals/onetap/"), { method: "POST" })).status === 403);
+  await p.goto(forged, { waitUntil: "networkidle" });
+  check("one-tap page with a bad token reveals nothing about the request", (await p.locator(".notice.bad", { hasText: "invalid or has expired" }).count()) === 1 && (await p.locator("h1").count()) === 0);
   check("manifest and service worker are public", (await fetch(BASE + "/manifest.webmanifest")).status === 200 && (await fetch(BASE + "/sw.js")).status === 200);
 
   // 2d″. veto windows, plans, shadow mode, time-travel, signing
@@ -254,7 +272,7 @@ try {
   const signOpts = await p.evaluate(async (id) => (await fetch(`/api/approvals/${id}/sign?d=approve`)).status, vetoAsk.approvalId);
   check("signing endpoint asks for a passkey first", signOpts === 412);
   await p.goto(BASE + "/p/" + plan.planId + "?d=approve&t=bad", { waitUntil: "networkidle" });
-  check("plan one-tap page renders and rejects a bad token", (await p.locator("h1").textContent())?.includes("E2E shopping list") && (await p.locator(".notice", { hasText: "already approved" }).count()) === 1);
+  check("plan one-tap page reveals nothing on a bad token", (await p.locator(".notice.bad", { hasText: "invalid or has expired" }).count()) === 1 && !(await p.content()).includes("E2E shopping list"));
 
   // 2d‴. Phase 4: panic button, sandbox, co-signing, delegation, vouchers, disputes, routing, anchors, generic proxy targets
   // Panic button: two clicks freeze every rail; the agent is told; unfreeze restores.
@@ -310,7 +328,13 @@ try {
   await p.goto(BASE + "/mandates/" + vetoMandateId, { waitUntil: "networkidle" });
   check("mandate page lists sub-mandates", (await p.locator("h2", { hasText: "Sub-mandates" }).count()) === 1 && (await p.locator("table a", { hasText: "Price checker" }).count()) === 1);
   // Vouchers: the approval carries one; the merchant verifies and redeems it without an account.
-  check("approved hold carries a signed voucher", typeof childOk.voucher === "string" && childOk.voucher.startsWith("mv1."));
+  check("approved hold points at its voucher instead of carrying it", typeof childOk.voucher === "undefined" && typeof childOk.voucherUrl === "string" && childOk.voucherUrl.endsWith(`/api/agent/transactions/${childOk.transactionId}/voucher`), JSON.stringify(childOk).slice(0, 200));
+  const vFetch = await fetch(childOk.voucherUrl, { headers: cHdr });
+  const vFetched = await vFetch.json();
+  childOk.voucher = vFetched.voucher;
+  check("the agent fetches a signed voucher for its hold", vFetch.status === 200 && typeof childOk.voucher === "string" && childOk.voucher.startsWith("mv1."), JSON.stringify(vFetched).slice(0, 160));
+  const agentCaptureAfterVoucher = await fetch(BASE + "/api/agent/capture", { method: "POST", headers: cHdr, body: JSON.stringify({ transactionId: childOk.transactionId, amount: 1 }) });
+  check("once a voucher is out, the agent can no longer settle the hold itself", agentCaptureAfterVoucher.status === 409, String(agentCaptureAfterVoucher.status));
   const vv = await fetch(BASE + "/api/vouchers/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ voucher: childOk.voucher }) }).then((r) => r.json());
   check("voucher verifies and is redeemable", vv.valid === true && vv.redeemable === true && vv.voucher?.amount === 200, JSON.stringify(vv).slice(0, 200));
   const [vt, vp, vs] = childOk.voucher.split(".");
@@ -374,6 +398,11 @@ try {
   check("generic proxy refuses a key bound to another target", (await fetch(BASE + "/api/proxy/t/other/x", { headers: { authorization: "Bearer " + tKey } })).status === 401);
   const settledTx = await fetch(BASE + `/api/agent/transactions/${tCall.headers.get("x-mandate-transaction")}`, { headers: vHdr }).then((r) => r.json());
   check("the ledger recorded the call as a captured purchase at the target", settledTx.settlement === "captured" && settledTx.capturedAmount === 7 && settledTx.merchant === "Search API", JSON.stringify(settledTx).slice(0, 160));
+  const escape = await fetch(BASE + "/api/proxy/t/search/..%2F..%2Fadmin", { headers: { authorization: "Bearer " + tKey } });
+  const escape2 = await fetch(BASE + "/api/proxy/t/search/lookup/../../x", { headers: { authorization: "Bearer " + tKey } });
+  check("generic proxy refuses paths that escape the target's base", [400, 404].includes(escape.status) && [400, 404].includes(escape2.status) && !escape.headers.get("x-mandate-transaction") && !escape2.headers.get("x-mandate-transaction"), `${escape.status} ${escape2.status}`);
+  const agentVoidProxy = await fetch(BASE + "/api/agent/void", { method: "POST", headers: vHdr, body: JSON.stringify({ transactionId: tCall.headers.get("x-mandate-transaction") }) });
+  check("an agent cannot void or re-settle a proxy-settled purchase", agentVoidProxy.status === 409, String(agentVoidProxy.status));
 
   // 2e. event webhooks: settings page, private target refused
   await p.goto(BASE + "/settings/webhooks", { waitUntil: "networkidle" });
@@ -528,7 +557,7 @@ try {
   console.log("FAIL exception:", e?.message ?? e);
   console.log(out.slice(-1500));
 } finally {
-  app.kill("SIGTERM"); upstream.close();
+  try { process.kill(-app.pid, "SIGTERM"); } catch { app.kill("SIGTERM"); } upstream.close();
 }
 console.log(failures ? `\n${failures} failure(s)` : "\nall e2e checks passed");
 process.exit(failures ? 1 : 0);

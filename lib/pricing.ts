@@ -9,6 +9,9 @@ export type Price = { input: number; output: number; cachedInput?: number };
 export const PRICES: Record<Provider, Record<string, Price>> = {
   openai: {
     "gpt-5": { input: 1.25, output: 10, cachedInput: 0.125 },
+    "gpt-5-pro": { input: 15, output: 120 },
+    "gpt-5-codex": { input: 1.25, output: 10, cachedInput: 0.125 },
+    "gpt-5-chat-latest": { input: 1.25, output: 10, cachedInput: 0.125 },
     "gpt-5-mini": { input: 0.25, output: 2, cachedInput: 0.025 },
     "gpt-5-nano": { input: 0.05, output: 0.4, cachedInput: 0.005 },
     "gpt-4.1": { input: 2, output: 8, cachedInput: 0.5 },
@@ -17,12 +20,20 @@ export const PRICES: Record<Provider, Record<string, Price>> = {
     "gpt-4o": { input: 2.5, output: 10, cachedInput: 1.25 },
     "gpt-4o-mini": { input: 0.15, output: 0.6, cachedInput: 0.075 },
     "o3": { input: 2, output: 8, cachedInput: 0.5 },
+    "o3-pro": { input: 20, output: 80 },
+    "o3-deep-research": { input: 10, output: 40, cachedInput: 2.5 },
+    "o4-mini-deep-research": { input: 2, output: 8, cachedInput: 0.5 },
+    "o1": { input: 15, output: 60, cachedInput: 7.5 },
+    "o1-pro": { input: 150, output: 600 },
+    "o1-mini": { input: 1.1, output: 4.4, cachedInput: 0.55 },
+    "o3-mini": { input: 1.1, output: 4.4, cachedInput: 0.55 },
     "o4-mini": { input: 1.1, output: 4.4, cachedInput: 0.275 },
     "text-embedding-3-small": { input: 0.02, output: 0 },
     "text-embedding-3-large": { input: 0.13, output: 0 },
   },
   anthropic: {
     "claude-opus-4-1": { input: 15, output: 75, cachedInput: 1.5 },
+    "claude-opus-4-5": { input: 5, output: 25, cachedInput: 0.5 },
     "claude-opus-4": { input: 15, output: 75, cachedInput: 1.5 },
     "claude-sonnet-4": { input: 3, output: 15, cachedInput: 0.3 },
     "claude-sonnet-4-5": { input: 3, output: 15, cachedInput: 0.3 },
@@ -39,13 +50,18 @@ export const PRICES: Record<Provider, Record<string, Price>> = {
   },
 };
 
+// A prefix match is accepted only when what follows the known name is a
+// version-ish suffix: a date (-2025-08-07, -20250514, @20250514), -latest,
+// -preview, -exp or a numeric build. "gpt-5-pro" is not a version of "gpt-5"
+// and must not be priced as one — an unknown variant is priced at the
+// family maximum instead, so the hold is never too small.
+const VERSION_SUFFIX = /^(-(\d{4}-\d{2}-\d{2}|\d{8}|latest|preview|exp|\d{2,})|@\d{8}|:\w+)?(-(\d{4}-\d{2}-\d{2}|\d{8}|latest|preview|exp|\d{2,}))*$/;
 export function priceFor(provider: Provider, model: string): { price: Price; matched: string } {
   const table = PRICES[provider];
-  const m = model.toLowerCase();
-  // exact, then longest prefix (handles dated suffixes like -2025-08-07 or -latest)
+  const m = model.toLowerCase().replace(/^models\//, "");
   if (table[m]) return { price: table[m], matched: m };
   let best: string | null = null;
-  for (const k of Object.keys(table)) if (m.startsWith(k) && (!best || k.length > best.length)) best = k;
+  for (const k of Object.keys(table)) if (m.startsWith(k) && VERSION_SUFFIX.test(m.slice(k.length)) && (!best || k.length > best.length)) best = k;
   if (best) return { price: table[best], matched: best };
   const max = Object.values(table).reduce((a, p) => ({ input: Math.max(a.input, p.input), output: Math.max(a.output, p.output) }), { input: 0, output: 0 });
   return { price: max, matched: "unknown (priced at the family maximum)" };

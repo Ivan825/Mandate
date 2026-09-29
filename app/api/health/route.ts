@@ -10,10 +10,17 @@ import { db } from "@/lib/db";
 // this is what turns an uptime monitor's five-minute ping into a scheduler.
 export const dynamic = "force-dynamic";
 
+// The ping is unauthenticated, so the housekeeping it triggers is throttled:
+// at most once a minute per instance, whatever the request rate.
+let lastHousekeeping = 0;
+
 export async function GET() {
   try {
     await db.execute(sql`select 1`);
+    if (Date.now() - lastHousekeeping < 60_000) return NextResponse.json({ ok: true }, { headers: { "cache-control": "no-store" } });
+    lastHousekeeping = Date.now();
     after(async () => {
+      try { const { sweepReveals } = await import("@/lib/reveal"); await sweepReveals(); } catch (e) { console.error("health: reveals", (e as Error).message); }
       try { const { dispatchDue } = await import("@/lib/webhooks"); await dispatchDue({ limit: 10, budgetMs: 8000 }); } catch (e) { console.error("health: webhooks", (e as Error).message); }
       try { const { sweepAllHolds } = await import("@/lib/service"); await sweepAllHolds(50); } catch (e) { console.error("health: holds", (e as Error).message); }
       try { const { anchorIfDue } = await import("@/lib/anchors"); await anchorIfDue(); } catch (e) { console.error("health: anchors", (e as Error).message); }

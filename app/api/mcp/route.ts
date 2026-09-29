@@ -5,12 +5,13 @@ import { requireMcpAuth } from "@better-auth/mcp";
 import { and, eq } from "drizzle-orm";
 import { auth, MCP_RESOURCE } from "@/lib/auth";
 import { db, schema } from "@/lib/db";
-import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, proposePlan, getPlan, listPlans, planView, delegateMandate, MAX_AMOUNT } from "@/lib/service";
+import { listMandates, getMandate, factsFor, authorize, reserveIdempotent, completeIdempotent, releaseIdempotent, requestHash, captureTransaction, voidTransaction, getTransaction, openHolds, settlementView, proposePlan, getPlan, listPlans, planView, delegateMandate, MAX_AMOUNT } from "@/lib/service";
 import { sendPlanProposed } from "@/lib/notify";
 import { grantedWorkspace, isTokenRevoked } from "@/lib/connections";
 import { fmt, parseList } from "@/lib/policy";
-import { issueVoucher } from "@/lib/vouchers";
+import { issueAndRecordVoucher } from "@/lib/vouchers";
 import { appUrl } from "@/lib/env";
+import { rateLimit } from "@/lib/ratelimit";
 
 // Mandate as a remote MCP server. An agent connects with OAuth (the person
 // approves it once on the consent page) and gets three tools. Every call is
@@ -53,7 +54,7 @@ function text(obj: unknown) {
 }
 
 function buildServer(p: Principal) {
-  const server = new McpServer({ name: "mandate", version: "0.7.0" });
+  const server = new McpServer({ name: "mandate", version: "0.7.1" });
   const spendGuard = () => {
     if (!p.scopes.has("mandate:spend")) return { ...text({ error: "This connection was granted read-only access (mandate:read). Reconnect with the mandate:spend scope." }), isError: true };
     if (!p.canSpend) return { ...text({ error: "The person who connected this agent is not an owner or admin of the workspace, so it may read mandates but not settle purchases." }), isError: true };
@@ -114,9 +115,10 @@ function buildServer(p: Principal) {
     if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
     const key = idempotencyKey ? `mcp:${idempotencyKey}` : null;
     if (key) {
-      const res = await reserveIdempotent(m.id, key);
+      const res = await reserveIdempotent(m.id, key, requestHash({ amount, merchant, purpose, category }));
       if (res.kind === "replay") return text({ ...JSON.parse(res.response), replayed: true });
       if (res.kind === "in_progress") return { ...text({ error: "A request with this idempotencyKey is still being decided. Retry in a moment." }), isError: true };
+      if (res.kind === "mismatch") return { ...text({ error: "This idempotencyKey was already used for a different purchase. Use a new key for a new purchase." }), isError: true };
     }
     let r;
     try {
@@ -135,15 +137,27 @@ function buildServer(p: Principal) {
     // Record the committed decision before anything else can fail.
     if (key) { if (r.decision === "pending") await releaseIdempotent(m.id, key); else await completeIdempotent(m.id, key, r.decision === "declined" ? 403 : 200, body); }
     try {
-      if (r.decision === "approved" && r.settlement === "held") {
-        const [t, [ag]] = await Promise.all([getTransaction({ mandateId: m.id }, r.transactionId), db.select({ name: schema.agents.name }).from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1)]);
-        if (t) body.voucher = issueVoucher(t, m, ag?.name ?? "Agent", appUrl()) ?? undefined;
-      }
       const f = await factsFor(m);
       body.remaining = { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), currency: m.currency };
       if (key && r.decision !== "pending") await completeIdempotent(m.id, key, r.decision === "declined" ? 403 : 200, body);
     } catch { /* remaining is informational */ }
     return { ...text(body), isError: false };
+  });
+
+  server.registerTool("get_voucher", {
+    description: "The signed authorisation voucher (mv1.…) for an approved hold, to hand to the merchant. They verify it offline with Mandate's public key and redeem it for what was actually sold. Fetching a voucher commits you: you can no longer capture or void that hold yourself — the merchant settles it, or it closes by policy when it expires.",
+    inputSchema: z.object({ mandateId: z.string(), transactionId: z.string() }),
+  }, async ({ mandateId, transactionId }) => {
+    const g = spendGuard(); if (g) return g;
+    const m = await getMandate(p.workspaceId, mandateId);
+    if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
+    const t = await getTransaction({ mandateId: m.id }, transactionId);
+    if (!t) return { ...text({ error: "No such authorisation under this mandate." }), isError: true };
+    if (t.decision !== "approved" || t.settlement !== "held") return { ...text({ error: `This authorisation is ${t.decision !== "approved" ? t.decision : t.settlement}; a voucher can only be issued while the hold is open.` }), isError: true };
+    const [ag] = await db.select({ name: schema.agents.name }).from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1);
+    const voucher = await issueAndRecordVoucher(t, m, ag?.name ?? "Agent", appUrl());
+    if (!voucher) return { ...text({ error: "No voucher can be issued for this kind of authorisation." }), isError: true };
+    return text({ voucher, transactionId: t.id, amount: t.authorizedAmount ?? t.amount, currency: t.currency, merchant: t.merchant, verifyUrl: `${appUrl()}/api/vouchers/verify`, redeemUrl: `${appUrl()}/api/vouchers/redeem`, publicKeyUrl: `${appUrl()}/.well-known/mandate-receipt-key` });
   });
 
   server.registerTool("delegate", {
@@ -153,7 +167,8 @@ function buildServer(p: Principal) {
     const g = spendGuard(); if (g) return g;
     const m = await getMandate(p.workspaceId, mandateId);
     if (!m) return { ...text({ error: "No such mandate in this workspace." }), isError: true };
-    const r = await delegateMandate(m, { name, perTxnLimit, dailyLimit, totalLimit, approvalAbove, allowedMerchants, agentName, by: p.clientName });
+    if (!(await rateLimit(`mandate:${m.id}:delegate`, 20)).ok) return { ...text({ error: "Too many delegations in a short time; slow down." }), isError: true };
+    const r = await delegateMandate(m, { name, perTxnLimit, dailyLimit, totalLimit, approvalAbove, allowedMerchants, agentName, by: p.clientName, delegatedBy: `mcp:${p.userId}:${p.clientId}` });
     if (!r.ok) return { ...text({ error: "The sub-mandate does not fit inside the parent.", errors: r.errors }), isError: true };
     return text({ mandateId: r.mandate.id, parentId: m.id, token: r.token, limits: { perTransaction: r.mandate.perTxnLimit, daily: r.mandate.dailyLimit, total: r.mandate.totalLimit, approvalAbove: r.mandate.approvalAbove }, next: `The helper authenticates to ${appUrl()}/api/agent/authorize with this token (Authorization: Bearer).` });
   });

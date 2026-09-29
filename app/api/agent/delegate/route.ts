@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { delegateMandate, MAX_AMOUNT } from "@/lib/service";
 import { authenticateMandate, readJson } from "@/lib/agent-auth";
 import { appUrl } from "@/lib/env";
+import { rateLimit } from "@/lib/ratelimit";
 
 // POST /api/agent/delegate — an agent carves a narrower sub-mandate out of
 // its own for a helper it runs (a sub-agent, a tool, a one-off job). Every
@@ -20,6 +21,8 @@ export async function POST(req: NextRequest) {
   const a = await authenticateMandate(req);
   if (!a.ok) return a.response;
   const parent = a.mandate;
+  // Delegation mints tokens; a runaway agent must not mint them in a loop.
+  if (!(await rateLimit(`mandate:${parent.id}:delegate`, 20)).ok) return NextResponse.json({ error: "Too many delegations in a short time; slow down." }, { status: 429 });
   const b = await readJson<Body>(req);
   if (!b) return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });
   const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : "";
@@ -31,7 +34,7 @@ export async function POST(req: NextRequest) {
   let expiresAt: Date | null | undefined = undefined;
   if (b.expiresAt === null) expiresAt = null;
   else if (typeof b.expiresAt === "string") { const d = new Date(b.expiresAt); if (Number.isNaN(d.getTime())) return NextResponse.json({ error: "expiresAt must be an ISO date." }, { status: 400 }); expiresAt = d; }
-  const r = await delegateMandate(parent, { name, perTxnLimit, dailyLimit, totalLimit, approvalAbove, allowedMerchants: strs(b.allowedMerchants), blockedCategories: strs(b.blockedCategories), expiresAt, agentName: typeof b.agentName === "string" ? b.agentName : undefined, by: `token ${parent.tokenPrefix}…` });
+  const r = await delegateMandate(parent, { name, perTxnLimit, dailyLimit, totalLimit, approvalAbove, allowedMerchants: strs(b.allowedMerchants), blockedCategories: strs(b.blockedCategories), expiresAt, agentName: typeof b.agentName === "string" ? b.agentName : undefined, by: `token ${parent.tokenPrefix}…`, delegatedBy: `token:${parent.id}` });
   if (!r.ok) return NextResponse.json({ error: "The sub-mandate does not fit inside this mandate.", errors: r.errors }, { status: 400 });
   const m = r.mandate;
   return NextResponse.json({

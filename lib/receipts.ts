@@ -3,6 +3,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { allEvents, verifyChain, canonical } from "./ledger";
 import { isProduction } from "./env";
 import { db, schema } from "./db";
+import { workspaceLabel } from "./ws-label";
 
 // A receipt is the workspace's ledger (or one mandate's slice) plus a
 // signature over the chain head. The signing key lives outside the database
@@ -37,6 +38,29 @@ export function keyId(): string {
   return createHash("sha256").update(publicKeyPem()).digest("hex").slice(0, 16);
 }
 
+// Key rotation: the public halves of retired keys go in
+// RECEIPT_PREVIOUS_PUBLIC_KEYS (PEM blocks, comma- or newline-separated, or
+// base64 of the 32 raw bytes). Signatures made under them still verify; a
+// signature under any other key never does.
+export function knownPublicKeys(): { keyId: string; key: KeyObject; pem: string; current: boolean }[] {
+  const current = createPublicKey(privateKey());
+  const out = [{ keyId: keyId(), key: current, pem: publicKeyPem(), current: true }];
+  const raw = process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS?.trim();
+  if (!raw) return out;
+  const parts = raw.includes("-----BEGIN") ? raw.split(/-----END PUBLIC KEY-----/).map((p) => (p.trim() ? p.trim() + "\n-----END PUBLIC KEY-----\n" : "")).filter(Boolean) : raw.split(/[,\s]+/).filter(Boolean);
+  for (const part of parts) {
+    try {
+      const key = part.startsWith("-----BEGIN") ? createPublicKey(part) : createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(part, "base64")]), format: "der", type: "spki" });
+      if (key.asymmetricKeyType !== "ed25519") continue;
+      const pem = key.export({ type: "spki", format: "pem" }).toString();
+      const id = createHash("sha256").update(pem).digest("hex").slice(0, 16);
+      if (!out.some((k) => k.keyId === id)) out.push({ keyId: id, key, pem, current: false });
+    } catch { /* an unparseable entry is skipped, never trusted */ }
+  }
+  return out;
+}
+export function publicKeyFor(id: string): KeyObject | null { return knownPublicKeys().find((k) => k.keyId === id)?.key ?? null; }
+
 export type Signature = { alg: "Ed25519"; keyId: string; publicKeyPem: string; signedAt: string; head: { seq: number; hash: string }; workspaceId: string; signature: string; message: string };
 
 export function signHead(workspaceId: string, head: { seq: number; hash: string }): Signature {
@@ -54,7 +78,9 @@ export function verifySignature(sig: Signature, expectWorkspaceId?: string): boo
     if (!sig || sig.alg !== "Ed25519" || typeof sig.signature !== "string" || !sig.head) return false;
     if (expectWorkspaceId && sig.workspaceId !== expectWorkspaceId) return false;
     const message = `mandate-receipt|${sig.workspaceId}|${sig.head.seq}|${sig.head.hash}|${sig.signedAt}`;
-    return edVerify(null, Buffer.from(message), createPublicKey(publicKeyPem()), Buffer.from(sig.signature, "base64"));
+    const key = publicKeyFor(typeof sig.keyId === "string" ? sig.keyId : keyId());
+    if (!key) return false;
+    return edVerify(null, Buffer.from(message), key, Buffer.from(sig.signature, "base64"));
   } catch { return false; }
 }
 
@@ -85,7 +111,7 @@ export type TxReceipt = {
   version: 1; kind: "mandate-transaction-receipt"; issuedAt: string; issuer: string;
   transaction: Record<string, unknown>; mandate: Record<string, unknown>; agent: { name: string }; approval: Record<string, unknown> | null;
   events: { seq: number; type: string; createdAt: string; prevHash: string; hash: string; payload: unknown }[];
-  chain: { workspaceId: string; head: { seq: number; hash: string }; verified: boolean };
+  chain: { label: string; head: { seq: number; hash: string }; verified: boolean };
   // The first public anchor covering the last event in this receipt, when
   // one exists: independent evidence that the history was published by then.
   anchor?: { n: number; label: string; seq: number; hash: string; coversSeq: number; anchorHash: string; signedAt: string; url: string } | null;
@@ -93,6 +119,30 @@ export type TxReceipt = {
 };
 
 function safeJson(s: string): unknown { try { return JSON.parse(s); } catch { return null; } }
+
+// A public receipt names roles, not people: every email address becomes
+// "a…@example.com", and account identifiers are dropped. The signature is
+// made over the redacted core, so the redaction is part of what is signed.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export function redactPerson(v: string): string {
+  if (!EMAIL_RE.test(v)) return v;
+  const [local, domain] = v.split("@");
+  return `${local.slice(0, 1)}…@${domain}`;
+}
+function redactDeep(value: unknown, depth = 0): unknown {
+  if (depth > 8) return value;
+  if (typeof value === "string") return value.length < 320 && value.includes("@") ? value.split(/(\s+|\s\+\s)/).map((part) => redactPerson(part)).join("") : value;
+  if (Array.isArray(value)) return value.map((x) => redactDeep(x, depth + 1));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "userId" || k === "authorId") continue;
+      out[k] = redactDeep(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
 
 export function txReceiptMessage(txId: string, coreHash: string, signedAt: string) { return `mandate-tx-receipt|${txId}|${coreHash}|${signedAt}`; }
 
@@ -103,22 +153,29 @@ export async function buildTransactionReceipt(txId: string, shareToken: string, 
   const [ag] = m ? await db.select({ name: schema.agents.name }).from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1) : [];
   const approval = t.approvalId ? (await db.select().from(schema.approvals).where(eq(schema.approvals.id, t.approvalId)).limit(1))[0] ?? null : null;
   const ids = [t.id, ...(t.approvalId ? [t.approvalId] : [])];
-  const rows = await db.select().from(schema.ledger).where(and(eq(schema.ledger.workspaceId, t.workspaceId), sql`(${sql.join(ids.map((id) => sql`${schema.ledger.payload} like ${"%\"" + id + "\"%"}`), sql` or `)})`)).orderBy(asc(schema.ledger.seq));
+  const rows = await db.select().from(schema.ledger).where(and(eq(schema.ledger.workspaceId, t.workspaceId), sql`(${sql.join([sql`${schema.ledger.payload} like ${'%"transactionId":"' + t.id + '"%'}`, ...(t.approvalId ? [sql`${schema.ledger.payload} like ${'%"approvalId":"' + t.approvalId + '"%'}`] : [])], sql` or `)})`)).orderBy(asc(schema.ledger.seq));
+  void ids;
   const verification = await verifyChain(t.workspaceId);
   const [head] = await db.select({ seq: schema.ledger.seq, hash: schema.ledger.hash }).from(schema.ledger).where(eq(schema.ledger.workspaceId, t.workspaceId)).orderBy(sql`${schema.ledger.seq} desc`).limit(1);
   const authorized = t.authorizedAmount ?? t.amount;
+  const humanSig = approval?.signature ? (safeJson(approval.signature) as Record<string, unknown> | null) : null;
+  if (humanSig) delete humanSig.userId;
   const core = {
     transaction: {
-      id: t.id, createdAt: new Date(t.createdAt).toISOString(), decision: t.decision, reason: t.reason, source: t.source, actor: t.actor,
+      id: t.id, createdAt: new Date(t.createdAt).toISOString(), decision: t.decision, reason: t.reason, source: t.source, actor: redactPerson(t.actor),
       amount: t.amount, authorizedAmount: authorized, currency: t.currency, merchant: t.merchant, category: t.category, purpose: t.purpose,
-      settlement: t.settlement, settledAt: t.settledAt ? new Date(t.settledAt).toISOString() : null, settledBy: t.settledBy, settlementNote: t.settlementNote, holdExpiresAt: t.holdExpiresAt ? new Date(t.holdExpiresAt).toISOString() : null,
+      settlement: t.settlement, settledAt: t.settledAt ? new Date(t.settledAt).toISOString() : null, settledBy: t.settledBy ? redactPerson(t.settledBy) : t.settledBy, settlementNote: t.settlementNote, holdExpiresAt: t.holdExpiresAt ? new Date(t.holdExpiresAt).toISOString() : null,
       flags: JSON.parse(t.flags || "[]"),
     },
     mandate: m ? { id: m.id, name: m.name, currency: m.currency, perTxnLimit: m.perTxnLimit, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove, allowedMerchants: JSON.parse(m.allowedMerchants), blockedCategories: JSON.parse(m.blockedCategories), activeHours: [m.activeHoursStart, m.activeHoursEnd], timezone: m.timezone, issuedAt: new Date(m.createdAt).toISOString(), expiresAt: m.expiresAt ? new Date(m.expiresAt).toISOString() : null, status: m.status, tokenPrefix: m.tokenPrefix } : {},
     agent: { name: ag?.name ?? "Agent" },
-    approval: approval ? { id: approval.id, kind: approval.kind, status: approval.status, requestedAt: new Date(approval.requestedAt).toISOString(), decidedAt: approval.decidedAt ? new Date(approval.decidedAt).toISOString() : null, decidedBy: approval.decidedBy, amount: approval.amount, merchant: approval.merchant, purpose: approval.purpose, humanSignature: approval.signature ? safeJson(approval.signature) : null } : null,
-    events: rows.map((r) => ({ seq: r.seq, type: r.type, createdAt: new Date(r.createdAt).toISOString(), prevHash: r.prevHash, hash: r.hash, payload: JSON.parse(r.payload) })),
-    chain: { workspaceId: t.workspaceId, head: head ?? { seq: 0, hash: "0".repeat(64) }, verified: verification.ok },
+    approval: approval ? { id: approval.id, kind: approval.kind, status: approval.status, requestedAt: new Date(approval.requestedAt).toISOString(), decidedAt: approval.decidedAt ? new Date(approval.decidedAt).toISOString() : null, decidedBy: approval.decidedBy ? approval.decidedBy.split(" + ").map(redactPerson).join(" + ") : approval.decidedBy, amount: approval.amount, merchant: approval.merchant, purpose: approval.purpose, humanSignature: humanSig } : null,
+    // Event payloads are redacted the same way (emails in `by`, notes' authors);
+    // the row hashes shown are the ledger's own, over the unredacted payload,
+    // so a reader compares them with the workspace's chain, not with this JSON.
+    events: rows.filter((r) => !r.type.startsWith("receipt.") && !r.type.startsWith("dispute.")).map((r) => ({ seq: r.seq, type: r.type, createdAt: new Date(r.createdAt).toISOString(), prevHash: r.prevHash, hash: r.hash, payload: redactDeep(JSON.parse(r.payload)) })),
+    // The workspace is named by its public label (the same one the anchors use).
+    chain: { label: workspaceLabel(t.workspaceId), head: head ?? { seq: 0, hash: "0".repeat(64) }, verified: verification.ok },
   };
   const signedAt = new Date().toISOString();
   const coreHash = createHash("sha256").update(canonical(core)).digest("hex");

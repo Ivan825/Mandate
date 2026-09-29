@@ -77,12 +77,13 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ provider: strin
   if (rawBody) { try { json = JSON.parse(rawBody); } catch { json = null; } }
   if (!json || typeof json !== "object") return providerError(provider, 400, "Body must be a JSON object.", "invalid_request_error");
 
-  // Ask OpenAI streams to report usage so settlement is exact.
-  let forwardBody = rawBody;
-  if (provider === "openai" && (json as Record<string, unknown>).stream === true && /chat\/completions|responses|completions/.test(upstreamPath)) {
-    const j = json as Record<string, unknown>;
-    if (!j.stream_options) forwardBody = JSON.stringify({ ...j, stream_options: { include_usage: true } });
-  }
+  // The body forwarded is the body we priced: re-serialised from the parsed
+  // object, so a request with duplicate keys or odd encoding cannot mean one
+  // model to the estimator and another to the provider. OpenAI streams are
+  // asked to report usage so settlement is exact.
+  const j = json as Record<string, unknown>;
+  if (provider === "openai" && j.stream === true && /chat\/completions|responses|completions/.test(upstreamPath) && !j.stream_options) j.stream_options = { include_usage: true };
+  const forwardBody = JSON.stringify(j);
 
   const est = estimateRequest(provider, upstreamPath, json);
   const { auth, callId } = await preauthorize(r, est, upstreamPath);
@@ -111,20 +112,29 @@ async function handle(req: NextRequest, ctx: { params: Promise<{ provider: strin
 
   const ct = upstream.headers.get("content-type") ?? "";
   if (ct.includes("text/event-stream") && upstream.body) {
-    // Pass the stream through untouched; keep a copy of the text to settle
-    // from. If the agent disconnects mid-stream the upstream keeps billing
-    // for what it generated, so settle on whatever usage reached us, or the
-    // estimate when the usage frame never arrived.
+    // Pass the stream through untouched; keep the tail of the text to settle
+    // from (the usage frame is the last thing a provider sends, so a long
+    // answer must not push it out of the buffer). If the agent disconnects
+    // mid-stream the upstream keeps billing for what it generated, so settle
+    // on the usage that reached us or, failing that, on the estimate — never
+    // below it, since a partial stream cannot prove it cost less.
+    const TAIL = 512 * 1024;
     let acc = "";
     let settled = false;
+    let aborted = false;
     const dec = new TextDecoder();
     const status = upstream.status;
-    const finish = async () => { if (settled) return; settled = true; await settle(r, callId, auth.transactionId, status, parseUsage(provider, acc), est); };
+    const finish = async () => {
+      if (settled) return; settled = true;
+      const usage = parseUsage(provider, acc);
+      const floor = aborted && usage ? { ...usage, inputTokens: Math.max(usage.inputTokens, est.inputTokens), outputTokens: usage.outputTokens } : usage;
+      await settle(r, callId, auth.transactionId, status, floor, est, { aborted });
+    };
     const ts = new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) { if (acc.length < 2_000_000) acc += dec.decode(chunk, { stream: true }); controller.enqueue(chunk); },
+      transform(chunk, controller) { acc += dec.decode(chunk, { stream: true }); if (acc.length > TAIL * 2) acc = acc.slice(-TAIL); controller.enqueue(chunk); },
       async flush() { await finish(); },
     });
-    req.signal.addEventListener("abort", () => { void finish(); });
+    req.signal.addEventListener("abort", () => { aborted = true; void finish(); });
     return new Response(upstream.body.pipeThrough(ts), { status, headers: respHeaders });
   }
 

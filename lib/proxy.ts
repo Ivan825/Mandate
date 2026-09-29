@@ -7,7 +7,15 @@ import { authorize, getMandate, type AuthResult } from "./service";
 import { costCents, estimateTokens, priceFor, type Provider } from "./pricing";
 import { sendWarning, webhookProblem } from "./notify";
 import { sweepReveals } from "./reveal";
-import { isCurrencyCode } from "./money";
+import { isCurrencyCode, MAX_AMOUNT } from "./money";
+import { isMetadataAddress } from "./net";
+import { isIP } from "node:net";
+
+function isMetadataHostname(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "metadata.google.internal" || h === "metadata") return true;
+  return isIP(h) ? isMetadataAddress(h) : false;
+}
 import type { Mandate, ProxyTarget } from "./schema";
 
 // The API-key proxy. An agent points its OpenAI / Anthropic / Gemini SDK at
@@ -125,8 +133,12 @@ export async function addTarget(workspaceId: string, input: TargetInput, by: str
   // webhooks applies — unless this deployment fronts internal APIs on its
   // own network (PROXY_TARGET_ALLOW_PRIVATE=1), the classic self-host case.
   let problem: string | null = null;
-  if (process.env.PROXY_TARGET_ALLOW_PRIVATE === "1") { try { const u = new URL(baseUrl); if (u.protocol !== "http:" && u.protocol !== "https:") problem = "Enter a full http(s) URL."; } catch { problem = "Enter a full http(s) URL."; } }
-  else problem = await webhookProblem(baseUrl);
+  if (privateTargetsAllowed()) {
+    try { const u = new URL(baseUrl); if (u.protocol !== "http:" && u.protocol !== "https:") problem = "Enter a full http(s) URL."; else if (u.username || u.password) problem = "The base URL cannot carry credentials."; else if (isMetadataHostname(u.hostname)) problem = "That address is a cloud metadata service and can never be a target."; } catch { problem = "Enter a full http(s) URL."; }
+  } else {
+    // Same rule as webhooks: public https only (the webhook flag does not open targets).
+    problem = await webhookProblem(baseUrl, { ignorePrivateFlag: true });
+  }
   if (problem) return { ok: false, error: `Base URL: ${problem}` };
   const authHeader = (input.authHeader ?? "authorization").trim().toLowerCase().slice(0, 60);
   if (!/^[a-z0-9-]+$/.test(authHeader) || /^(host|content-length|transfer-encoding|connection)$/.test(authHeader)) return { ok: false, error: "That header cannot carry the credential." };
@@ -135,7 +147,7 @@ export async function addTarget(workspaceId: string, input: TargetInput, by: str
   const currency = (input.currency ?? "USD").toUpperCase();
   if (!isCurrencyCode(currency)) return { ok: false, error: "Currency must be a 3-letter ISO code." };
   if (!["per_call", "header", "json"].includes(input.pricing)) return { ok: false, error: "Pricing is per_call, header or json." };
-  if (!Number.isInteger(input.priceAmount) || input.priceAmount <= 0) return { ok: false, error: input.pricing === "per_call" ? "Enter the cost of one call in minor units." : "Enter the amount to pre-authorise per call, in minor units." };
+  if (!Number.isInteger(input.priceAmount) || input.priceAmount <= 0 || input.priceAmount > MAX_AMOUNT) return { ok: false, error: input.pricing === "per_call" ? "Enter the cost of one call in minor units." : "Enter the amount to pre-authorise per call, in minor units." };
   const priceKey = (input.priceKey ?? "").trim().slice(0, 80);
   if (input.pricing !== "per_call" && !priceKey) return { ok: false, error: input.pricing === "header" ? "Name the response header that carries the cost." : "Give the JSON path (dotted) that carries the cost." };
   const [dup] = await db.select({ id: schema.proxyTargets.id }).from(schema.proxyTargets).where(and(eq(schema.proxyTargets.workspaceId, workspaceId), eq(schema.proxyTargets.slug, slug))).limit(1);
@@ -172,14 +184,15 @@ export async function resolveTargetToken(token: string, slug: string): Promise<R
   return { proxyKey: row.k, mandate: row.m, target: row.t, authValue: decrypt(row.t.authCiphertext) };
 }
 
-// Request headers that travel to a generic target: the content itself plus
-// the agent's own x- headers, never anything that identifies our host or
-// the proxy key.
+// Request headers that travel to a generic target: the content itself and
+// nothing that could override the method, the path, the caller's address or
+// the injected credential, and nothing that identifies our host.
+const TARGET_HEADER_ALLOW = new Set(["content-type", "accept", "user-agent", "accept-language", "if-none-match", "if-modified-since", "x-request-id", "x-correlation-id", "idempotency-key"]);
 export function forwardableTargetHeader(name: string): boolean {
-  const n = name.toLowerCase();
-  if (["content-type", "accept", "user-agent", "accept-language", "if-none-match", "if-modified-since"].includes(n)) return true;
-  return n.startsWith("x-") && !n.startsWith("x-mandate") && !n.startsWith("x-forwarded") && !n.startsWith("x-vercel") && n !== "x-real-ip";
+  return TARGET_HEADER_ALLOW.has(name.toLowerCase());
 }
+
+export function privateTargetsAllowed(): boolean { return process.env.PROXY_TARGET_ALLOW_PRIVATE === "1"; }
 
 export async function preauthorizeTarget(r: ResolvedTarget, method: string, path: string): Promise<{ auth: AuthResult; callId: string }> {
   const t = r.target;
@@ -358,13 +371,16 @@ export async function preauthorize(r: Resolved, est: Estimate, path: string): Pr
 // mandate's per-transaction limit or runs far past the estimate, the proxy
 // key is suspended and the approvers told, so a mis-estimate cannot repeat.
 const OVERRUN_FACTOR = 2;
-export async function settle(r: Resolved, callId: string, transactionId: string, upstreamStatus: number, usage: Usage | null, est: Estimate) {
+export async function settle(r: Resolved, callId: string, transactionId: string, upstreamStatus: number, usage: Usage | null, est: Estimate, opts: { aborted?: boolean } = {}) {
   const { price } = priceFor(r.provider, est.model);
   const ok = upstreamStatus >= 200 && upstreamStatus < 300;
-  const actual = !ok ? 0 : usage ? costCents(price, usage.inputTokens, usage.outputTokens, usage.cachedTokens) : est.cents;
+  // An aborted stream settles at no less than the estimate: whatever usage
+  // was seen is a lower bound on what the provider bills.
+  const reported = usage ? costCents(price, usage.inputTokens, usage.outputTokens, usage.cachedTokens) : null;
+  const actual = !ok ? 0 : reported == null ? est.cents : opts.aborted ? Math.max(reported, est.cents) : reported;
   const overrun = ok && (actual > r.mandate.perTxnLimit || (actual > est.cents * OVERRUN_FACTOR && actual - est.cents >= 50));
   await db.transaction(async (tx) => {
-    await tx.update(schema.transactions).set({ amount: actual, settlement: ok ? "captured" : "voided", settledAt: new Date(), settledBy: "proxy", settlementNote: !ok ? `Upstream ${upstreamStatus}; settled to zero.` : usage ? `Settled on reported usage (est. ${est.cents}¢).` : `Settled at estimate (no usage reported).` }).where(eq(schema.transactions.id, transactionId));
+    await tx.update(schema.transactions).set({ amount: actual, settlement: ok ? "captured" : "voided", settledAt: new Date(), settledBy: "proxy", settlementNote: !ok ? `Upstream ${upstreamStatus}; settled to zero.` : opts.aborted ? `Client disconnected mid-stream; settled at max(reported, estimate) (est. ${est.cents}¢).` : usage ? `Settled on reported usage (est. ${est.cents}¢).` : `Settled at estimate (no usage reported).` }).where(eq(schema.transactions.id, transactionId));
     await tx.update(schema.proxyCalls).set({ actualAmount: actual, inputTokens: usage?.inputTokens ?? null, outputTokens: usage?.outputTokens ?? null, upstreamStatus, settledAt: new Date() }).where(eq(schema.proxyCalls.id, callId));
     await appendEvent(tx, r.mandate.workspaceId, ok ? "authorization.settled" : "authorization.voided", {
       transactionId, callId, mandateId: r.mandate.id, provider: r.provider, model: est.model, estimatedAmount: est.cents, actualAmount: actual,

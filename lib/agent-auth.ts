@@ -6,7 +6,9 @@ import type { Mandate } from "./schema";
 // The one way an agent that holds a mandate token identifies itself to the
 // REST API. Rate-limited per address and per mandate before the database is
 // asked anything expensive.
-export async function authenticateMandate(req: NextRequest): Promise<{ ok: true; mandate: Mandate } | { ok: false; response: NextResponse }> {
+// A revoked or expired mandate's token can still read its own state and
+// settle holds it already has (capture / void), never start anything new.
+export async function authenticateMandate(req: NextRequest, opts: { allowInactive?: boolean } = {}): Promise<{ ok: true; mandate: Mandate } | { ok: false; response: NextResponse }> {
   const ip = await rateLimit(`ip:${clientIp(req)}:agent`, 600);
   if (!ip.ok) return { ok: false, response: NextResponse.json({ error: "Too many requests from this address." }, { status: 429, headers: { "retry-after": String(ip.resetSec) } }) };
   const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
@@ -15,6 +17,10 @@ export async function authenticateMandate(req: NextRequest): Promise<{ ok: true;
   if (!m) return { ok: false, response: NextResponse.json({ error: "Unknown mandate token." }, { status: 401 }) };
   const rl = await rateLimit(`mandate:${m.id}:agent`, 120);
   if (!rl.ok) return { ok: false, response: NextResponse.json({ error: "This mandate is being called too fast; slow down." }, { status: 429, headers: { "retry-after": String(rl.resetSec) } }) };
+  if (!opts.allowInactive) {
+    if (m.status === "revoked" || m.status === "expired") return { ok: false, response: NextResponse.json({ error: `This mandate is ${m.status}. Ask the owner for a new one.`, rule: "status" }, { status: 403 }) };
+    if (m.expiresAt && new Date() > new Date(m.expiresAt)) return { ok: false, response: NextResponse.json({ error: "This mandate has expired. Ask the owner for a renewal.", rule: "expiry" }, { status: 403 }) };
+  }
   return { ok: true, mandate: m };
 }
 

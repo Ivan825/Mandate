@@ -5,7 +5,7 @@ import { authenticateMandate } from "@/lib/agent-auth";
 // GET /api/agent/transactions/:id — the current state of one authorisation
 // under this mandate: held, captured, voided or released, and by whom.
 export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  const a = await authenticateMandate(req);
+  const a = await authenticateMandate(req, { allowInactive: true });
   if (!a.ok) return a.response;
   const { id } = await ctx.params;
   if (!/^[0-9a-f-]{36}$/i.test(id)) return NextResponse.json({ error: "Not a transaction id." }, { status: 400 });

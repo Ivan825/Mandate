@@ -60,14 +60,17 @@ export type EffectiveTerms = { perTxnLimit: number; dailyLimit: number; totalLim
 // are the floor.
 export function effectiveTerms(m: Mandate, overrides: MandateOverride[] = [], now = new Date()): EffectiveTerms {
   const autonomy = m.autonomyStep > 0 ? Math.max(0, Math.min(m.autonomyLevel, (m.autonomyCeiling ?? m.perTxnLimit) - m.perTxnLimit)) : 0;
-  const t: EffectiveTerms = { perTxnLimit: m.perTxnLimit + autonomy, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: m.approvalAbove == null ? null : m.approvalAbove + autonomy, raised: {}, autonomy };
+  // Earned autonomy lifts the ask threshold, but never past the co-sign
+  // threshold: what needs two people keeps needing two people.
+  const liftedAsk = m.approvalAbove == null ? null : m.cosignAbove != null ? Math.min(m.approvalAbove + autonomy, m.cosignAbove) : m.approvalAbove + autonomy;
+  const t: EffectiveTerms = { perTxnLimit: m.perTxnLimit + autonomy, dailyLimit: m.dailyLimit, totalLimit: m.totalLimit, approvalAbove: liftedAsk, raised: {}, autonomy };
   for (const o of overrides) {
     if (o.revokedAt || new Date(o.startsAt) > now || new Date(o.endsAt) <= now) continue;
     const f = o.field as OverrideField;
     if (f === "per_txn" && o.amount > t.perTxnLimit) { t.perTxnLimit = o.amount; t.raised.per_txn = o; }
     if (f === "daily" && o.amount > t.dailyLimit) { t.dailyLimit = o.amount; t.raised.daily = o; }
     if (f === "total" && o.amount > t.totalLimit) { t.totalLimit = o.amount; t.raised.total = o; }
-    if (f === "approval_above" && t.approvalAbove != null && o.amount > t.approvalAbove) { t.approvalAbove = o.amount; t.raised.approval_above = o; }
+    if (f === "approval_above" && t.approvalAbove != null && o.amount > t.approvalAbove) { t.approvalAbove = m.cosignAbove != null ? Math.min(o.amount, m.cosignAbove) : o.amount; t.raised.approval_above = o; }
   }
   return t;
 }
@@ -375,6 +378,9 @@ export function evaluate(m0: Mandate, req: AuthRequest, facts: Facts): Decision 
     if (facts.recentlyDenied) {
       const at = facts.recentlyDeniedAt ? new Date(new Date(facts.recentlyDeniedAt).getTime() + DENIAL_COOLOFF_MS) : null;
       return declined("denied_recently", "You cancelled this same request recently; the agent may ask again after the cooling-off period.", { message: `The owner cancelled this exact request${at ? `; it may be asked again after ${at.toISOString()}` : " recently"}.`, retryAt: at?.toISOString(), maxAmountNow: Math.min(maxNow, mandate.vetoAbove) });
+    }
+    if (facts.openPending >= MAX_OPEN_PENDING) {
+      return declined("too_many_pending", `Too many requests already waiting on you (${facts.openPending}). Decide those first.`, { message: `${facts.openPending} requests are already waiting for the owner. Wait for those to be decided; anything up to ${fmt(Math.min(maxNow, mandate.vetoAbove), ccy)} still passes without asking.`, approvalRequired: true, maxAmountNow: Math.min(maxNow, mandate.vetoAbove) });
     }
     return { decision: "pending", reason: `Above the ${fmt(mandate.vetoAbove, ccy)} veto threshold — goes through in ${mandate.vetoMinutes} minutes unless the owner cancels.`, rule: "veto", remedy: { message: `Amounts above ${fmt(mandate.vetoAbove, ccy)} are announced to the owner and go through after ${mandate.vetoMinutes} minutes unless cancelled. Retry the identical request (same idempotency key) after retryAt.`, approvalRequired: false, maxAmountNow: Math.min(maxNow, mandate.vetoAbove) } };
   }

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCtx } from "@/lib/session";
+import { getCtx, sameOriginRequest } from "@/lib/session";
 import { subscribe, unsubscribe, pushEnabled, vapidPublicKey, listSubscriptions } from "@/lib/push";
 
 // The browser registers (or removes) its push subscription for the signed-in person.
@@ -10,6 +10,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  if (!sameOriginRequest(req)) return NextResponse.json({ error: "Cross-site request refused." }, { status: 403 });
   const ctx = await getCtx();
   if (!ctx) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   if (!pushEnabled()) return NextResponse.json({ error: "Push is not configured on this deployment." }, { status: 503 });
@@ -20,6 +21,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  if (!sameOriginRequest(req)) return NextResponse.json({ error: "Cross-site request refused." }, { status: 403 });
   const ctx = await getCtx();
   if (!ctx) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   let body: { endpoint?: string; id?: string };

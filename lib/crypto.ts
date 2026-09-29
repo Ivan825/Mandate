@@ -19,7 +19,7 @@ function key(): Buffer {
 
 export function encrypt(plain: string): string {
   const iv = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", key(), iv);
+  const c = createCipheriv("aes-256-gcm", key(), iv, { authTagLength: 16 });
   const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
   return ["v1", iv.toString("base64"), c.getAuthTag().toString("base64"), ct.toString("base64")].join(".");
 }
@@ -27,7 +27,9 @@ export function encrypt(plain: string): string {
 export function decrypt(blob: string): string {
   const [v, ivB, tagB, ctB] = blob.split(".");
   if (v !== "v1") throw new Error("Unknown ciphertext version.");
-  const d = createDecipheriv("aes-256-gcm", key(), Buffer.from(ivB, "base64"));
-  d.setAuthTag(Buffer.from(tagB, "base64"));
+  const tag = Buffer.from(tagB, "base64");
+  if (tag.length !== 16) throw new Error("Corrupt ciphertext (bad tag length).");
+  const d = createDecipheriv("aes-256-gcm", key(), Buffer.from(ivB, "base64"), { authTagLength: 16 });
+  d.setAuthTag(tag);
   return Buffer.concat([d.update(Buffer.from(ctB, "base64")), d.final()]).toString("utf8");
 }

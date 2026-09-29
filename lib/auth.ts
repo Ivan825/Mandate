@@ -88,6 +88,10 @@ export const auth = betterAuth({
       roles,
       allowUserToCreateOrganization: true,
       creatorRole: "owner",
+      // Deleting a workspace is done from the account page (purgeWorkspace),
+      // which also settles open holds and tombstones the anchors; the plugin's
+      // own delete endpoint would drop the rows without any of that.
+      disableOrganizationDeletion: true,
       invitationExpiresIn: 60 * 60 * 24 * 7,
       sendInvitationEmail: async (data) => {
         await sendInvitationEmail({ to: data.email, inviter: data.inviter.user.name || data.inviter.user.email, workspace: data.organization.name, role: data.role, url: `${baseURL.replace(/\/$/, "")}/invite/${data.id}` });

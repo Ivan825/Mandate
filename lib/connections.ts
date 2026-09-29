@@ -59,4 +59,8 @@ export async function revokeConnectedAgent(userId: string, clientId: string, wor
     await tx.delete(schema.mcpGrants).where(eq(schema.mcpGrants.id, `${userId}:${clientId}`));
   });
   if (workspaceId) await recordEvent(workspaceId, "agent.disconnected", { clientId, by: userId });
+  // Sub-mandates this connection minted die with it; their tokens would
+  // otherwise outlive the grant that created them.
+  const { revokeDelegatedBy } = await import("./service");
+  await revokeDelegatedBy(`mcp:${userId}:${clientId}`, `disconnect of ${clientId}`).catch((e) => console.error("revoke delegated:", (e as Error).message));
 }

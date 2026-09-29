@@ -3,7 +3,8 @@ import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
 import { encrypt, decrypt } from "./crypto";
 import { canonical } from "./ledger";
-import { webhookProblem } from "./notify";
+import { safeFetch } from "./safe-fetch";
+import { webhookProblem, privateWebhooksAllowed } from "./notify";
 import { describeEvent } from "./activity";
 import type { WebhookEndpoint, WebhookDelivery } from "./schema";
 
@@ -189,18 +190,17 @@ async function sendOne(ep: WebhookEndpoint, d: WebhookDelivery): Promise<{ ok: b
     const problem = await webhookProblem(ep.url);
     if (problem) throw new Error(problem);
     const secret = decrypt(ep.secretCiphertext);
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-    try {
-      const res = await fetch(ep.url, {
-        method: "POST", redirect: "manual", signal: ctrl.signal, body: d.body,
-        headers: { "content-type": "application/json", "user-agent": "Mandate-Webhook/1", "mandate-signature": sign(secret, d.body), "mandate-event": d.eventType, "mandate-delivery": d.id, "mandate-event-id": `evt_${d.eventId}`, "idempotency-key": d.id },
-      });
-      statusCode = res.status;
-      if (res.status < 200 || res.status >= 300) error = `HTTP ${res.status}`;
-    } finally { clearTimeout(timer); }
+    // The connection is pinned to an address that passed the check (no DNS rebinding).
+    const res = await safeFetch(ep.url, {
+      method: "POST", body: d.body,
+      headers: { "content-type": "application/json", "user-agent": "Mandate-Webhook/1", "mandate-signature": sign(secret, d.body), "mandate-event": d.eventType, "mandate-delivery": d.id, "mandate-event-id": `evt_${d.eventId}`, "idempotency-key": d.id },
+    }, { timeoutMs: TIMEOUT_MS, allowPrivate: privateWebhooksAllowed() });
+    statusCode = res.status;
+    if (res.status < 200 || res.status >= 300) error = `HTTP ${res.status}`;
+    await res.body?.cancel().catch(() => {});
   } catch (e) {
-    error = (e as Error).name === "AbortError" ? `timeout after ${TIMEOUT_MS / 1000}s` : (e as Error).message;
+    const cause = (e as Error & { cause?: Error }).cause;
+    error = (e as Error).name === "AbortError" || (e as Error).name === "TimeoutError" || cause?.name === "TimeoutError" ? `timeout after ${TIMEOUT_MS / 1000}s` : cause?.message ?? (e as Error).message;
   }
   const now = new Date();
   if (!error) {

@@ -18,11 +18,11 @@ function decision(approved: boolean, metadata: Record<string, string> = {}) {
   return NextResponse.json({ approved, metadata }, { status: 200, headers: { "Stripe-Version": STRIPE_RESPONSE_VERSION, "Content-Type": "application/json" } });
 }
 
+// Atomic: two concurrent deliveries of one event race on the insert, and
+// exactly one of them gets a row back.
 async function seenBefore(event: Stripe.Event): Promise<boolean> {
-  const [row] = await db.select({ id: schema.stripeEvents.id }).from(schema.stripeEvents).where(eq(schema.stripeEvents.id, event.id)).limit(1);
-  if (row) return true;
-  await db.insert(schema.stripeEvents).values({ id: event.id, type: event.type, receivedAt: new Date() }).onConflictDoNothing();
-  return false;
+  const inserted = await db.insert(schema.stripeEvents).values({ id: event.id, type: event.type, receivedAt: new Date() }).onConflictDoNothing().returning({ id: schema.stripeEvents.id });
+  return inserted.length === 0;
 }
 
 export async function POST(req: NextRequest) {
@@ -43,12 +43,23 @@ export async function POST(req: NextRequest) {
       const m = await getMandateByCard(cardId);
       if (!m) return decision(false, { reason: "unknown_card" });
       if (m.cardStatus && m.cardStatus !== "active") return decision(false, { reason: "card_" + m.cardStatus });
-      // Stripe may re-send a request (retry, or an incremental authorisation
-      // on the same id). Answer as before rather than decide twice.
-      const [prior] = await db.select({ decision: schema.transactions.decision }).from(schema.transactions).where(eq(schema.transactions.stripeAuthorizationId, auth.id)).limit(1);
-      if (prior) return decision(prior.decision === "approved", { mandateId: m.id, replayed: "true" });
+      const requested = auth.pending_request?.amount ?? auth.amount;
+      // A re-sent request for the same amount is answered as before. An
+      // INCREMENTAL authorisation (hotels, fuel, tips: same id, a larger
+      // pending amount) is new money and is decided like a new purchase —
+      // the increment is evaluated against the terms and added to the hold.
+      const [prior] = await db.select({ id: schema.transactions.id, decision: schema.transactions.decision, amount: schema.transactions.amount, authorizedAmount: schema.transactions.authorizedAmount, settlement: schema.transactions.settlement }).from(schema.transactions).where(eq(schema.transactions.stripeAuthorizationId, auth.id)).limit(1);
+      if (prior) {
+        // Stripe's `amount` is what is already authorised (0 on the first
+        // request); `pending_request.amount` is the further amount asked for.
+        const isIncrement = Boolean(auth.pending_request) && prior.decision === "approved" && prior.settlement === "held" && (auth.amount ?? 0) > 0 && requested > 0 && requested !== (prior.authorizedAmount ?? prior.amount);
+        if (!isIncrement) return decision(prior.decision === "approved", { mandateId: m.id, replayed: "true" });
+        const { incrementCardHold } = await import("@/lib/service");
+        const inc = await incrementCardHold(m, prior.id, requested, auth.merchant_data?.name ?? "unknown merchant", auth.merchant_data?.category ?? "");
+        return decision(inc.decision === "approved", { mandateId: m.id, rule: inc.rule, increment: "true" });
+      }
       const r = await authorize(m, {
-        amount: auth.pending_request?.amount ?? auth.amount,
+        amount: requested,
         merchant: auth.merchant_data?.name ?? "unknown merchant",
         category: auth.merchant_data?.category ?? "",
         purpose: "card authorisation",

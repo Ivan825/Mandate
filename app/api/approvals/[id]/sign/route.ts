@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
-import { getCtx, can } from "@/lib/session";
+import { getCtx, can, sameOriginRequest } from "@/lib/session";
 import { db, schema } from "@/lib/db";
 import { challengeFor, verifyHumanSignature, rpId } from "@/lib/human-sign";
 import { decideApproval, getApproval } from "@/lib/service";
@@ -24,6 +24,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 }
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  if (!sameOriginRequest(req)) return NextResponse.json({ error: "Cross-site request refused." }, { status: 403 });
   const c = await getCtx();
   if (!c) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   if (!(await can({ approval: ["decide"] }))) return NextResponse.json({ error: "Your role cannot decide requests." }, { status: 403 });
@@ -34,7 +35,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!body.assertion || typeof body.assertion !== "object") return NextResponse.json({ error: "assertion is required." }, { status: 400 });
   const v = await verifyHumanSignature(c.userId, id, d, body.assertion as Parameters<typeof verifyHumanSignature>[3]);
   if (!v.ok) return NextResponse.json({ error: v.error }, { status: 400 });
-  const r = await decideApproval(c.workspaceId, id, d === "approve" ? "approved" : "denied", `${c.email} (passkey)`, v.signature);
+  const r = await decideApproval(c.workspaceId, id, d === "approve" ? "approved" : "denied", c.email, v.signature, { userId: c.userId });
   if (!r) return NextResponse.json({ error: "This request was already decided." }, { status: 409 });
   return NextResponse.json({ ok: true, decision: r.status, signedWith: v.signature.credentialId });
 }

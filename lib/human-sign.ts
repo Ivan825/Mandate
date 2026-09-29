@@ -41,6 +41,9 @@ export async function verifyHumanSignature(userId: string, approvalId: string, d
   try { clientData = JSON.parse(Buffer.from(response.response.clientDataJSON, "base64url").toString()); } catch { return { ok: false, error: "Malformed client data." }; }
   const c = clientData.challenge ? parseChallenge(clientData.challenge) : null;
   if (!c || c.approvalId !== approvalId || c.decision !== decision || c.userId !== userId) return { ok: false, error: "The signature does not commit to this decision." };
+  // A challenge dated in the future is not one we issued (the timestamp is
+  // ours); a small skew is tolerated for clocks across instances.
+  if (!Number.isFinite(c.ts) || c.ts > Date.now() + 30_000) return { ok: false, error: "The signing challenge is not one this server issued." };
   if (Date.now() - c.ts > CHALLENGE_TTL_MS) return { ok: false, error: "The signing challenge expired; try again." };
   const [pk] = await db.select().from(schema.passkey).where(and(eq(schema.passkey.userId, userId), eq(schema.passkey.credentialID, response.id))).limit(1);
   if (!pk) return { ok: false, error: "That passkey is not registered to your account." };
@@ -80,9 +83,17 @@ function coseAlg(key: Uint8Array): number {
 export function signatureDigest(sig: HumanSignature): string { return createHash("sha256").update(sig.signature).digest("hex"); }
 
 // Re-verify a stored signature (for receipts): same checks, without touching
-// counters or challenges — proof that the bytes on the receipt are valid.
-export async function recheckHumanSignature(sig: HumanSignature): Promise<boolean> {
+// counters or challenges — proof that the bytes on the receipt are valid AND
+// that they commit to this approval and this verdict, so a valid signature
+// from some other decision cannot be pasted onto a receipt.
+export async function recheckHumanSignature(sig: HumanSignature, expect?: { approvalId: string; decision: "approve" | "deny" }): Promise<boolean> {
   try {
+    if (expect) {
+      const c = parseChallenge(sig.challenge);
+      if (!c || c.approvalId !== expect.approvalId || c.decision !== expect.decision) return false;
+      // Public receipts drop userId; when present it must match the challenge.
+      if (sig.userId && c.userId !== sig.userId) return false;
+    }
     const v = await verifyAuthenticationResponse({
       response: { id: sig.credentialId, rawId: sig.credentialId, type: "public-key", clientExtensionResults: {}, response: { clientDataJSON: sig.clientDataJSON, authenticatorData: sig.authenticatorData, signature: sig.signature } },
       expectedChallenge: sig.challenge, expectedOrigin: appUrl(), expectedRPID: rpId(),

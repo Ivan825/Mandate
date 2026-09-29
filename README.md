@@ -172,7 +172,8 @@ Also included: a single-server AWS deployment with automatic HTTPS and backups (
 - Agents never hold a card, an account password or a provider key — only a token scoped to one mandate, or an OAuth grant bound to one workspace with the member's live role re-checked on every call.
 - Decisions are idempotent: concurrent retries collapse to one, *pending* is never replayed, terminal answers are.
 - Postgres-backed rate limits per token, key, address and auth endpoint. Webhook targets must be on the public internet. Provider keys are encrypted with a key held outside the database.
-- Production refuses to start without its secrets. Receipts, vouchers and anchors verify against the server's own key only; the daily public anchor chain means even the operator cannot rewrite a ledger unnoticed.
+- Production refuses to start without its secrets. Receipts, vouchers and anchors verify against the server's own key only (or a listed retired key after a rotation); the daily public anchor chain means even the operator cannot rewrite a ledger unnoticed.
+- Audited: every rail, connection and stored secret was reviewed for 0.7.1, each finding fixed and pinned by a test — the record, including what is still open, is [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 - The panic button is a workspace fact the engine checks first, on every rail, before any mandate is consulted.
 
 Found something? See [`SECURITY.md`](SECURITY.md).
@@ -189,7 +190,7 @@ Found something? See [`SECURITY.md`](SECURITY.md).
 
 ## Status
 
-Free public beta, version 0.7. Working and exercised end to end (128 browser-driven checks, 33 integration tests, 22 unit tests): MCP/OAuth (tested against Claude's real client), the LLM proxy for three providers and custom API targets, REST tokens and SDKs with holds, capture and vouchers, approvals with push, co-signing and routing, veto windows, plans, sub-mandates, disputes, the panic button, shadow mode, time-travel, graduated autonomy, passkey-signed approvals, sandbox mandates, event webhooks, the activity feed, public receipts, public ledger anchoring, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
+Free public beta, version 0.7.1. Working and exercised end to end (136 browser-driven checks, 41 integration tests, 22 unit tests): MCP/OAuth (tested against Claude's real client), the LLM proxy for three providers and custom API targets, REST tokens and SDKs with holds, capture and vouchers, approvals with push, co-signing and routing, veto windows, plans, sub-mandates, disputes, the panic button, shadow mode, time-travel, graduated autonomy, passkey-signed approvals, sandbox mandates, event webhooks, the activity feed, public receipts, public ledger anchoring, stats, workspaces, email and webhook notifications. Virtual cards are complete in code and tested with signed Stripe events; enabling them needs the operator's Stripe Issuing approval. Billing is deliberately not built yet. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Contributing
 

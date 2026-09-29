@@ -4,6 +4,39 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-28
+
+A security audit of everything built so far — every rail, every connection, every stored secret — with each finding fixed and pinned by a test. The full record, including what is still open, is `docs/SECURITY-AUDIT.md`.
+
+### Fixed (security)
+- **Settlement authority.** An agent can no longer void or capture card holds (settled by Stripe), proxy holds (settled by the proxy), dispute rows, expired holds, or holds for which a voucher has been issued; the owner cannot settle card holds by hand. (`settleProblem()`)
+- **Observe mode** no longer overrides the hard rules: freeze, pause, revocation, expiry, balance, malformed amounts and every `parent_*` rule are enforced in every mode.
+- **Co-signing** counts approvers by account (`signoffs[].userId`), not by e-mail spelling; anonymous one-tap links are refused for multi-approver requests; one-tap tokens are bound to their recipient and re-check membership on use; the `/a/:id` and `/p/:id` pages reveal nothing without a valid token.
+- **Vouchers** are no longer embedded in the authorisation answer (which was logged everywhere): the answer carries `voucherUrl`; fetching the voucher marks the hold (`transactions.voucher_issued_at`) so the agent cannot settle it underneath the merchant. Vouchers are refused for sandbox, card, proxy and dispute rows and must be redeemed at the named merchant.
+- **Idempotency** keys record a hash of the request body; the same key with a different body is `422`, not a replay. REST refuses the `mcp:` key namespace.
+- **SSRF.** All outbound requests to user-supplied addresses (event webhooks, notification webhooks, generic proxy targets) go through `safeFetch()`, which pins the DNS answer it checked (no rebinding), refuses private and cloud-metadata ranges, follows no redirects, and caps time and size. Push endpoints are allow-listed to the browser vendors (`PUSH_EXTRA_HOSTS`).
+- **Generic proxy** refuses paths that escape the target's base, caps responses at 20 MB and 120 s.
+- **LLM proxy** forwards the body it priced (re-serialised), keeps the *tail* of a stream so the usage frame is never lost, settles an aborted stream at `max(reported, estimate)`, and matches model prices only on exact names or dated versions (`gpt-5-pro` is no longer priced as `gpt-5`; new entries for `-pro`, `o1`, `o3-mini`, deep-research, `claude-opus-4-5`).
+- **Stripe** incremental authorisations run through the policy engine; events deduplicate atomically; `stripe_authorization_id` is unique; over-captures raise a warning.
+- **Disputes** refund at most what was captured, net of earlier refunds; card rows cannot be marked refunded; pausing needs `mandate:revoke`, refunding `mandate:issue`.
+- **Receipts** name roles, not people: addresses are redacted to `a…@domain`, account ids dropped, the workspace shown by its public label, and only rows about that decision included. The stored passkey signature is re-verified *and* checked to commit to that approval and verdict.
+- **Anchors** under a key that is neither current nor listed in `RECEIPT_PREVIOUS_PUBLIC_KEYS` are a verification failure, not a footnote; the public verifier is cached per instance; `?label=` filters in SQL; `/.well-known/mandate-receipt-key` advertises retired keys.
+- **Bounds everywhere**: `MAX_AMOUNT` on routes, targets, raises, delegations and forms; hours capped; ≤ 50 routes per workspace; ≤ 10 children per mandate; delegation rate-limited; the public receipt verifier capped at 5 MB / 20 000 events / 30 req·min; voucher bodies at 16 KB.
+- **Cross-site requests** to cookie-authenticated JSON routes (`push/subscribe`, `mandates/:id/replay`, `cards/:id/ephemeral-key`, `approvals/:id/sign`, `dev/seed`) are refused by `Origin` / `Sec-Fetch-Site`.
+- Also: `LIKE` escaping in the activity feed (after truncation, ids validated); `safeNext()` for every `next=`; passkey challenges dated in the future refused; Better Auth's organisation-delete endpoint disabled (the account page's purge is the only path, and it settles holds and tombstones anchors); AES-GCM tag length pinned; timing-safe cron secret; `Referrer-Policy: no-referrer` + `no-store` on `/a`, `/p`, `/r`; the mailer throws in production without a transport instead of printing sign-in links to the log (`EMAIL_CONSOLE=1` for tests); plans name exact merchants (no wildcards).
+
+### Changed
+- `POST /api/agent/authorize` and MCP `authorize` return `voucherUrl` instead of `voucher`. SDKs 0.7.1: `AuthorizeResult.voucherUrl`; `voucher(transactionId)` unchanged.
+- Forwarded-address headers are trusted on Vercel or when `TRUST_PROXY=true`; elsewhere all clients share one rate-limit bucket. Self-hosters behind their own reverse proxy should set `TRUST_PROXY=true`.
+- `GET /api/account/export` includes every table that mentions you or your workspaces, with secret columns stripped.
+- `GET /api/ledger/anchors` includes `previousKeys`; transaction receipts' `chain.workspaceId` is now `chain.label`.
+
+### Added
+- `docs/SECURITY-AUDIT.md`; `RECEIPT_PREVIOUS_PUBLIC_KEYS`, `EMAIL_CONSOLE`, `PUSH_EXTRA_HOSTS`, `PROXY_TARGET_ALLOW_PRIVATE`; `lib/net.ts`, `lib/safe-fetch.ts`, `lib/safe-next.ts`, `lib/cron-auth.ts`, `lib/ws-label.ts`; eight "hardening" integration tests and twelve new end-to-end checks.
+
+### Migration
+`npm install` (adds `undici`), then `npm run db:migrate` (adds `0011`: `idempotency_keys.request_hash`, `mandates.delegated_by`, `transactions.voucher_issued_at`, unique `txn_stripe_auth_idx`). Agents reading `voucher` from the authorisation answer must fetch `voucherUrl` instead.
+
 ## [0.7.0] — 2026-09-25
 
 Authority that travels, authority that is shared, and a history nobody can quietly rewrite: vouchers a merchant verifies without an account, sub-mandates an agent delegates, co-signed approvals, routed inboxes, disputes, a panic button, public anchoring, sandboxes, and a proxy for any API.

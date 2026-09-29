@@ -1,5 +1,5 @@
 import { notFound, redirect } from "next/navigation";
-import { verifyLink } from "@/lib/notify";
+import { parseLink, linkPrincipal } from "@/lib/notify";
 import { decideApproval, getApproval } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { rateLimit, clientIp } from "@/lib/ratelimit";
@@ -10,17 +10,20 @@ import { headers } from "next/headers";
 // links, so a GET must never decide anything); the button POSTs the decision.
 // No sign-in is needed: the signature is the proof the link came from us.
 
-type Params = { params: Promise<{ id: string }>; searchParams: Promise<{ d?: string; t?: string; done?: string }> };
+type Params = { params: Promise<{ id: string }>; searchParams: Promise<{ d?: string; t?: string; done?: string; err?: string }> };
 
 export default async function OneTapPage({ params, searchParams }: Params) {
   const { id } = await params;
-  const { d, t, done } = await searchParams;
+  const { d, t, done, err } = await searchParams;
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const decision = d === "approve" ? "approve" : d === "deny" ? "deny" : null;
   const row = await getApproval(id);
   if (!row) notFound();
-  const valid = decision && t ? verifyLink(id, decision, t) : false;
+  const link = decision && t ? parseLink(id, decision, t) : { ok: false, userId: null };
+  const valid = link.ok;
   const a = row.a;
+  // Without a valid link the page reveals nothing: the id alone is not a capability.
+  if (!valid) return <div style={{ maxWidth: 440, margin: "40px auto" }}><div className="eyebrow">Mandate · one-tap decision</div><div className="notice bad" style={{ marginTop: 12 }}>This link is invalid or has expired. Decide from the <a href="/approvals">inbox</a> instead.</div></div>;
 
   async function decide(form: FormData) {
     "use server";
@@ -29,9 +32,15 @@ export default async function OneTapPage({ params, searchParams }: Params) {
     const h = await headers();
     const ip = clientIp(new Request("http://x", { headers: h }));
     if (!(await rateLimit(`ip:${ip}:onetap`, 30)).ok) return;
-    if (!verifyLink(id, dec, tok)) return;
-    await decideApproval(null, id, dec === "approve" ? "approved" : "denied", "one-tap link");
-    redirect(`/a/${id}?done=${dec}`);
+    const l = parseLink(id, dec, tok);
+    if (!l.ok) return;
+    const who = await linkPrincipal(l.userId, a.workspaceId);
+    const back = (err?: string) => `/a/${id}?d=${dec}&t=${encodeURIComponent(tok)}&done=${dec}${err ? `&err=${err}` : ""}`;
+    if (who === "revoked") redirect(back("revoked"));
+    const r = await decideApproval(null, id, dec === "approve" ? "approved" : "denied", who ? who.email : "one-tap link", undefined, { userId: who?.userId ?? null });
+    if (r && (r as { anonymous?: boolean }).anonymous) redirect(back("cosign"));
+    if (r && (r as { cosigned?: boolean }).cosigned) redirect(back("cosigned"));
+    redirect(back());
   }
 
   return (
@@ -46,9 +55,11 @@ export default async function OneTapPage({ params, searchParams }: Params) {
           <dt>Status</dt><dd><span className={`pill ${a.status}`}>{a.status}</span></dd>
         </dl>
         {a.kind === "veto" && a.status === "pending" && a.vetoUntil && <div className="notice">This is a veto window: it goes through by itself at {new Date(a.vetoUntil).toUTCString().replace(" GMT", " UTC")} unless you cancel it.</div>}
-        {done && <div className={`notice ${done === "approve" ? "ok" : "bad"}`}>{done === "approve" ? "Approved once. The agent can now retry this exact purchase within 24 hours." : a.kind === "veto" ? "Cancelled. The agent cannot ask for this again for 6 hours." : "Denied. The agent cannot ask for this again for 6 hours."}</div>}
+        {done && err === "revoked" && <div className="notice bad">You can no longer decide requests in this workspace, so nothing was changed.</div>}
+        {done && err === "cosign" && <div className="notice bad">This request needs several named approvers. Sign in and co-sign it from the inbox.</div>}
+        {done && err === "cosigned" && <div className="notice ok">Your signature is recorded. The request goes through once the other approvers have signed too.</div>}
+        {done && !err && <div className={`notice ${done === "approve" ? "ok" : "bad"}`}>{done === "approve" ? "Approved once. The agent can now retry this exact purchase within 24 hours." : a.kind === "veto" ? "Cancelled. The agent cannot ask for this again for 6 hours." : "Denied. The agent cannot ask for this again for 6 hours."}</div>}
         {!done && a.status !== "pending" && <div className="notice">This request is already {a.status}.</div>}
-        {!done && a.status === "pending" && !valid && <div className="notice bad">This link is invalid or has expired. Decide from the inbox instead.</div>}
         {!done && a.status === "pending" && valid && decision && (
           <form action={decide} className="actions">
             <input type="hidden" name="d" value={decision} />

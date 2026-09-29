@@ -66,6 +66,9 @@ export const mandates = pgTable("mandates", {
   // revoking the parent revokes it.
   parentId: text("parent_id"),
   depth: integer("depth").notNull().default(0),
+  // Who delegated it: "mcp:<clientId>" for an OAuth-connected agent (revoked
+  // with the connection), "token:<prefix>" for a REST agent.
+  delegatedBy: text("delegated_by"),
   // Sandbox: decided and recorded exactly like a real mandate, but its
   // token is mnd_test_, it never gets a card or a proxy key, and its spend
   // is kept out of the workspace's totals.
@@ -129,8 +132,11 @@ export const transactions = pgTable("transactions", {
   planId: text("plan_id"),
   // Set while the owner disputes this decision (lib/service disputes).
   disputeId: text("dispute_id"),
+  // Once a voucher has been handed to a merchant the agent no longer settles
+  // this hold itself: the merchant redeems it, or it expires by policy.
+  voucherIssuedAt: timestamp("voucher_issued_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-}, (t) => [uniqueIndex("txn_share_token_idx").on(t.shareToken), index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), index("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
+}, (t) => [uniqueIndex("txn_share_token_idx").on(t.shareToken), index("txn_mandate_decision_idx").on(t.mandateId, t.decision, t.createdAt), index("txn_ws_idx").on(t.workspaceId, t.createdAt), uniqueIndex("txn_stripe_auth_idx").on(t.stripeAuthorizationId), index("txn_hold_idx").on(t.settlement, t.holdExpiresAt)]);
 
 export const approvals = pgTable("approvals", {
   id: text("id").primaryKey(),
@@ -184,6 +190,9 @@ export const idempotencyKeys = pgTable("idempotency_keys", {
   mandateId: text("mandate_id").notNull(),
   status: integer("status").notNull(),
   response: text("response").notNull(),
+  // sha256 of the request body the key was first used with: the same key
+  // with a different purchase is refused, never replayed.
+  requestHash: text("request_hash"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 

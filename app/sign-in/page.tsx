@@ -2,13 +2,13 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { emailEnabled } from "@/lib/mailer";
 import { getCtx } from "@/lib/session";
+import { safeNext } from "@/lib/safe-next";
 import { SignInForm } from "./form";
 
 export default async function SignInPage({ searchParams }: { searchParams: Promise<{ next?: string; sent?: string; error?: string }> }) {
   const ctx = await getCtx();
   const { next: rawNext, sent, error } = await searchParams;
-  // Same-origin paths only: "//evil.example" and "/\\evil" are absolute URLs to a browser.
-  const next = rawNext && /^\/(?![\/\\])/.test(rawNext) ? rawNext : "/";
+  const next = safeNext(rawNext);
   if (ctx) redirect(next);
   const google = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
   const emailDelivery = emailEnabled() ? "email" : "console";

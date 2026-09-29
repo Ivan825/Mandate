@@ -24,8 +24,16 @@ async function lib(): Promise<WebPush | null> {
 
 export type SubscriptionInput = { endpoint: string; keys: { p256dh: string; auth: string } };
 
+// The server POSTs to whatever endpoint a subscription names, so only the
+// browsers' own push services are accepted (never an address on our network).
+const PUSH_HOSTS = [/(^|\.)fcm\.googleapis\.com$/, /(^|\.)android\.googleapis\.com$/, /(^|\.)push\.services\.mozilla\.com$/, /(^|\.)notify\.windows\.com$/, /(^|\.)push\.apple\.com$/, /(^|\.)push\.services\.samsung\.com$/, /(^|\.)pushapi\.brave\.com$/];
+export function isPushService(endpoint: string): boolean {
+  try { const u = new URL(endpoint); if (u.protocol !== "https:" || u.port) return false; const extra = (process.env.PUSH_EXTRA_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean); return PUSH_HOSTS.some((re) => re.test(u.hostname.toLowerCase())) || extra.includes(u.hostname.toLowerCase()); } catch { return false; }
+}
+
 export async function subscribe(userId: string, sub: SubscriptionInput, userAgent: string): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   if (!sub?.endpoint || !/^https:\/\//.test(sub.endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) return { ok: false, error: "Not a valid push subscription." };
+  if (!isPushService(sub.endpoint)) return { ok: false, error: "That endpoint is not a browser push service." };
   const [count] = await db.select({ c: sql<number>`count(*)::int` }).from(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.userId, userId));
   if (Number(count?.c ?? 0) >= 10) return { ok: false, error: "You already have ten devices; remove one in Settings." };
   const row: PushSubscription = { id: randomUUID(), userId, endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, userAgent: userAgent.slice(0, 200), createdAt: new Date(), lastUsedAt: null, failures: 0 };

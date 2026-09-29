@@ -78,6 +78,13 @@
       "when": 1790332860041,
       "tag": "0010_phase4_panic_cosign_disputes_routing_delegation_anchors_sandbox_targets",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790635329871,
+      "tag": "0011_security_hardening",
+      "breakpoints": true
     }
   ]
 }

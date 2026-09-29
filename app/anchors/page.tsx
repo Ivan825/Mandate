@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { listAnchors, anchorView, verifyAnchors } from "@/lib/anchors";
+import { listAnchors, anchorView, verifyAnchorsCached } from "@/lib/anchors";
 import { keyId } from "@/lib/receipts";
 import { appUrl } from "@/lib/env";
 
@@ -12,8 +12,8 @@ export const dynamic = "force-dynamic";
 // control and the deployment cannot rewrite history without you noticing.
 export default async function AnchorsPage({ searchParams }: { searchParams: Promise<{ label?: string; before?: string }> }) {
   const { label, before } = await searchParams;
-  const rows = (await listAnchors({ limit: label ? 500 : 100, before: Number(before) || undefined })).filter((a) => !label || a.label === label).slice(0, 100);
-  const v = await verifyAnchors();
+  const rows = await listAnchors({ limit: 100, label, before: Number(before) || undefined });
+  const v = await verifyAnchorsCached();
   const base = appUrl();
   return (
     <div style={{ maxWidth: 900, margin: "0 auto" }}>

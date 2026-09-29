@@ -156,9 +156,14 @@ export async function listActivity(workspaceId: string, f: ActivityFilter = {}):
     const map: Record<string, string[]> = { approved: ["authorization.approved", "approval.approved"], declined: ["authorization.declined", "approval.denied"], pending: ["authorization.pending", "approval.requested"], captured: ["authorization.captured", "authorization.settled"], voided: ["authorization.voided", "authorization.released"] };
     const types = map[f.outcome]; if (types) conds.push(sql`${schema.ledger.type} in (${sql.join(types.map((t) => sql`${t}`), sql`, `)})`);
   }
-  if (f.mandateId) conds.push(sql`${schema.ledger.payload} like ${'%"mandateId":"' + f.mandateId + '"%'}`);
-  if (f.agentId) conds.push(sql`${schema.ledger.payload} like ${'%"agentId":"' + f.agentId + '"%'}`);
-  if (f.q?.trim()) { const q = "%" + f.q.trim().replace(/[%_\\]/g, (c) => "\\" + c).slice(0, 80) + "%"; conds.push(sql`(${schema.ledger.payload} ilike ${q} or ${schema.ledger.type} ilike ${q})`); }
+  // Ids are matched only when they look like ids; free text is cut first and
+  // escaped after, so a trailing backslash cannot escape the closing wildcard.
+  const isId = (v: string) => /^[0-9a-f-]{1,64}$/i.test(v);
+  if (f.mandateId && isId(f.mandateId)) conds.push(sql`${schema.ledger.payload} like ${'%"mandateId":"' + f.mandateId + '"%'}`);
+  else if (f.mandateId) conds.push(sql`false`);
+  if (f.agentId && isId(f.agentId)) conds.push(sql`${schema.ledger.payload} like ${'%"agentId":"' + f.agentId + '"%'}`);
+  else if (f.agentId) conds.push(sql`false`);
+  if (f.q?.trim()) { const q = "%" + f.q.trim().slice(0, 80).replace(/[%_\\]/g, (c) => "\\" + c) + "%"; conds.push(sql`(${schema.ledger.payload} ilike ${q} or ${schema.ledger.type} ilike ${q})`); }
   const rows = await db.select().from(schema.ledger).where(and(...conds)).orderBy(desc(schema.ledger.seq)).limit(limit + 1);
   const page = rows.slice(0, limit);
   const [mands, ags] = await Promise.all([

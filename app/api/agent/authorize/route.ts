@@ -1,13 +1,10 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { authorize, factsFor, reserveIdempotent, completeIdempotent, releaseIdempotent, MAX_AMOUNT } from "@/lib/service";
+import { authorize, factsFor, reserveIdempotent, completeIdempotent, releaseIdempotent, requestHash, MAX_AMOUNT } from "@/lib/service";
 import { fmt } from "@/lib/policy";
 import { authenticateMandate } from "@/lib/agent-auth";
 import { appUrl } from "@/lib/env";
 import { logger } from "@/lib/log";
-import { issueVoucher } from "@/lib/vouchers";
-import { getTransaction } from "@/lib/service";
-import { db, schema } from "@/lib/db";
-import { eq } from "drizzle-orm";
+
 
 // The token-based agent endpoint, for agents you run yourself. The agent
 // holds a mandate token, never the real card or key. It asks before
@@ -55,9 +52,12 @@ export async function POST(req: NextRequest) {
 
   const idem = (req.headers.get("idempotency-key") ?? "").trim().slice(0, 128);
   if (idem) {
-    const r = await reserveIdempotent(m.id, idem);
+    // Keys are namespaced per rail; an agent cannot replay an MCP answer over REST.
+    if (idem.startsWith("mcp:")) return NextResponse.json({ error: "Idempotency-Key may not start with 'mcp:'." }, { status: 400 });
+    const r = await reserveIdempotent(m.id, idem, requestHash({ amount, merchant, purpose, category }));
     if (r.kind === "replay") return NextResponse.json(JSON.parse(r.response), { status: r.status, headers: { "Idempotent-Replayed": "true" } });
     if (r.kind === "in_progress") return NextResponse.json({ error: "A request with this Idempotency-Key is still being decided. Retry in a moment." }, { status: 409, headers: { "retry-after": "1" } });
+    if (r.kind === "mismatch") return NextResponse.json({ error: "This Idempotency-Key was already used for a different purchase. Use a new key for a new purchase." }, { status: 422 });
   }
 
   let r;
@@ -85,12 +85,9 @@ export async function POST(req: NextRequest) {
   // answer to remember — the retry must re-evaluate to consume the approval.
   if (idem) { if (r.decision === "pending") await releaseIdempotent(m.id, idem); else await completeIdempotent(m.id, idem, status, responseBody); }
   try {
-    if (r.decision === "approved" && r.settlement === "held") {
-      // The voucher travels with the approval: the agent can hand it to the
-      // merchant, who verifies and redeems it without an account.
-      const [t, [ag]] = await Promise.all([getTransaction({ mandateId: m.id }, r.transactionId), db.select({ name: schema.agents.name }).from(schema.agents).where(eq(schema.agents.id, m.agentId)).limit(1)]);
-      if (t) responseBody.voucher = issueVoucher(t, m, ag?.name ?? "Agent", base) ?? undefined;
-    }
+    // A voucher for this hold is available at GET /api/agent/transactions/:id/voucher.
+    // Fetching one commits the agent: the merchant then settles the hold.
+    if (r.decision === "approved" && r.settlement === "held" && m.sandbox !== 1) responseBody.voucherUrl = `${base}/api/agent/transactions/${r.transactionId}/voucher`;
     const f = await factsFor(m);
     responseBody.remaining = { today: Math.max(0, m.dailyLimit - f.spentToday), total: Math.max(0, m.totalLimit - f.spentTotal), perTransaction: m.perTxnLimit, currency: m.currency, todayDisplay: fmt(Math.max(0, m.dailyLimit - f.spentToday), m.currency) };
     if (idem && r.decision !== "pending") await completeIdempotent(m.id, idem, status, responseBody);

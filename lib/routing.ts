@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { db, schema, type Tx } from "./db";
+import { MAX_AMOUNT } from "./money";
 import { appendEvent } from "./ledger";
 import { merchantMatches } from "./policy";
 import type { ApprovalRoute } from "./schema";
@@ -38,6 +39,7 @@ export async function routeFor(workspaceId: string, req: { amount: number; categ
   return routes.find((r) => routeMatches(r, req)) ?? null;
 }
 
+export const MAX_ROUTES = 50;
 export async function addRoute(workspaceId: string, input: RouteInput, by: string): Promise<{ ok: true; route: ApprovalRoute } | { ok: false; error: string }> {
   const name = input.name.trim().slice(0, 60);
   if (!name) return { ok: false, error: "Give the route a name." };
@@ -49,10 +51,12 @@ export async function addRoute(workspaceId: string, input: RouteInput, by: strin
   const deciders = new Set(members.filter((m) => /\b(owner|admin|approver)\b/.test(m.role)).map((m) => m.userId));
   const bad = userIds.filter((u) => !deciders.has(u));
   if (bad.length) return { ok: false, error: "Every member on a route must be an owner, admin or approver." };
+  for (const [k, v] of [["minAmount", input.minAmount], ["maxAmount", input.maxAmount]] as const) if (v != null && (!Number.isInteger(v) || v < 0 || v > MAX_AMOUNT)) return { ok: false, error: `The ${k === "minAmount" ? "lower" : "upper"} amount must be a whole number of minor units below ${MAX_AMOUNT}.` };
   if (input.minAmount != null && input.maxAmount != null && input.minAmount > input.maxAmount) return { ok: false, error: "The amount band is upside down." };
-  const [n] = await db.select({ c: schema.approvalRoutes.id }).from(schema.approvalRoutes).where(eq(schema.approvalRoutes.workspaceId, workspaceId)).limit(50);
-  void n;
-  const row: ApprovalRoute = { id: randomUUID(), workspaceId, name, minAmount: input.minAmount ?? null, maxAmount: input.maxAmount ?? null, category: (input.category ?? "").trim().slice(0, 64), merchantPattern: (input.merchantPattern ?? "").trim().slice(0, 80), mandateId: input.mandateId ?? null, userIds: JSON.stringify(userIds), priority: Number.isInteger(input.priority) ? input.priority! : 100, enabled: 1, createdBy: by.slice(0, 120), createdAt: new Date() };
+  const existing = await db.select({ c: sql<number>`count(*)::int` }).from(schema.approvalRoutes).where(eq(schema.approvalRoutes.workspaceId, workspaceId));
+  if ((existing[0]?.c ?? 0) >= MAX_ROUTES) return { ok: false, error: `A workspace can have at most ${MAX_ROUTES} routes; remove one first.` };
+  const priority = Number.isInteger(input.priority) ? Math.min(Math.max(input.priority!, -100_000), 100_000) : 100;
+  const row: ApprovalRoute = { id: randomUUID(), workspaceId, name, minAmount: input.minAmount ?? null, maxAmount: input.maxAmount ?? null, category: (input.category ?? "").trim().slice(0, 64), merchantPattern: (input.merchantPattern ?? "").trim().slice(0, 80), mandateId: input.mandateId ?? null, userIds: JSON.stringify(userIds), priority, enabled: 1, createdBy: by.slice(0, 120), createdAt: new Date() };
   await db.transaction(async (tx) => {
     await tx.insert(schema.approvalRoutes).values(row);
     await appendEvent(tx, workspaceId, "routing.added", { routeId: row.id, name, minAmount: row.minAmount, maxAmount: row.maxAmount, category: row.category, merchantPattern: row.merchantPattern, mandateId: row.mandateId, members: userIds.length, by });

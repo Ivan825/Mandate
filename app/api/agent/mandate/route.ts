@@ -7,7 +7,7 @@ import { authenticateMandate } from "@/lib/agent-auth";
 // which of its holds are still open, so it can plan rather than discover
 // limits by being declined.
 export async function GET(req: NextRequest) {
-  const a = await authenticateMandate(req);
+  const a = await authenticateMandate(req, { allowInactive: true });
   if (!a.ok) return a.response;
   const m = a.mandate;
   const [f, holds, children] = await Promise.all([factsFor(m), openHolds(m.workspaceId, m.id), listChildren(m.workspaceId, m.id)]);

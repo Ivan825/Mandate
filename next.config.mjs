@@ -38,6 +38,9 @@ const nextConfig = {
   async headers() {
     return [
       { source: "/((?!api/).*)", headers: securityHeaders },
+      // Pages whose URL is a capability (one-tap tokens, share tokens): never
+      // leak the URL through Referer, never cache it.
+      { source: "/(a|p|r)/:path*", headers: [{ key: "Referrer-Policy", value: "no-referrer" }, { key: "Cache-Control", value: "no-store" }] },
       // API responses carry no HTML; keep the non-CSP protections.
       { source: "/api/:path*", headers: securityHeaders.filter((h) => h.key !== "Content-Security-Policy") },
     ];

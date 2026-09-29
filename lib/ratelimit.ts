@@ -23,14 +23,22 @@ export async function rateLimit(key: string, limit: number, windowSec = 60): Pro
   }
 }
 
-// The address the platform's edge saw. x-real-ip is set by the platform and
-// cannot be supplied by the client; in x-forwarded-for the LAST entry is the
-// one the nearest trusted proxy appended, so a client-supplied prefix is
-// ignored. A bare `node server.js` with no proxy in front sees the client's
-// own headers; set TRUST_PROXY=false there to fall back to a shared bucket.
+// The address the platform's edge saw. Forwarding headers are trusted only
+// when something trustworthy sets them: on Vercel (which overwrites x-real-ip
+// and appends to x-forwarded-for), or when TRUST_PROXY=true says a reverse
+// proxy in front of `node server.js` does the same. Anywhere else a client
+// could write those headers itself and hop between buckets, so every request
+// shares one bucket — coarser, but not forgeable. Outside production the
+// headers are trusted so local tests behave like the hosted app.
+export function trustForwardingHeaders(): boolean {
+  const t = process.env.TRUST_PROXY;
+  if (t === "false" || t === "0") return false;
+  if (t === "true" || t === "1") return true;
+  return Boolean(process.env.VERCEL) || process.env.NODE_ENV !== "production";
+}
 export function clientIp(req: Request): string {
   const h = req.headers;
-  if (process.env.TRUST_PROXY === "false") return "direct";
+  if (!trustForwardingHeaders()) return "direct";
   const real = (h.get("x-real-ip") ?? "").trim();
   if (real) return real;
   const fwd = (h.get("x-forwarded-for") ?? "").split(",").map((s) => s.trim()).filter(Boolean);

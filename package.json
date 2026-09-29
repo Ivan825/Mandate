@@ -1,6 +1,6 @@
 {
   "name": "mandate",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -31,6 +31,7 @@
     "react-dom": "^19.2.8",
     "resend": "^6.26.0",
     "stripe": "^17.7.0",
+    "undici": "^7.30.0",
     "web-push": "^3.6.7",
     "zod": "^4.5.4"
   },

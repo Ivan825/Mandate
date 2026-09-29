@@ -8,7 +8,7 @@
 // Amounts are integers in the mandate's minor unit (cents, paise). Uses the
 // global fetch; no dependencies.
 
-export const VERSION = "0.7.0";
+export const VERSION = "0.7.1";
 export const DEFAULT_BASE_URL = "https://mandate-ashen.vercel.app";
 
 export type Remedy = { message: string; retryAt?: string; maxAmountNow?: number; approvalRequired?: boolean; allowedMerchants?: string[] };
@@ -16,8 +16,9 @@ export type Settlement = "held" | "captured" | "voided" | "released";
 export type Decision = {
   decision: "approved" | "declined" | "pending"; reason: string; rule: string; transactionId: string; approvalId: string | null;
   settlement: Settlement | null; holdExpiresAt: string | null; remedy?: Remedy; next?: string;
-  /** Signed authorisation voucher (mv1.…) to hand the merchant; present on approved holds. */
-  voucher?: string;
+  /** Where to fetch the signed authorisation voucher for this hold (see `voucher()`); present on approved, non-sandbox holds.
+   *  Fetching it is a deliberate step: once a voucher is out, the agent can no longer capture or void the hold itself. */
+  voucherUrl?: string;
   remaining?: { today: number; total: number; perTransaction: number; currency: string };
 };
 export type Voucher = { voucher: string; payload: { tx: string; mandate: string; agent: string; amount: number; currency: string; merchant: string; expiresAt: string }; expiresAt: string; verifyUrl: string; redeemUrl: string; publicKeyUrl: string };

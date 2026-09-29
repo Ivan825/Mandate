@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { getCtx } from "@/lib/session";
+import { getCtx, sameOriginRequest } from "@/lib/session";
 import { db, schema } from "@/lib/db";
 import { getMandate } from "@/lib/service";
 import { replayHistory, validateTerms } from "@/lib/policy";
@@ -8,6 +8,7 @@ import { replayHistory, validateTerms } from "@/lib/policy";
 // Policy time-travel: POST hypothetical terms, get back what the last N
 // decisions would have been under them. Pure replay of the real engine.
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  if (!sameOriginRequest(req)) return NextResponse.json({ error: "Cross-site request refused." }, { status: 403 });
   const c = await getCtx();
   if (!c) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   const { id } = await ctx.params;

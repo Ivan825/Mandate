@@ -10,6 +10,7 @@ import { rateLimit, clientIp } from "@/lib/ratelimit";
 //   Ed25519.verify(key, "mandate-voucher|" + base64urlDecode(payload), signature)
 export async function POST(req: NextRequest) {
   if (!(await rateLimit(`ip:${clientIp(req)}:voucher`, 120)).ok) return NextResponse.json({ error: "Too many requests." }, { status: 429 });
+  if (Number(req.headers.get("content-length")) > 16_384) return NextResponse.json({ error: "Body too large." }, { status: 413 });
   let body: { voucher?: unknown };
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Body must be JSON with a voucher field." }, { status: 400 }); }
   if (typeof body.voucher !== "string" || body.voucher.length > 4000) return NextResponse.json({ error: "voucher must be a string." }, { status: 400 });

@@ -55,6 +55,25 @@ export async function can(perm: Permission): Promise<boolean> {
   }
 }
 
+// Cookie-authenticated JSON routes that change state must be called from our
+// own pages. Browsers send Origin on every cross-site POST and Sec-Fetch-Site
+// on every request, so a request carrying another site's origin is refused.
+// A request with neither header comes from a non-browser client (curl, a
+// test), which cannot be the victim of cross-site request forgery, and is
+// allowed through to the session check. Better Auth's cookie is SameSite=Lax,
+// which already stops the plain form-post case; this closes the rest.
+export function sameOriginRequest(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  const site = req.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") return false;
+  if (!origin || origin === "null") return origin !== "null";
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "";
+  try {
+    const o = new URL(origin);
+    return o.host === host || o.origin === new URL(process.env.APP_URL ?? process.env.BETTER_AUTH_URL ?? "http://localhost:3000").origin;
+  } catch { return false; }
+}
+
 export class Forbidden extends Error { constructor(what: string) { super(`Your role does not allow: ${what}.`); } }
 
 // A role that may not do something is told so on the exposure page rather

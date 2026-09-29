@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCtx, can } from "@/lib/session";
+import { getCtx, can, sameOriginRequest } from "@/lib/session";
 import { createAgent, createMandate, authorize, listAgents, captureTransaction, delegateMandate, openDispute } from "@/lib/service";
 import { addRoute } from "@/lib/routing";
 import { anchorWorkspace } from "@/lib/anchors";
@@ -12,7 +12,8 @@ import { anchorWorkspace } from "@/lib/anchors";
 export async function GET() {
   return NextResponse.json({ error: "Seed with POST (fetch('/api/dev/seed', { method: 'POST' }) from the browser console while signed in)." }, { status: 405 });
 }
-export async function POST() {
+export async function POST(req: Request) {
+  if (!sameOriginRequest(req)) return NextResponse.json({ error: "Cross-site request refused." }, { status: 403 });
   if (process.env.NODE_ENV === "production" && process.env.ALLOW_SEED !== "1") return NextResponse.json({ error: "Seeding is disabled in production (set ALLOW_SEED=1 to override)." }, { status: 403 });
   const ctx = await getCtx();
   if (!ctx) return NextResponse.json({ error: "Sign in first; the demo is created in your workspace." }, { status: 401 });

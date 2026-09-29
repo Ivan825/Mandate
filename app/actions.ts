@@ -12,13 +12,16 @@ import { requireCtx, requirePermission, can } from "@/lib/session";
 import { auth } from "@/lib/auth";
 import { revokeConnectedAgent, bindClientWorkspace } from "@/lib/connections";
 import { grant } from "@/lib/reveal";
+import { safeNext } from "@/lib/safe-next";
 
 // Every mutating action resolves the caller's workspace from the session
 // first; ids from forms are only ever used inside that workspace.
 
+// Form numbers are finite and bounded: an absurd value becomes the fallback
+// rather than an Infinity, an Invalid Date, or an integer the database rejects.
 function num(v: FormDataEntryValue | null, fallback = 0): number {
   const n = parseFloat(String(v ?? ""));
-  return Number.isFinite(n) ? n : fallback;
+  return Number.isFinite(n) && Math.abs(n) <= 1e12 ? n : fallback;
 }
 function lines(v: FormDataEntryValue | null): string[] {
   return String(v ?? "").split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
@@ -133,7 +136,7 @@ export async function settleHoldAction(form: FormData) {
   if (!isUuid(mandateId) || !isUuid(transactionId)) return;
   const m = await getMandate(ctx.workspaceId, mandateId);
   if (!m) return;
-  const back = String(form.get("back") ?? `/mandates/${mandateId}`);
+  const back = safeNext(String(form.get("back") ?? ""), `/mandates/${mandateId}`);
   const kind = form.get("kind") === "void" ? "void" : "capture";
   const note = String(form.get("note") ?? "").trim();
   const r = kind === "void"
@@ -216,7 +219,7 @@ export async function addNoteAction(form: FormData) {
   const { addNote } = await import("@/lib/activity");
   const type = String(form.get("targetType") ?? "");
   const id = String(form.get("targetId") ?? "");
-  const back = String(form.get("back") ?? "/activity");
+  const back = safeNext(String(form.get("back") ?? ""), "/activity");
   if (!["transaction", "approval", "event"].includes(type) || !isUuid(id)) redirect(back);
   await addNote(ctx.workspaceId, { type: type as "transaction" | "approval" | "event", id }, String(form.get("body") ?? ""), { id: ctx.userId, email: ctx.email });
   revalidatePath(back.split("?")[0]);
@@ -227,7 +230,7 @@ export async function removeNoteAction(form: FormData) {
   const ctx = await requireCtx();
   const { removeNote } = await import("@/lib/activity");
   const id = String(form.get("id") ?? "");
-  const back = String(form.get("back") ?? "/activity");
+  const back = safeNext(String(form.get("back") ?? ""), "/activity");
   if (isUuid(id)) await removeNote(ctx.workspaceId, id, ctx.userId);
   revalidatePath(back.split("?")[0]);
   redirect(back);
@@ -254,7 +257,7 @@ export async function decidePlanAction(form: FormData) {
 
 export async function cancelPlanAction(form: FormData) {
   const ctx = await requirePermission({ approval: ["decide"] }, "cancelling plans");
-  const id = String(form.get("planId") ?? ""); const back = String(form.get("back") ?? "/approvals");
+  const id = String(form.get("planId") ?? ""); const back = safeNext(String(form.get("back") ?? ""), "/approvals");
   if (!isUuid(id)) return;
   await cancelPlan(ctx.workspaceId, id, ctx.email);
   revalidatePath(back);
@@ -319,7 +322,7 @@ export async function raiseLimitAction(form: FormData) {
   if (!isUuid(id)) return;
   const m = await getMandate(ctx.workspaceId, id);
   if (!m) return;
-  const hours = Math.max(0, num(form.get("hours"), 24));
+  const hours = Math.min(Math.max(0, num(form.get("hours"), 24)), 24 * 366);
   const r = await raiseLimit(ctx.workspaceId, id, { field: String(form.get("field") ?? ""), amount: toMinorIn(num(form.get("amount")), m.currency), endsAt: new Date(Date.now() + hours * 3600_000), reason: String(form.get("reason") ?? ""), by: ctx.email });
   revalidatePath(`/mandates/${id}`); revalidatePath("/");
   redirect(r.ok ? `/mandates/${id}?raised=1` : `/mandates/${id}?error=${encodeURIComponent(r.error)}`);
@@ -352,7 +355,7 @@ export async function decideApprovalAction(form: FormData) {
   const id = String(form.get("approvalId") ?? "");
   if (!isUuid(id)) return;
   const decision = form.get("decision") === "approve" ? "approved" : "denied";
-  await decideApproval(ctx.workspaceId, id, decision, ctx.email);
+  await decideApproval(ctx.workspaceId, id, decision, ctx.email, undefined, { userId: ctx.userId });
   revalidatePath("/approvals");
   revalidatePath("/");
   revalidatePath("/ledger");
@@ -603,14 +606,14 @@ export async function freezeWorkspaceAction(form: FormData) {
   const ctx = await requirePermission({ mandate: ["revoke"] }, "freezing the workspace");
   await freezeWorkspace(ctx.workspaceId, ctx.email, String(form.get("reason") ?? ""));
   revalidatePath("/", "layout");
-  redirect(String(form.get("back") ?? "/") || "/");
+  redirect(safeNext(String(form.get("back") ?? "")));
 }
 
 export async function unfreezeWorkspaceAction(form: FormData) {
   const ctx = await requirePermission({ mandate: ["revoke"] }, "unfreezing the workspace");
   await unfreezeWorkspace(ctx.workspaceId, ctx.email);
   revalidatePath("/", "layout");
-  redirect(String(form.get("back") ?? "/") || "/");
+  redirect(safeNext(String(form.get("back") ?? "")));
 }
 
 // ---------- Disputes ----------
@@ -619,17 +622,21 @@ export async function openDisputeAction(form: FormData) {
   const ctx = await requirePermission({ approval: ["decide"] }, "raising disputes");
   const id = String(form.get("transactionId") ?? ""); const mandateId = String(form.get("mandateId") ?? "");
   if (!isUuid(id) || !isUuid(mandateId)) return;
-  const r = await openDispute(ctx.workspaceId, id, { reason: String(form.get("reason") ?? ""), by: ctx.email, pause: form.get("pause") === "on" });
+  // Pausing the mandate is a revoke-level power; approvers dispute without it.
+  const pause = form.get("pause") === "on" && (await can({ mandate: ["revoke"] }));
+  const r = await openDispute(ctx.workspaceId, id, { reason: String(form.get("reason") ?? ""), by: ctx.email, pause });
   revalidatePath(`/mandates/${mandateId}`); revalidatePath("/approvals"); revalidatePath("/");
   redirect(r.ok ? `/mandates/${mandateId}?disputed=1#tx-${id}` : `/mandates/${mandateId}?error=${encodeURIComponent(r.error)}`);
 }
 
 export async function resolveDisputeAction(form: FormData) {
   const ctx = await requirePermission({ approval: ["decide"] }, "resolving disputes");
-  const id = String(form.get("disputeId") ?? ""); const back = String(form.get("back") ?? "/approvals");
+  const id = String(form.get("disputeId") ?? ""); const back = safeNext(String(form.get("back") ?? ""), "/approvals");
   if (!isUuid(id)) return;
   const outcome = String(form.get("outcome") ?? "");
   if (outcome !== "refunded" && outcome !== "upheld" && outcome !== "withdrawn") return;
+  // "Refunded" gives the agent its headroom back: that is the power to grant spend, not to approve it.
+  if (outcome === "refunded" && !(await can({ mandate: ["issue"] }))) redirect(`${back}${back.includes("?") ? "&" : "?"}error=${encodeURIComponent("Only an owner or admin can record a refund (it restores the agent's limits). Resolve it as upheld or withdrawn, or ask an admin.")}`);
   const r = await resolveDispute(ctx.workspaceId, id, outcome, ctx.email, String(form.get("note") ?? ""));
   revalidatePath(back); revalidatePath("/approvals"); revalidatePath("/");
   redirect(r.ok ? back : `${back}${back.includes("?") ? "&" : "?"}error=${encodeURIComponent(r.error)}`);

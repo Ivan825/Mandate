@@ -30,5 +30,9 @@ export async function sendMail(m: Mail, consoleNote?: string): Promise<void> {
     await transport.sendMail({ from: emailFrom(), to: m.to, subject: m.subject, text: m.text, html: m.html });
     return;
   }
+  // Sign-in and one-tap links must never land in a production log: with no
+  // transport configured the send fails (loudly) unless EMAIL_CONSOLE=1 says
+  // this deployment's console is private (tests, a laptop).
+  if (process.env.NODE_ENV === "production" && process.env.EMAIL_CONSOLE !== "1") throw new Error("No email transport is configured (SMTP_URL or RESEND_API_KEY); refusing to print the message to the log.");
   console.log(`\n[mandate] Email to ${m.to}: ${m.subject}\n${consoleNote ?? m.text}\n`);
 }

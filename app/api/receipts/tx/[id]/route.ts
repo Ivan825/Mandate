@@ -24,6 +24,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const base = verifyTransactionReceipt(r);
   const hs = (r.approval as { humanSignature?: unknown } | null)?.humanSignature;
   let humanSignatureValid: boolean | null = null;
-  if (hs && typeof hs === "object") { const { recheckHumanSignature } = await import("@/lib/human-sign"); humanSignatureValid = await recheckHumanSignature(hs as Parameters<typeof recheckHumanSignature>[0]); }
+  if (hs && typeof hs === "object") {
+    const { recheckHumanSignature } = await import("@/lib/human-sign");
+    const ap = r.approval as { id?: string; status?: string } | null;
+    const decision = ap?.status === "denied" ? "deny" : "approve";
+    humanSignatureValid = typeof ap?.id === "string" ? await recheckHumanSignature(hs as Parameters<typeof recheckHumanSignature>[0], { approvalId: ap.id, decision }) : false;
+  }
   return NextResponse.json({ ...base, humanSignatureValid });
 }

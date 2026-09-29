@@ -402,7 +402,9 @@ test("plans: proposed → approved → items pass once without asking → comple
   const r = await mandate({ approvalAbove: 500, perTxnLimit: 5000, allowedMerchants: [] });
   const bad = await proposePlan(r.mandate, { title: "Too big", items: [{ merchant: "OpenAI", amount: 9000 }] });
   assert.equal(bad.ok, false);
-  const p = await proposePlan(r.mandate, { title: "Q4 tools", items: [{ merchant: "OpenAI", amount: 3000, purpose: "credits" }, { merchant: "Vercel*", amount: 2000 }], proposedBy: "Claude", source: "mcp" });
+  const wild = await proposePlan(r.mandate, { title: "Wildcard", items: [{ merchant: "Vercel*", amount: 2000 }] });
+  assert.equal(wild.ok, false, "a plan names exact merchants; a wildcard would pre-approve anyone");
+  const p = await proposePlan(r.mandate, { title: "Q4 tools", items: [{ merchant: "OpenAI", amount: 3000, purpose: "credits" }, { merchant: "Vercel", amount: 2000 }], proposedBy: "Claude", source: "mcp" });
   assert.ok(p.ok); if (!p.ok) return;
   assert.equal((await authorize(r.mandate, { amount: 2900, merchant: "OpenAI" }, "agent_api")).decision, "pending"); // not approved yet: normal rules
   assert.ok(await decidePlan(ws, p.plan.id, "approved", "owner"));
@@ -411,7 +413,8 @@ test("plans: proposed → approved → items pass once without asking → comple
   assert.equal((await authorize(r.mandate, { amount: 2900, merchant: "OpenAI" }, "agent_api")).decision, "pending"); // item used up
   const plan = (await getPlan({ workspaceId: ws }, p.plan.id))!;
   assert.equal(plan.status, "approved"); assert.equal(JSON.parse(plan.items)[0].usedBy, a.transactionId);
-  const b = await authorize(r.mandate, { amount: 1999, merchant: "Vercel Pro" }, "agent_api");
+  assert.notEqual((await authorize(r.mandate, { amount: 1999, merchant: "Vercel Pro" }, "agent_api")).rule, "plan", "a plan item names one merchant exactly");
+  const b = await authorize(r.mandate, { amount: 1999, merchant: "vercel" }, "agent_api");
   assert.equal(b.rule, "plan");
   assert.equal((await getPlan({ workspaceId: ws }, p.plan.id))!.status, "completed");
 });
@@ -522,20 +525,21 @@ test("co-signing: N distinct approvers, no double signing, one denial ends it, t
   const big = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
   assert.equal(big.decision, "pending"); assert.match(big.reason, /2 approvers/);
   assert.equal((await getApproval(big.approvalId!))!.a.requiredApprovers, 2);
-  const first = await decideApproval(ws, big.approvalId!, "approved", "alice@example.com") as { status: string; cosigned?: boolean; have?: number; need?: number } | null;
+  const alice = { userId: "user-alice-" + randomUUID() }, bob = { userId: "user-bob-" + randomUUID() };
+  const first = await decideApproval(ws, big.approvalId!, "approved", "alice@example.com", undefined, alice) as { status: string; cosigned?: boolean; have?: number; need?: number } | null;
   assert.equal(first?.status, "pending"); assert.equal(first?.cosigned, true); assert.equal(first?.have, 1); assert.equal(first?.need, 2);
   assert.equal((await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api")).decision, "pending"); // one signature is not an allowance
-  const again = await decideApproval(ws, big.approvalId!, "approved", "Alice@Example.com") as { alreadySigned?: boolean } | null;
+  const again = await decideApproval(ws, big.approvalId!, "approved", "Alice@Example.com", undefined, alice) as { alreadySigned?: boolean } | null;
   assert.equal(again?.alreadySigned, true);
-  const second = await decideApproval(ws, big.approvalId!, "approved", "bob@example.com");
+  const second = await decideApproval(ws, big.approvalId!, "approved", "bob@example.com", undefined, bob);
   assert.equal(second?.status, "approved");
   const done = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
   assert.equal(done.rule, "allowance");
   assert.equal((await getApproval(big.approvalId!))!.a.decidedBy, "alice@example.com + bob@example.com");
   // A denial by anyone ends a half-signed request.
   const other = await authorize(r.mandate, { amount: 4800, merchant: "OpenAI" }, "agent_api");
-  await decideApproval(ws, other.approvalId!, "approved", "alice@example.com");
-  const denied = await decideApproval(ws, other.approvalId!, "denied", "bob@example.com");
+  await decideApproval(ws, other.approvalId!, "approved", "alice@example.com", undefined, alice);
+  const denied = await decideApproval(ws, other.approvalId!, "denied", "bob@example.com", undefined, bob);
   assert.equal(denied?.status, "denied");
   assert.equal((await authorize(r.mandate, { amount: 4800, merchant: "OpenAI" }, "agent_api")).rule, "denied_recently");
 });
@@ -641,8 +645,17 @@ test("ledger anchoring: heads are signed into a public chain, verified, and cove
   const a2 = await anchorWorkspace(ws);
   assert.ok(a2 && a2.n === a1.n + 1 && a2.prevAnchorHash === a1.anchorHash && a2.seq > a1.seq);
   assert.equal(await anchorWorkspace(ws), null);
+  // The e2e suite signs anchors into this database with its own fixed key;
+  // list that key's public half as retired and the whole chain verifies.
+  // Without it, anchors under an unknown key are a break, not a footnote.
+  const { createPrivateKey, createPublicKey } = await import("node:crypto");
+  const e2ePub = createPublicKey(createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, 9)]), format: "der", type: "pkcs8" })).export({ type: "spki", format: "pem" }).toString();
+  process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS = e2ePub;
   const v = await verifyAnchors();
-  assert.equal(v.ok, true); assert.ok(v.checked >= 2);
+  assert.equal(v.ok, true, v.detail); assert.ok(v.checked >= 2);
+  delete process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS;
+  const strict = await verifyAnchors();
+  assert.ok(strict.ok || /unknown key/.test(strict.detail ?? ""), "anchors under a key that is neither current nor retired are reported as a break");
   const cover = await anchorCovering(ws, a1.seq);
   assert.equal(cover?.n, a1.n);
   assert.equal((await latestAnchor(ws))?.n, a2!.n);
@@ -719,4 +732,150 @@ test("generic API targets: public https only, priced per call or from the respon
   assert.equal((await listTargets(ws)).length, 1);
   await removeTarget(ws, t.target.id, "owner");
   assert.equal(await resolveTargetToken(k.token, "serpapi"), null); // keys die with the target
+});
+
+// ---- security hardening (0.7.1) ----
+
+test("hardening: observe mode never overrides the hard rules (frozen, paused, expired, amount)", async () => {
+  const { setMandateMode, freezeWorkspace, unfreezeWorkspace, getMandate, pauseMandate } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null, allowedMerchants: ["OpenAI"] });
+  await setMandateMode(ws, r.mandate.id, "observe", "owner");
+  const m = (await getMandate(ws, r.mandate.id))!;
+  assert.equal((await authorize(m, { amount: 100, merchant: "Namecheap" }, "agent_api")).rule, "observe", "soft rules are observed, not enforced");
+  await freezeWorkspace(ws, "owner@example.com", "drill");
+  const frozen = await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  assert.equal(frozen.decision, "declined"); assert.equal(frozen.rule, "frozen");
+  await unfreezeWorkspace(ws, "owner@example.com");
+  await pauseMandate(ws, r.mandate.id, { by: "owner", until: null });
+  const paused = await authorize((await getMandate(ws, r.mandate.id))!, { amount: 100, merchant: "OpenAI" }, "agent_api");
+  assert.equal(paused.decision, "declined"); assert.equal(paused.rule, "paused");
+  await assert.rejects(authorize(m, { amount: 0, merchant: "OpenAI" }, "agent_api"), /amount must be between/);
+  await assert.rejects(authorize(m, { amount: 2 ** 40, merchant: "OpenAI" }, "agent_api"), /amount must be between/);
+});
+
+test("hardening: an agent cannot settle card, proxy or voucher-issued holds; the owner cannot settle card holds", async () => {
+  const { captureTransaction, voidTransaction, markVoucherIssued, getTransaction } = await import("../lib/service");
+  const { eq } = await import("drizzle-orm");
+  const r = await mandate({ approvalAbove: null });
+  const scopeAgent = { mandateId: r.mandate.id }, scopeOwner = { workspaceId: ws };
+  // A proxy hold: the proxy settles it, the agent must not.
+  const px = await authorize(r.mandate, { amount: 300, merchant: "OpenAI" }, "proxy");
+  const v1 = await voidTransaction(scopeAgent, px.transactionId, { by: "agent" });
+  assert.equal(v1.ok, false); if (!v1.ok) assert.match(v1.message, /proxy/);
+  assert.equal((await captureTransaction(scopeOwner, px.transactionId, { by: "owner" })).ok, true, "the owner may close a proxy hold");
+  // A card hold: nobody settles it by hand.
+  const card = await authorize(r.mandate, { amount: 400, merchant: "OpenAI" }, "stripe");
+  assert.equal((await voidTransaction(scopeAgent, card.transactionId, { by: "agent" })).ok, false);
+  assert.equal((await voidTransaction(scopeOwner, card.transactionId, { by: "owner" })).ok, false);
+  // Once a voucher is out, the agent's own hold is no longer its to close.
+  const own = await authorize(r.mandate, { amount: 500, merchant: "OpenAI" }, "agent_api");
+  await markVoucherIssued(own.transactionId);
+  const c = await captureTransaction(scopeAgent, own.transactionId, { by: "agent", amount: 1 });
+  assert.equal(c.ok, false); if (!c.ok) assert.match(c.message, /voucher/);
+  assert.equal((await captureTransaction(scopeAgent, own.transactionId, { by: "merchant", amount: 450, viaVoucher: true })).ok, true, "the voucher path still settles it");
+  assert.equal((await getTransaction({ workspaceId: ws }, own.transactionId))!.settlement, "captured");
+  void eq;
+});
+
+test("hardening: co-signatures are counted per account, not per spelling of an address", async () => {
+  const { decideApproval, getApproval } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: 2000, cosignAbove: 4000, cosignCount: 2 });
+  const big = await authorize(r.mandate, { amount: 4500, merchant: "OpenAI" }, "agent_api");
+  const u1 = "user-" + randomUUID(), u2 = "user-" + randomUUID();
+  const first = await decideApproval(ws, big.approvalId!, "approved", "alice@example.com", undefined, { userId: u1 }) as { cosigned?: boolean } | null;
+  assert.equal(first?.cosigned, true);
+  // Same account under a different display address: not a second signature.
+  const same = await decideApproval(ws, big.approvalId!, "approved", "alice+work@example.com", undefined, { userId: u1 }) as { alreadySigned?: boolean } | null;
+  assert.equal(same?.alreadySigned, true);
+  // An anonymous (one-tap, no account) signature cannot count towards a multi-approver request.
+  const anon = await decideApproval(null, big.approvalId!, "approved", "one-tap link", undefined, { userId: null }) as { anonymous?: boolean } | null;
+  assert.equal(anon?.anonymous, true);
+  assert.equal((await getApproval(big.approvalId!))!.a.status, "pending");
+  const second = await decideApproval(ws, big.approvalId!, "approved", "bob@example.com", undefined, { userId: u2 });
+  assert.equal(second?.status, "approved");
+  const signoffs = JSON.parse((await getApproval(big.approvalId!))!.a.signoffs ?? "[]") as { userId?: string }[];
+  assert.deepEqual(signoffs.map((s) => s.userId).sort(), [u1, u2].sort());
+});
+
+test("hardening: an idempotency key reused with a different body is a mismatch, not a replay", async () => {
+  const { reserveIdempotent, completeIdempotent, requestHash } = await import("../lib/service");
+  const r = await mandate({ approvalAbove: null });
+  const key = "k-" + randomUUID();
+  const h1 = requestHash({ amount: 100, merchant: "OpenAI" }), h2 = requestHash({ amount: 9900, merchant: "OpenAI" });
+  assert.equal((await reserveIdempotent(r.mandate.id, key, h1)).kind, "reserved");
+  await completeIdempotent(r.mandate.id, key, 200, { decision: "approved" });
+  assert.equal((await reserveIdempotent(r.mandate.id, key, h1)).kind, "replay");
+  assert.equal((await reserveIdempotent(r.mandate.id, key, h2)).kind, "mismatch");
+});
+
+test("hardening: public receipts name roles, not people, and only carry this decision's rows", async () => {
+  const { buildTransactionReceipt, redactPerson } = await import("../lib/receipts");
+  const { shareTransaction, decideApproval } = await import("../lib/service");
+  assert.equal(redactPerson("alice.smith@example.com"), "a…@example.com");
+  assert.equal(redactPerson("one-tap link"), "one-tap link");
+  const r = await mandate({ approvalAbove: 1000 });
+  const ask = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api", { actor: "agent@bots.example.com" });
+  await decideApproval(ws, ask.approvalId!, "approved", "carol.jones@example.com", undefined, { userId: "user-carol" });
+  const ok = await authorize(r.mandate, { amount: 1500, merchant: "OpenAI" }, "agent_api");
+  assert.equal(ok.rule, "allowance");
+  // Another decision in the same workspace whose rows must not leak into this receipt.
+  const other = await authorize(r.mandate, { amount: 200, merchant: "OpenAI", purpose: "SECRET-OTHER-PURCHASE" }, "agent_api");
+  void other;
+  const token = (await shareTransaction(ws, ok.transactionId, "owner"))!;
+  const receipt = (await buildTransactionReceipt(ok.transactionId, token, "https://mandate.test"))!;
+  const json = JSON.stringify(receipt);
+  assert.ok(!json.includes("carol.jones@example.com"), "approver's address is redacted");
+  assert.ok(!json.includes("agent@bots.example.com"), "actor address is redacted");
+  assert.ok(!json.includes("user-carol"), "approver's account id is dropped");
+  assert.ok(!json.includes(ws), "the workspace id is replaced by its public label");
+  assert.ok(!json.includes("SECRET-OTHER-PURCHASE"), "only rows about this decision are included");
+  assert.ok(String((receipt.approval as { decidedBy?: string } | null)?.decidedBy ?? "").startsWith("c…@"));
+  assert.ok(receipt.events.length >= 1 && receipt.events.every((e) => JSON.stringify(e.payload).includes(ok.transactionId) || JSON.stringify(e.payload).includes(ask.approvalId!)));
+});
+
+test("hardening: retired signing keys still verify old anchors and receipts; unknown keys never do", async () => {
+  const { knownPublicKeys, publicKeyFor, keyId } = await import("../lib/receipts");
+  const { verifyAnchorSignature } = await import("../lib/anchors");
+  const { generateKeyPairSync } = await import("node:crypto");
+  const stranger = generateKeyPairSync("ed25519");
+  const strangerPem = stranger.publicKey.export({ type: "spki", format: "pem" }).toString();
+  assert.equal(knownPublicKeys().length, 1);
+  process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS = strangerPem + ",not-a-key";
+  const keys = knownPublicKeys();
+  assert.equal(keys.length, 2, "one parseable retired key; garbage is skipped, never trusted");
+  const retiredId = keys.find((k) => !k.current)!.keyId;
+  assert.ok(publicKeyFor(retiredId));
+  const { sign } = await import("node:crypto");
+  const anchorHash = "ab".repeat(32);
+  const sig = sign(null, Buffer.from("mandate-anchor|" + anchorHash), stranger.privateKey).toString("base64");
+  assert.equal(verifyAnchorSignature({ anchorHash, signature: sig, keyId: retiredId }), true, "signed under a retired key: fine");
+  assert.equal(verifyAnchorSignature({ anchorHash, signature: sig, keyId: keyId() }), false, "the same bytes claimed under the current key: no");
+  delete process.env.RECEIPT_PREVIOUS_PUBLIC_KEYS;
+  assert.equal(verifyAnchorSignature({ anchorHash, signature: sig, keyId: retiredId }), false, "once the key is no longer listed, nothing signed under it verifies");
+  assert.equal(publicKeyFor("0000000000000000"), null);
+});
+
+test("hardening: LLM prices match only exact models or dated versions of them; variants cost the family maximum", async () => {
+  const { priceFor, PRICES } = await import("../lib/pricing");
+  assert.equal(priceFor("openai", "gpt-5-2025-08-07").matched, "gpt-5");
+  assert.equal(priceFor("openai", "gpt-5-pro").matched, "gpt-5-pro");
+  assert.ok(priceFor("openai", "gpt-5-pro").price.output > PRICES.openai["gpt-5"].output);
+  assert.equal(priceFor("openai", "o3-pro").matched, "o3-pro");
+  assert.match(priceFor("openai", "gpt-5-turbo-x").matched, /unknown/);
+  assert.equal(priceFor("anthropic", "claude-sonnet-4-5-20250929").matched, "claude-sonnet-4-5");
+  assert.equal(priceFor("gemini", "models/gemini-2.5-flash-preview-05-20").matched, "gemini-2.5-flash");
+  const max = Math.max(...Object.values(PRICES.openai).map((p) => p.output));
+  assert.equal(priceFor("openai", "gpt-99-ultra").price.output, max);
+});
+
+test("hardening: routes and targets refuse amounts the ledger cannot hold; a workspace has a route cap", async () => {
+  const { addRoute, MAX_ROUTES } = await import("../lib/routing");
+  const { MAX_AMOUNT } = await import("../lib/money");
+  const { eq } = await import("drizzle-orm");
+  const [owner] = await db.select({ userId: schema.member.userId }).from(schema.member).where(eq(schema.member.organizationId, ws)).limit(1);
+  const tooBig = await addRoute(ws, { name: "too big", minAmount: 0, maxAmount: MAX_AMOUNT + 1, userIds: [owner.userId] }, "owner");
+  assert.equal(tooBig.ok, false);
+  const fraction = await addRoute(ws, { name: "fraction", minAmount: 1.5, maxAmount: null, userIds: [owner.userId] }, "owner");
+  assert.equal(fraction.ok, false);
+  assert.ok(MAX_ROUTES >= 10);
 });

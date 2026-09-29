@@ -72,7 +72,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     },
     {
         "name": "get_voucher",
-        "description": "The signed authorisation voucher for an approved hold, to hand to the merchant; they verify it offline and redeem it for what was actually sold.",
+        "description": "The signed authorisation voucher for an approved hold, to hand to the merchant; they verify it offline and redeem it for what was actually sold. Once issued, the hold can only be settled by the merchant or by expiry, not by capture/void.",
         "parameters": {"type": "object", "properties": {"transaction_id": {"type": "string"}}, "required": ["transaction_id"], "additionalProperties": False},
     },
     {

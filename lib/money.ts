@@ -48,3 +48,6 @@ export function fmt(minor: number, currency: string): string {
 }
 
 export function isCurrencyCode(s: string): boolean { return /^[A-Z]{3}$/.test(s); }
+
+// The largest amount any column holds (a signed 32-bit integer of minor units).
+export const MAX_AMOUNT = 2_147_483_647;

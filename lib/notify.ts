@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { isIP, BlockList } from "node:net";
+import { isIP } from "node:net";
+import { isPrivateAddress, isMetadataAddress } from "./net";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "./db";
 import { fmt } from "./policy";
@@ -10,6 +11,7 @@ import { parsePlanItems } from "./policy";
 import { parseUserIds } from "./routing";
 import { appUrl, isProduction } from "./env";
 import { sendMail } from "./mailer";
+import { safeFetch } from "./safe-fetch";
 
 // Notifications are fire-and-forget: they never delay or change a decision.
 //
@@ -34,30 +36,56 @@ export function baseUrl(): string {
   return appUrl();
 }
 
-export function signLink(approvalId: string, decision: "approve" | "deny", expMs: number): string | null {
+// A link is signed for one recipient: the token carries the user id inside
+// the HMAC, so a decision made through it is that person's, is refused once
+// they may no longer decide in that workspace, and counts as exactly one
+// co-signature. Links with no recipient (the deployment-level fallback
+// channel) still work for single-approver requests and are recorded as
+// anonymous; they never satisfy a co-sign requirement.
+export function signLink(approvalId: string, decision: "approve" | "deny", expMs: number, userId?: string | null): string | null {
   const secret = notifySecret();
   if (!secret) return null;
-  const sig = createHmac("sha256", secret).update(`${approvalId}|${decision}|${expMs}`).digest("base64url");
-  return `${expMs}.${sig}`;
+  const uid = userId ? Buffer.from(userId).toString("base64url") : "";
+  const sig = createHmac("sha256", secret).update(`${approvalId}|${decision}|${expMs}|${uid}`).digest("base64url");
+  return uid ? `${expMs}.u${uid}.${sig}` : `${expMs}.${sig}`;
 }
 
-export function verifyLink(approvalId: string, decision: "approve" | "deny", token: string): boolean {
+export type LinkCheck = { ok: boolean; userId: string | null };
+
+export function parseLink(approvalId: string, decision: "approve" | "deny", token: string): LinkCheck {
   const secret = notifySecret();
-  if (!secret) return false;
-  const [expStr, sig] = token.split(".");
+  if (!secret || typeof token !== "string" || token.length > 400) return { ok: false, userId: null };
+  const parts = token.split(".");
+  const expStr = parts[0];
+  const uid = parts.length === 3 && parts[1].startsWith("u") ? parts[1].slice(1) : "";
+  const sig = parts.length === 3 ? parts[2] : parts[1];
   const exp = Number(expStr);
-  if (!Number.isFinite(exp) || Date.now() > exp || !sig) return false;
-  const expected = createHmac("sha256", secret).update(`${approvalId}|${decision}|${exp}`).digest("base64url");
+  if (!Number.isFinite(exp) || Date.now() > exp || !sig || (parts.length !== 2 && parts.length !== 3)) return { ok: false, userId: null };
+  const expected = createHmac("sha256", secret).update(`${approvalId}|${decision}|${exp}|${uid}`).digest("base64url");
   const a = Buffer.from(sig), b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, userId: null };
+  return { ok: true, userId: uid ? Buffer.from(uid, "base64url").toString() : null };
 }
 
-export function decisionLinks(approvalId: string) {
+export function verifyLink(approvalId: string, decision: "approve" | "deny", token: string): boolean { return parseLink(approvalId, decision, token).ok; }
+
+export type Links = { approve: string; deny: string; inbox: string };
+
+export function decisionLinks(approvalId: string, userId?: string | null): Links | null {
   const exp = Date.now() + LINK_TTL_MS;
-  const a = signLink(approvalId, "approve", exp);
-  const d = signLink(approvalId, "deny", exp);
+  const a = signLink(approvalId, "approve", exp, userId);
+  const d = signLink(approvalId, "deny", exp, userId);
   if (!a || !d) return null;
   return { approve: `${baseUrl()}/a/${approvalId}?d=approve&t=${a}`, deny: `${baseUrl()}/a/${approvalId}?d=deny&t=${d}`, inbox: `${baseUrl()}/approvals` };
+}
+
+// The person a one-tap link was issued to, if they may still decide in the
+// request's workspace; null for an anonymous (fallback-channel) link.
+export async function linkPrincipal(userId: string | null, workspaceId: string): Promise<{ userId: string; email: string } | null | "revoked"> {
+  if (!userId) return null;
+  const [m] = await db.select({ role: schema.member.role, email: schema.user.email }).from(schema.member).innerJoin(schema.user, eq(schema.user.id, schema.member.userId)).where(and(eq(schema.member.userId, userId), eq(schema.member.organizationId, workspaceId))).limit(1);
+  if (!m || !/\b(owner|admin|approver)\b/.test(m.role)) return "revoked";
+  return { userId, email: m.email };
 }
 
 // ---------- Channel storage ----------
@@ -75,13 +103,15 @@ export async function listChannels(userId: string): Promise<Channel[]> {
 // WEBHOOK_ALLOW_PRIVATE=1 to lift the address check (never the URL check).
 export function privateWebhooksAllowed(): boolean { return process.env.WEBHOOK_ALLOW_PRIVATE === "1"; }
 
-export async function webhookProblem(raw: string): Promise<string | null> {
+export async function webhookProblem(raw: string, opts: { ignorePrivateFlag?: boolean } = {}): Promise<string | null> {
   let u: URL;
   try { u = new URL(raw); } catch { return "Enter a full http(s) URL."; }
-  if (u.protocol !== "https:" && !(u.protocol === "http:" && (!isProduction() || privateWebhooksAllowed()))) return "Webhook URLs must use https.";
+  const privateOk = privateWebhooksAllowed() && !opts.ignorePrivateFlag;
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && (!isProduction() || privateOk))) return "Webhook URLs must use https.";
   if (u.username || u.password) return "Webhook URLs cannot carry credentials.";
-  if (privateWebhooksAllowed()) return null;
   const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isMetadataHost(host)) return "That address is a cloud metadata service and can never be a target.";
+  if (privateOk) return null;
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return "Webhook URLs must be reachable on the public internet.";
   const addrs: string[] = [];
   if (isIP(host)) addrs.push(host);
@@ -92,20 +122,12 @@ export async function webhookProblem(raw: string): Promise<string | null> {
   return null;
 }
 
-// Every range that must never be a webhook target. BlockList understands
-// IPv4-mapped IPv6 (`::ffff:a9fe:a9fe` is checked as 169.254.169.254), so
-// the mapped, hex and dotted spellings all resolve to the same answer.
-const PRIVATE = new BlockList();
-for (const [net, bits] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 3]] as const) PRIVATE.addSubnet(net, bits, "ipv4");
-for (const [net, bits] of [["::", 128], ["::1", 128], ["64:ff9b::", 96], ["100::", 64], ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8]] as const) PRIVATE.addSubnet(net, bits, "ipv6");
-
-export function isPrivateAddress(ip: string): boolean {
-  const v = ip.replace(/^\[|\]$/g, "").split("%")[0];
-  const family = isIP(v);
-  if (family === 4) return PRIVATE.check(v, "ipv4");
-  if (family === 6) return PRIVATE.check(v, "ipv6"); // 6to4 and NAT64 prefixes are blocked wholesale
-  return true; // not an address at all: refuse
+function isMetadataHost(host: string): boolean {
+  if (host === "metadata.google.internal" || host === "metadata" || host.endsWith(".internal") && host.startsWith("metadata")) return true;
+  return isIP(host) ? isMetadataAddress(host) : false;
 }
+
+export { isPrivateAddress, isMetadataAddress } from "./net";
 
 export async function addChannel(userId: string, type: ChannelType, target: string, label = ""): Promise<{ ok: true; channel: Channel } | { ok: false; error: string }> {
   const t = target.trim();
@@ -166,16 +188,19 @@ function esc(s: string) { return s.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">":
 
 export type Outcome = { channel: ChannelType; target: string; ok: boolean; error?: string };
 
-export type Message = { title: string; html: string; text: string; payload: Record<string, unknown>; links: ReturnType<typeof decisionLinks> };
+export type Message = { title: string; html: string; text: string; payload: Record<string, unknown>; links: Links | null; linksFor?: (userId: string) => Links | null };
 
 export async function deliver(channels: Channel[], msg: Message): Promise<Outcome[]> {
   return Promise.all(channels.map(async (c): Promise<Outcome> => {
     try {
+      // Each recipient gets links signed for them.
+      const links = c.userId && msg.linksFor ? msg.linksFor(c.userId) : msg.links;
+      const payload = "links" in msg.payload ? { ...msg.payload, links } : msg.payload;
       if (c.type === "webhook") {
         if (c.id !== "env-webhook") { const problem = await webhookProblem(c.target); if (problem) throw new Error(problem); }
-        await withTimeout(fetch(c.target, { method: "POST", headers: { "content-type": "application/json", "user-agent": "Mandate-Webhook/1" }, body: JSON.stringify(msg.payload), redirect: "manual" }).then((r) => { if (!r.ok) throw new Error(`webhook ${r.status}`); }));
+        await safeFetch(c.target, { method: "POST", headers: { "content-type": "application/json", "user-agent": "Mandate-Webhook/1" }, body: JSON.stringify(payload) }, { timeoutMs: 4000, allowPrivate: c.id === "env-webhook" || privateWebhooksAllowed() }).then((r) => { if (!r.ok) throw new Error(`webhook ${r.status}`); });
       }
-      else if (c.type === "email") await withTimeout(sendEmail(c.target, msg.title, msg.text, msg.html, msg.links), 8000);
+      else if (c.type === "email") await withTimeout(sendEmail(c.target, msg.title, msg.text, msg.html, links), 8000);
       return { channel: c.type, target: mask(c.target), ok: true };
     } catch (e) {
       return { channel: c.type, target: mask(c.target), ok: false, error: (e as Error).message };
@@ -185,7 +210,7 @@ export async function deliver(channels: Channel[], msg: Message): Promise<Outcom
 
 function mask(t: string) { return t.length > 8 ? t.slice(0, 3) + "…" + t.slice(-3) : t; }
 
-async function sendEmail(to: string, subject: string, text: string, html: string, links: ReturnType<typeof decisionLinks>) {
+async function sendEmail(to: string, subject: string, text: string, html: string, links: Links | null) {
   const buttons = links ? `<p><a href="${links.approve}" style="background:#2F7A4C;color:#fff;padding:8px 14px;border-radius:3px;text-decoration:none">Approve once</a> &nbsp; <a href="${links.deny}" style="background:#9E2F2F;color:#fff;padding:8px 14px;border-radius:3px;text-decoration:none">Deny</a> &nbsp; <a href="${links.inbox}">Open inbox</a></p>` : "";
   await sendMail({ to, subject, text: text + (links ? `\n\nApprove: ${links.approve}\nDeny: ${links.deny}` : ""), html: `<p>${html.replace(/\n/g, "<br>")}</p>${buttons}` }, text + (links ? `\n${links.approve}\n${links.deny}` : ""));
 }
@@ -196,6 +221,7 @@ export type ApprovalNotice = { approval: Approval; mandate: Mandate; agentName: 
 
 export function approvalMessage(n: ApprovalNotice): Message {
   const links = decisionLinks(n.approval.id);
+  const linksFor = (userId: string) => decisionLinks(n.approval.id, userId);
   const amount = fmt(n.approval.amount, n.approval.currency);
   const flags = parseFlags(n.approval.flags);
   const veto = n.approval.kind === "veto" && n.approval.vetoUntil ? new Date(n.approval.vetoUntil) : null;
@@ -211,7 +237,7 @@ export function approvalMessage(n: ApprovalNotice): Message {
   const text = html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   return {
     title: sandbox + (veto ? `${n.agentName} will spend ${amount} at ${n.approval.merchant} in ${n.mandate.vetoMinutes} min unless you cancel` : cosign ? `${n.agentName} asks to spend ${amount} at ${n.approval.merchant} — ${cosign} approvers needed` : `${n.agentName} asks to spend ${amount} at ${n.approval.merchant}`),
-    html, text, links,
+    html, text, links, linksFor,
     payload: {
       event: "approval.requested", kind: n.approval.kind, approvalId: n.approval.id, mandateId: n.mandate.id, mandateName: n.mandate.name, agentName: n.agentName,
       amount: n.approval.amount, currency: n.approval.currency, amountDisplay: amount, merchant: n.approval.merchant, purpose: n.approval.purpose, flags,
@@ -222,14 +248,15 @@ export function approvalMessage(n: ApprovalNotice): Message {
 
 // ---------- Plans ----------
 
-export function planLinks(planId: string) {
+export function planLinks(planId: string, userId?: string | null): Links | null {
   const exp = Date.now() + LINK_TTL_MS;
-  const a = signLink("plan:" + planId, "approve", exp);
-  const d = signLink("plan:" + planId, "deny", exp);
+  const a = signLink("plan:" + planId, "approve", exp, userId);
+  const d = signLink("plan:" + planId, "deny", exp, userId);
   if (!a || !d) return null;
   return { approve: `${baseUrl()}/p/${planId}?d=approve&t=${a}`, deny: `${baseUrl()}/p/${planId}?d=deny&t=${d}`, inbox: `${baseUrl()}/approvals` };
 }
-export function verifyPlanLink(planId: string, decision: "approve" | "deny", token: string): boolean { return verifyLink("plan:" + planId, decision, token); }
+export function verifyPlanLink(planId: string, decision: "approve" | "deny", token: string): boolean { return parseLink("plan:" + planId, decision, token).ok; }
+export function parsePlanLink(planId: string, decision: "approve" | "deny", token: string): LinkCheck { return parseLink("plan:" + planId, decision, token); }
 
 export async function sendPlanProposed(plan: Plan): Promise<Outcome[]> {
   const [m] = await db.select({ name: schema.mandates.name, agentId: schema.mandates.agentId, workspaceId: schema.mandates.workspaceId }).from(schema.mandates).where(eq(schema.mandates.id, plan.mandateId)).limit(1);
@@ -245,11 +272,15 @@ export async function sendPlanProposed(plan: Plan): Promise<Outcome[]> {
     items.map((it) => `• ${esc(fmt(it.amount, plan.currency))} at ${esc(it.merchant)}${it.purpose ? ` — ${esc(it.purpose)}` : ""}`).join("\n") +
     `\nMandate: ${esc(m.name)}. Approve the plan once and each purchase inside it goes through without asking; anything outside it still asks.`;
   const text = html.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-  const msg: Message = { title: `${agentName} proposes a plan: ${plan.title} (${items.length} items, up to ${total})`, html, text, links, payload: { event: "plan.proposed", planId: plan.id, mandateId: plan.mandateId, mandateName: m.name, agentName, title: plan.title, totalMax: plan.totalMax, currency: plan.currency, items, links } };
+  const msg: Message = { title: `${agentName} proposes a plan: ${plan.title} (${items.length} items, up to ${total})`, html, text, links, linksFor: (uid) => planLinks(plan.id, uid), payload: { event: "plan.proposed", planId: plan.id, mandateId: plan.mandateId, mandateName: m.name, agentName, title: plan.title, totalMax: plan.totalMax, currency: plan.currency, items, links } };
   const out = channels.length ? await deliver(channels, msg) : [];
   try {
     const { pushEnabled, sendPush } = await import("./push");
-    if (pushEnabled()) { const ids = await deciderUserIds(m.workspaceId); const r = await sendPush(ids, { title: msg.title, body: items.slice(0, 3).map((it) => `${fmt(it.amount, plan.currency)} at ${it.merchant}`).join(" · "), tag: `plan:${plan.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: links?.approve, denyUrl: links?.deny }); if (r.devices) out.push({ channel: "push", target: `${r.devices} devices`, ok: r.sent > 0 }); }
+    if (pushEnabled()) {
+      let devices = 0, sent = 0;
+      for (const uid of await deciderUserIds(m.workspaceId)) { const l = planLinks(plan.id, uid); const r = await sendPush([uid], { title: msg.title, body: items.slice(0, 3).map((it) => `${fmt(it.amount, plan.currency)} at ${it.merchant}`).join(" · "), tag: `plan:${plan.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: l?.approve, denyUrl: l?.deny }); devices += r.devices; sent += r.sent; }
+      if (devices) out.push({ channel: "push", target: `${devices} devices`, ok: sent > 0 });
+    }
   } catch { /* push is optional */ }
   return out;
 }
@@ -268,10 +299,14 @@ async function pushApproval(n: ApprovalNotice, msg: Message): Promise<Outcome | 
   const { pushEnabled, sendPush } = await import("./push");
   if (!pushEnabled()) return null;
   try {
-    const ids = await notifyUserIds(n.mandate.workspaceId, n.approval.routeId);
-    const r = await sendPush(ids, { title: msg.title, body: `${n.mandate.name}${n.approval.purpose ? ` — “${n.approval.purpose}”` : ""}`, tag: `approval:${n.approval.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: msg.links?.approve, denyUrl: msg.links?.deny });
-    if (r.devices === 0) return null;
-    return { channel: "push", target: `${r.devices} device${r.devices === 1 ? "" : "s"}`, ok: r.sent > 0, error: r.sent === 0 ? "no device accepted the push" : undefined };
+    let devices = 0, sent = 0;
+    for (const uid of await notifyUserIds(n.mandate.workspaceId, n.approval.routeId)) {
+      const l = msg.linksFor ? msg.linksFor(uid) : msg.links;
+      const r = await sendPush([uid], { title: msg.title, body: `${n.mandate.name}${n.approval.purpose ? ` — “${n.approval.purpose}”` : ""}`, tag: `approval:${n.approval.id}`, inboxUrl: `${baseUrl()}/approvals`, approveUrl: l?.approve, denyUrl: l?.deny });
+      devices += r.devices; sent += r.sent;
+    }
+    if (devices === 0) return null;
+    return { channel: "push", target: `${devices} device${devices === 1 ? "" : "s"}`, ok: sent > 0, error: sent === 0 ? "no device accepted the push" : undefined };
   } catch (e) { return { channel: "push", target: "devices", ok: false, error: (e as Error).message }; }
 }
 

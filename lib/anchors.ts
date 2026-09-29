@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomUUID, sign as edSign, verify as edVe
 import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
 import { db, schema } from "./db";
 import { appendEvent, GENESIS } from "./ledger";
-import { publicKeyPem, keyId, signingKey } from "./receipts";
+import { publicKeyFor, keyId, signingKey } from "./receipts";
 import type { LedgerAnchor } from "./schema";
 
 // Ledger anchoring. A hash chain proves a ledger was not edited *in the
@@ -19,15 +19,20 @@ import type { LedgerAnchor } from "./schema";
 //   anchorHash = sha256(n|label|seq|hash|prevAnchorHash|signedAt)
 //   signature  = Ed25519("mandate-anchor|" + anchorHash)
 
-export function workspaceLabel(workspaceId: string): string { return createHash("sha256").update("mandate-ws:" + workspaceId).digest("hex"); }
+export { workspaceLabel } from "./ws-label";
+import { workspaceLabel } from "./ws-label";
 
 export function anchorHashOf(a: { n: number; label: string; seq: number; hash: string; prevAnchorHash: string; signedAt: Date | string }): string {
   const at = typeof a.signedAt === "string" ? a.signedAt : a.signedAt.toISOString();
   return createHash("sha256").update(`${a.n}|${a.label}|${a.seq}|${a.hash}|${a.prevAnchorHash}|${at}`).digest("hex");
 }
 
-export function verifyAnchorSignature(a: { anchorHash: string; signature: string }): boolean {
-  try { return edVerify(null, Buffer.from("mandate-anchor|" + a.anchorHash), createPublicKey(publicKeyPem()), Buffer.from(a.signature, "base64")); } catch { return false; }
+export function verifyAnchorSignature(a: { anchorHash: string; signature: string; keyId?: string }): boolean {
+  try {
+    const key = publicKeyFor(a.keyId ?? keyId());
+    if (!key) return false;
+    return edVerify(null, Buffer.from("mandate-anchor|" + a.anchorHash), key, Buffer.from(a.signature, "base64"));
+  } catch { return false; }
 }
 
 // Anchor one workspace's current head, unless the last anchor already covers it.
@@ -74,9 +79,10 @@ export async function anchorIfDue(maxAgeMs = 24 * 3600_000): Promise<number> {
   return anchorAll();
 }
 
-export async function listAnchors(opts: { limit?: number; workspaceId?: string; before?: number } = {}): Promise<LedgerAnchor[]> {
+export async function listAnchors(opts: { limit?: number; workspaceId?: string; label?: string; before?: number } = {}): Promise<LedgerAnchor[]> {
   const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
-  return db.select().from(schema.ledgerAnchors).where(and(opts.workspaceId ? eq(schema.ledgerAnchors.workspaceId, opts.workspaceId) : undefined, opts.before ? sql`${schema.ledgerAnchors.n} < ${opts.before}` : undefined)).orderBy(desc(schema.ledgerAnchors.n)).limit(limit);
+  const label = opts.label && /^[0-9a-f]{64}$/.test(opts.label) ? opts.label : opts.label ? "-" : undefined;
+  return db.select().from(schema.ledgerAnchors).where(and(opts.workspaceId ? eq(schema.ledgerAnchors.workspaceId, opts.workspaceId) : undefined, label ? eq(schema.ledgerAnchors.label, label) : undefined, opts.before ? sql`${schema.ledgerAnchors.n} < ${opts.before}` : undefined)).orderBy(desc(schema.ledgerAnchors.n)).limit(limit);
 }
 
 export async function latestAnchor(workspaceId: string): Promise<LedgerAnchor | null> {
@@ -91,10 +97,12 @@ export async function anchorCovering(workspaceId: string, seq: number): Promise<
   return a ?? null;
 }
 
-// Re-check the global anchor chain: every hash and link, and every signature
-// made with the current key. Anchors signed before a key rotation keep their
-// place in the chain (the hashes still bind them) and are reported as such.
-export async function verifyAnchors(): Promise<{ ok: boolean; checked: number; otherKey: number; brokenAt?: number; detail?: string }> {
+// Re-check the global anchor chain: every hash and link, and every signature.
+// A signature must verify under the current key or one of the retired keys
+// listed in RECEIPT_PREVIOUS_PUBLIC_KEYS; an anchor under any other key is a
+// break. `otherKey` counts anchors verified under a retired key.
+export type AnchorVerification = { ok: boolean; checked: number; otherKey: number; brokenAt?: number; detail?: string };
+export async function verifyAnchors(): Promise<AnchorVerification> {
   const rows = await db.select().from(schema.ledgerAnchors).orderBy(asc(schema.ledgerAnchors.n));
   const current = keyId();
   let prev = GENESIS;
@@ -102,11 +110,22 @@ export async function verifyAnchors(): Promise<{ ok: boolean; checked: number; o
   for (const a of rows) {
     if (a.prevAnchorHash !== prev) return { ok: false, checked: a.n - 1, otherKey, brokenAt: a.n, detail: "Previous-anchor link does not match" };
     if (anchorHashOf(a) !== a.anchorHash) return { ok: false, checked: a.n - 1, otherKey, brokenAt: a.n, detail: "Anchor content does not match its hash" };
+    if (!verifyAnchorSignature(a)) return { ok: false, checked: a.n - 1, otherKey, brokenAt: a.n, detail: a.keyId === current || publicKeyFor(a.keyId) ? "Signature does not verify" : `Signed with an unknown key ${a.keyId}` };
     if (a.keyId !== current) otherKey++;
-    else if (!verifyAnchorSignature(a)) return { ok: false, checked: a.n - 1, otherKey, brokenAt: a.n, detail: "Signature does not verify" };
     prev = a.anchorHash;
   }
   return { ok: true, checked: rows.length, otherKey };
+}
+
+// The public pages call this on every view; the full walk is cached for a
+// minute per process so a crowd of anonymous readers cannot make the database
+// re-verify the whole chain for each of them.
+let verifyCache: { at: number; value: Promise<AnchorVerification> } | null = null;
+export function verifyAnchorsCached(maxAgeMs = 60_000): Promise<AnchorVerification> {
+  if (verifyCache && Date.now() - verifyCache.at < maxAgeMs) return verifyCache.value;
+  const value = verifyAnchors().catch((e) => { verifyCache = null; throw e; });
+  verifyCache = { at: Date.now(), value };
+  return value;
 }
 
 export function anchorView(a: LedgerAnchor) {

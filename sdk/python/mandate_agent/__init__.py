@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 __all__ = ["Mandate", "Hold", "Decision", "Remedy", "MandateError", "MandateDeclined", "MandatePending", "MandateAuthError"]
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 DEFAULT_BASE_URL = "https://mandate-ashen.vercel.app"
 

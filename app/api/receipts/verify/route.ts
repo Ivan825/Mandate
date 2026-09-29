@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hashEvent, GENESIS } from "@/lib/ledger";
 import { verifySignature, publicKeyPem, keyId, type Signature } from "@/lib/receipts";
+import { rateLimit, clientIp } from "@/lib/ratelimit";
+
+const MAX_BODY = 5 * 1024 * 1024;
 
 // Public verifier: POST an exported receipt and get back whether its chain
 // re-hashes cleanly and whether the head signature is ours. Anyone can call
@@ -10,10 +13,17 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // Public and CPU-bound: bounded body, bounded event count, per-address limit.
+  if (!(await rateLimit(`ip:${clientIp(req)}:receipt-verify-full`, 30)).ok) return NextResponse.json({ error: "Too many requests." }, { status: 429 });
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY) return NextResponse.json({ error: "Receipt too large to verify online; verify offline with the public key." }, { status: 413 });
+  const raw = await req.text();
+  if (raw.length > MAX_BODY) return NextResponse.json({ error: "Receipt too large to verify online; verify offline with the public key." }, { status: 413 });
   let r: { workspaceId?: string; events?: { seq: number; type: string; createdAt: string; prevHash: string; hash: string; payload: unknown }[]; signature?: Signature | null; scope?: { all?: boolean } };
-  try { r = await req.json(); } catch { return NextResponse.json({ error: "Body must be a receipt JSON." }, { status: 400 }); }
+  try { r = JSON.parse(raw); } catch { return NextResponse.json({ error: "Body must be a receipt JSON." }, { status: 400 }); }
+  if (!r || typeof r !== "object") return NextResponse.json({ error: "Body must be a receipt JSON." }, { status: 400 });
   const events = Array.isArray(r.events) ? r.events : [];
-  if (events.length > 50_000) return NextResponse.json({ error: "Receipt too large to verify online; verify offline with the public key." }, { status: 413 });
+  if (events.length > 20_000) return NextResponse.json({ error: "Receipt too large to verify online; verify offline with the public key." }, { status: 413 });
   let chainOk = true, detail = "";
   if (r.scope?.all) {
     let prev = GENESIS, expected = 1;
@@ -40,7 +50,7 @@ export async function POST(req: NextRequest) {
     // mandate slice proves each row's own hash but not that the slice is
     // complete or unaltered — say so, rather than leave "chainOk" to imply it.
     coverage: full ? "chain" : "rows-only",
-    eventsCovered: full && chainOk && sigOk,
+    eventsCovered: full && chainOk && sigOk && events.length > 0,
     note: full ? undefined : "This is a mandate-scoped slice. The signature covers the workspace chain head at export time, not these rows; verify the full receipt (scope.all) for a covered verdict.",
   });
 }

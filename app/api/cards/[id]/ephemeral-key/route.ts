@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCtx, can } from "@/lib/session";
+import { getCtx, can, sameOriginRequest } from "@/lib/session";
 import { getMandate } from "@/lib/service";
 import { stripeEnabled, cardEphemeralKey } from "@/lib/stripe";
 import { rateLimit } from "@/lib/ratelimit";
@@ -10,6 +10,7 @@ import { recordEvent } from "@/lib/ledger";
 // The PAN never touches our server or our logs. Owners and admins only, and
 // every reveal is written to the ledger.
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  if (!sameOriginRequest(req)) return NextResponse.json({ error: "Cross-site request refused." }, { status: 403 });
   const session = await getCtx();
   if (!session) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
   if (!(await can({ mandate: ["issue"] }))) return NextResponse.json({ error: "Only owners and admins can view card details." }, { status: 403 });

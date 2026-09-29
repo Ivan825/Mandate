@@ -7,7 +7,7 @@ const base: Mandate = {
   id: "m1", agentId: "a1", name: "t", status: "active", currency: "USD",
   perTxnLimit: 5000, dailyLimit: 10000, totalLimit: 50000, approvalAbove: 2000,
   allowedMerchants: JSON.stringify(["OpenAI", "Vercel*"]), blockedCategories: JSON.stringify(["gambling"]),
-  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null, vetoAbove: null, vetoMinutes: 15, mode: "enforce", autonomyStep: 0, autonomyEvery: 10, autonomyCeiling: null, autonomyLevel: 0, autonomyStreak: 0, cosignAbove: null, cosignCount: 2, parentId: null, depth: 0, sandbox: 0,
+  activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: null, holdTtlHours: 24, holdPolicy: "capture", pausedUntil: null, pausedBy: null, vetoAbove: null, vetoMinutes: 15, mode: "enforce", autonomyStep: 0, autonomyEvery: 10, autonomyCeiling: null, autonomyLevel: 0, autonomyStreak: 0, cosignAbove: null, cosignCount: 2, parentId: null, depth: 0, sandbox: 0, delegatedBy: null,
   workspaceId: "ws1", tokenHash: "h", tokenPrefix: "mnd_x", tokenReveal: null, stripeCardholderId: null, stripeCardId: null, cardLast4: null, cardExp: null, cardStatus: null, cardError: null,
   createdAt: new Date(), revokedAt: null,
 };

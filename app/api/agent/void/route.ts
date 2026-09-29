@@ -13,7 +13,7 @@ type Body = { transactionId?: unknown; reason?: unknown };
 
 export async function POST(req: NextRequest) {
   const log = logger(req, "agent_api");
-  const a = await authenticateMandate(req);
+  const a = await authenticateMandate(req, { allowInactive: true });
   if (!a.ok) return a.response;
   const body = await readJson<Body>(req);
   if (!body) return NextResponse.json({ error: "Body must be JSON." }, { status: 400 });

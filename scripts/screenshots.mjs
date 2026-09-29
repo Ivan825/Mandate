@@ -17,14 +17,14 @@ const dotenv = existsSync(".env") ? Object.fromEntries(readFileSync(".env", "utf
 const secret = (k) => process.env[k] ?? dotenv[k];
 let out = "";
 const app = spawn("npx", ["next", "start", "-p", String(PORT)], { env: {
-  ...process.env, ALLOW_SEED: "1", APP_URL: BASE,
+  ...process.env, ALLOW_SEED: "1", APP_URL: BASE, EMAIL_CONSOLE: "1",
   MANDATE_ENCRYPTION_KEY: secret("MANDATE_ENCRYPTION_KEY") ?? Buffer.alloc(32, 7).toString("base64"),
   RECEIPT_SIGNING_KEY: secret("RECEIPT_SIGNING_KEY") ?? Buffer.alloc(32, 9).toString("base64"),
   NOTIFY_SECRET: secret("NOTIFY_SECRET") ?? Buffer.alloc(32, 5).toString("base64"),
   BETTER_AUTH_SECRET: secret("BETTER_AUTH_SECRET") ?? "screenshots-secret-0123456789abcdef0123456789",
   LEGAL_OPERATOR_NAME: "Mandate", LEGAL_CONTACT_EMAIL: "hello@example.com",
   SMTP_URL: "", RESEND_API_KEY: "",
-}, stdio: ["ignore", "pipe", "pipe"] });
+}, stdio: ["ignore", "pipe", "pipe"], detached: true });
 app.stdout.on("data", (d) => { out += d.toString(); });
 app.stderr.on("data", (d) => { out += d.toString(); });
 const waitFor = async (url, ms = 60000) => { const t = Date.now(); while (Date.now() - t < ms) { try { const r = await fetch(url); if (r.ok || r.status === 307) return; } catch {} await new Promise((r) => setTimeout(r, 400)); } throw new Error("server did not start:\n" + out.slice(-800)); };
@@ -82,6 +82,6 @@ try {
   await b.close();
   console.log(`wrote ${OUT}/{landing,exposure,mandate,stats,approvals,activity,connect,ledger,anchors}.png`);
 } finally {
-  app.kill("SIGTERM");
+  try { process.kill(-app.pid, "SIGTERM"); } catch { app.kill("SIGTERM"); }
 }
 process.exit(0);

@@ -26,6 +26,14 @@ In scope: this repository and the hosted beta at `mandate-ashen.vercel.app`. Of 
 
 Out of scope: denial of service by volume, reports from automated scanners without a demonstrated impact, and issues in third-party services (Stripe, Vercel, Neon, Better Auth) — please report those upstream, but do let us know if Mandate's use of them is the problem.
 
+## What has been reviewed
+
+`docs/SECURITY-AUDIT.md` is the record of the 0.7.1 audit: what data Mandate holds and who can reach it, every finding with its fix and regression test, what was verified clean, and what is still open. Read it before reporting — several of the obvious probes (forged one-tap links, cross-mandate settlement, path escapes in the proxy, idempotency-key reuse, SSRF through webhooks) are already covered by tests you can run yourself.
+
+## Key rotation
+
+`RECEIPT_SIGNING_KEY` signs receipts, vouchers and public anchors. To rotate it, save the current public key (`/.well-known/mandate-receipt-key`), set the new seed, and list the old public key in `RECEIPT_PREVIOUS_PUBLIC_KEYS`. Everything signed before keeps verifying; anything signed under a key that is neither current nor listed is reported as a break, never tolerated. `MANDATE_ENCRYPTION_KEY` cannot be rotated in place yet: re-enter provider keys and target credentials after changing it.
+
 ## Supported versions
 
 The `main` branch and the hosted beta. Older commits are not patched.
