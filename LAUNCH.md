@@ -13,7 +13,7 @@ Everything below is in order. Budget an afternoon for steps 1–7; step 8 (Strip
 | A domain | optional: `your-app.vercel.app` works for the beta; buy one (~$10/yr) when you want a real name and Resend | |
 | Google Cloud | "Sign in with Google" (optional but worth it) | console.cloud.google.com |
 | Sentry | error alerts | sentry.io |
-| Better Uptime / UptimeRobot | a ping every minute | betteruptime.com |
+| Better Uptime / UptimeRobot | a ping every minute to `/api/health` (plain — it never wakes the database) | betteruptime.com |
 
 ## 1. Secrets (generate once, keep in a password manager)
 
@@ -82,7 +82,7 @@ The supported path is **Vercel + Neon** (below). AWS alternatives live in `deplo
 ## 6. Watch it
 
 1. Sentry → new project (Next.js) → copy the DSN → `SENTRY_DSN` on Vercel. Unhandled errors from every route and server action arrive as events.
-2. Uptime monitor on `https://yourdomain/` every minute, alert to your phone.
+2. Uptime monitor on `https://yourdomain/api/health` every minute, alert to your phone. Not on `/` and never on `?deep=1` at that rate: both wake Neon, and a free-plan database kept awake all month runs out of compute around day 17.
 3. Vercel → Logs: every agent request is a JSON line with a request id (`event: "decision"`, `"proxy.decision"`); filter by `mandateId` when someone reports a problem.
 
 ## 7. Prove it works before anyone else does

@@ -4,6 +4,9 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Fixed
+- `/api/health` no longer touches the database on a plain ping. An uptime monitor hitting it every minute kept Neon's scale-to-zero compute awake 24/7 (0.25 CU × 720 h = 180 CU-hours against the free plan's 100), which suspended the database mid-month and took the site down with a server-side exception on every page. `?deep=1` keeps the old behaviour (database check + housekeeping), throttled to once per 15 minutes per instance.
+
 ## [0.7.1] — 2026-09-28
 
 A security audit of everything built so far — every rail, every connection, every stored secret — with each finding fixed and pinned by a test. The full record, including what is still open, is `docs/SECURITY-AUDIT.md`.

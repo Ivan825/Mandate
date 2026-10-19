@@ -21,7 +21,7 @@ app/                      pages, server actions, API routes
   api/webhooks/stripe     real-time card authorisation + reconciliation
   api/ledger/, api/receipts/   export, verify
   api/cron/cleanup        daily housekeeping (CRON_SECRET bearer)
-  api/health              `select 1` — uptime monitors and load balancers
+  api/health              liveness without touching Postgres; `?deep=1` adds `select 1` + housekeeping (≤ every 20 min)
   .well-known/            OAuth discovery and the receipt public key
   sign-in, consent, invite, members, workspaces, proxy, stats, settings, docs,
   a/[id] (one-tap approve/deny), terms, privacy
