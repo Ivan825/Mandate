@@ -52,7 +52,7 @@ export function MandateForm({ agents, defaultAgent, stripeOn, cardProblem, cardC
           </div>
           <div className="field">
             <label htmlFor="name">Mandate name</label>
-            <input id="name" name="name" required defaultValue={v("name")} placeholder="e.g. Dev tooling, Sept 2026" aria-invalid={Boolean(err("name"))} />
+            <input id="name" name="name" required defaultValue={v("name")} placeholder="e.g. Dev tooling, this quarter" aria-invalid={Boolean(err("name"))} />
             {err("name") && <span className="hint" style={{ color: "var(--bad)" }}>{err("name")}</span>}
           </div>
         </div>

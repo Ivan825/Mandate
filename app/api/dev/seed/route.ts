@@ -24,10 +24,10 @@ export async function POST(req: Request) {
   const coder = await createAgent(ws, { name: "Claude Code (work laptop)", description: "Buys API credits and developer tools for the side project." });
   const shopper = await createAgent(ws, { name: "Household shopper", description: "Reorders groceries and household supplies." });
   const dev = await createMandate(ws, {
-    agentId: coder.id, name: "Dev tooling — Sept 2026", currency: "USD",
+    agentId: coder.id, name: "Dev tooling — this quarter", currency: "USD",
     perTxnLimit: 5000, dailyLimit: 15000, totalLimit: 50000, approvalAbove: 2000,
     allowedMerchants: ["OpenAI", "Anthropic", "Vercel*", "GitHub"], blockedCategories: ["gambling", "crypto"],
-    activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: new Date("2026-09-30T18:29:59.999Z"),
+    activeHoursStart: 0, activeHoursEnd: 24, timezone: "Asia/Kolkata", expiresAt: (() => { const d = new Date(Date.now() + 90 * 86400_000); d.setUTCHours(18, 29, 59, 999); return d; })(), // end of an IST day, ~90 days out — never a fixed date, or the demo dies on it
   });
   const home = await createMandate(ws, {
     agentId: shopper.id, name: "Groceries — weekly", currency: "INR",

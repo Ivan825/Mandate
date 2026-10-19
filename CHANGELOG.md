@@ -5,6 +5,7 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 ## [Unreleased]
 
 ### Fixed
+- The demo seed gave its main mandate a fixed expiry (30 Sept 2026), so from 1 October every seeded decision was `declined: expiry` and the e2e suite failed in CI. The seed now expires it 90 days from when it runs.
 - `/api/health` no longer touches the database on a plain ping. An uptime monitor hitting it every minute kept Neon's scale-to-zero compute awake 24/7 (0.25 CU × 720 h = 180 CU-hours against the free plan's 100), which suspended the database mid-month and took the site down with a server-side exception on every page. `?deep=1` keeps the old behaviour (database check + housekeeping), throttled to once per 15 minutes per instance.
 
 ## [0.7.1] — 2026-09-28
