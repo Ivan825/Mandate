@@ -20,6 +20,7 @@ Give an agent a limit instead of a card. Every request is decided against the te
   <a href="#connect-an-agent">Connect an agent</a> ·
   <a href="#run-it-locally">Run locally</a> ·
   <a href="#deploy-your-own">Deploy your own</a> ·
+  <a href="docs/SAFETY-CASE.md">Safety case</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
@@ -31,6 +32,8 @@ Give an agent a limit instead of a card. Every request is decided against the te
 Agents are starting to buy things: API credits, SaaS seats, groceries, ads. Today the only way to let one do that is to hand it your card or your API key — and then it holds *all* of your money, with no limits, no log, and no way to take it back short of cancelling the card.
 
 Mandate replaces the card with a **mandate**: how much per transaction, per day and in total; which merchants; which hours; and the amount above which the agent must ask you first. The agent gets a token that only works inside those terms. You get an approval inbox, a hash-chained ledger with signed receipts, and a revoke button.
+
+> **Does it actually hold?** [`docs/SAFETY-CASE.md`](docs/SAFETY-CASE.md) is the short answer: what Mandate stops, the 199 tests and bypass attempts behind that claim, how to reproduce it in three commands, and what it does *not* do. The full threat model and audit record is [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 
 ## How agents connect
 
