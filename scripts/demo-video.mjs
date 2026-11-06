@@ -306,7 +306,7 @@ if (!process.exitCode) {
   const delays = cues.map((c, i) => `[${i + 2}:a]aresample=44100,aformat=channel_layouts=stereo,adelay=${Math.round(c.at * 1000)}|${Math.round(c.at * 1000)}[v${i}]`).join(";");
   const voiceMix = cues.map((_, i) => `[v${i}]`).join("") + `amix=inputs=${cues.length}:normalize=0,volume=1.0[voice]`;
   const filter = `${delays};${voiceMix};[1:a]lowpass=f=1600,lowpass=f=1600,aecho=0.7:0.5:60|110:0.18|0.12,volume=0.55[bed];[voice]asplit[vA][vB];[bed][vA]sidechaincompress=threshold=0.02:ratio=6:attack=40:release=600:makeup=1[ducked];[ducked][vB]amix=inputs=2:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11[a]`;
-  execSync(`ffmpeg -y -loglevel error -i ${silent} -i ${WORK}/music.wav ${inputs} -filter_complex "${filter}" -map 0:v -map "[a]" -c:v copy -c:a aac -b:a 160k -shortest -movflags +faststart ${SITE}/mandate-demo.mp4`, { stdio: "inherit" });
+  execSync(`ffmpeg -y -loglevel error -i ${silent} -i ${WORK}/music.wav ${inputs} -filter_complex "${filter}" -map 0:v -map "[a]" -c:v copy -c:a aac -ar 48000 -b:a 160k -shortest -movflags +faststart ${SITE}/mandate-demo.mp4`, { stdio: "inherit" });
   execSync(`ffmpeg -y -loglevel error -i ${silent} -vf "fps=8,scale=640:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=96:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" ${OUT}/mandate-demo.gif`, { stdio: "inherit" });
   // Poster: the terms scene, a few seconds into its line.
   const poster = cues.find((c) => c.id === "terms");

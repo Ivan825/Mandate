@@ -11,6 +11,8 @@ const OPEN = ["/sign-in", "/consent", "/a/", "/api/auth", "/api/agent", "/api/mc
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   if (OPEN.some((p) => pathname === p || pathname.startsWith(p))) return NextResponse.next();
+  // Static assets under /public (the demo video, its poster, images) are public by nature.
+  if (pathname.startsWith("/demo/") || /\.(mp4|webm|gif|jpg|jpeg|png|svg|ico|webp|txt|xml)$/i.test(pathname)) return NextResponse.next();
   const cookie = getSessionCookie(req);
   if (cookie) return NextResponse.next();
   if (pathname === "/") return NextResponse.next(); // public landing page

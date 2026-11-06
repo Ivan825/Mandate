@@ -127,7 +127,7 @@ Known, accepted for now, and worth revisiting:
 - **Passkey challenges are single-use only per instance.** Structural checks (decision, user, freshness) hold across instances; a challenge could be reused across two instances within five minutes, but the approval it commits to can only be decided once, so the effect is nil.
 - **`TRUST_PROXY` on bare Node without a proxy** is now a shared bucket by default. Self-hosters behind nginx/Caddy must set `TRUST_PROXY=true` (documented in `.env.example` and `DEPLOY.md`).
 - **Provider price table is hand-maintained.** Unknown models are priced at the family maximum, which is safe but can over-reserve; review `lib/pricing.ts` when providers ship new tiers.
-- **No content-security-policy header yet.** Pages inline no third-party scripts, so the exposure is low, but a strict CSP is the right next step.
+- **The Content-Security-Policy allows inline scripts.** Next's app router injects its bootstrap scripts without nonces, so `script-src` carries `'unsafe-inline'`; everything else is locked to self (plus Google Fonts and Stripe). Moving to nonce-based scripts is the next step.
 
 ## 6. How to re-run this audit
 
