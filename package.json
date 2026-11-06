@@ -13,7 +13,8 @@
     "test:integration": "tsx --test tests/service.test.ts",
     "test:e2e": "node tests/e2e.mjs",
     "preflight": "node scripts/preflight.mjs",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "redteam": "node tests/redteam.mjs"
   },
   "dependencies": {
     "@better-auth/cimd": "^1.7.5",
@@ -54,7 +55,7 @@
     "node": ">=22"
   },
   "license": "AGPL-3.0-only",
-  "description": "Scoped, revocable spending authority for AI agents: limits, approvals, a signed ledger, and revocation — over MCP, an API-key proxy, REST tokens or virtual cards.",
+  "description": "Scoped, revocable spending authority for AI agents: limits, approvals, a signed ledger, and revocation \u2014 over MCP, an API-key proxy, REST tokens or virtual cards.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Ivan825/Mandate.git"

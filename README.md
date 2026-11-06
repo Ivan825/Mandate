@@ -20,6 +20,7 @@ Give an agent a limit instead of a card. Every request is decided against the te
   <a href="#connect-an-agent">Connect an agent</a> ·
   <a href="#run-it-locally">Run locally</a> ·
   <a href="#deploy-your-own">Deploy your own</a> ·
+  <a href="docs/RED-TEAM.md">Red team</a> ·
   <a href="docs/SAFETY-CASE.md">Safety case</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -33,7 +34,7 @@ Agents are starting to buy things: API credits, SaaS seats, groceries, ads. Toda
 
 Mandate replaces the card with a **mandate**: how much per transaction, per day and in total; which merchants; which hours; and the amount above which the agent must ask you first. The agent gets a token that only works inside those terms. You get an approval inbox, a hash-chained ledger with signed receipts, and a revoke button.
 
-> **Does it actually hold?** [`docs/SAFETY-CASE.md`](docs/SAFETY-CASE.md) is the short answer: what Mandate stops, the 199 tests and bypass attempts behind that claim, how to reproduce it in three commands, and what it does *not* do. The full threat model and audit record is [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
+> **Does it actually hold?** [`docs/RED-TEAM.md`](docs/RED-TEAM.md) is 55 things a misbehaving agent can try — over its limits, off its merchant list, forging an approval link, replaying an allowance, widening a delegation, settling someone else's hold, editing a voucher — and what happened to each: **55 of 55 stopped**, with the 8 legitimate counterparts going through. Re-run it with `npm run redteam`. [`docs/SAFETY-CASE.md`](docs/SAFETY-CASE.md) is the fuller argument: the mechanism, the 199 tests behind it, reproduction in three commands, and what it does *not* do. The full threat model and audit record is [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 
 ## How agents connect
 
@@ -160,6 +161,7 @@ Sign in with any email — without an email provider configured, the sign-in lin
 npm test                      # policy engine, pure
 npm run test:integration      # service layer against Postgres
 npm run build && npm run test:e2e   # real browser through every flow
+npm run redteam               # an adversarial agent against a running instance → docs/RED-TEAM.md
 ```
 
 ## Deploy your own

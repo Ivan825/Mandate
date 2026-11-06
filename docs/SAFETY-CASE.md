@@ -31,7 +31,9 @@ Three suites run in CI on every push (`.github/workflows/ci.yml`):
 | `npm run test:integration` | 41 | The service layer against real Postgres: concurrent requests never exceed the daily limit, idempotent retries, holds and captures, disputes, vouchers, anchors, routing, plus eight *hardening* tests written during the security audit |
 | `npm run test:e2e` | 136 | A real browser and real HTTP through every flow: sign-in, seed, approve from the inbox, one-tap links, MCP over OAuth, the LLM proxy against a stub upstream, Stripe webhooks with locally signed events, the panic button, delegation, vouchers, disputes |
 
-The bypass attempts that are pinned by tests, and what happens:
+A fourth suite, `npm run redteam`, plays an adversarial agent against a running instance over plain HTTP — the same calls a real agent makes — and writes its results to [`RED-TEAM.md`](RED-TEAM.md): **55 attempts, 55 stopped**, alongside 8 legitimate controls that go through, so the safeguard is shown to discriminate rather than to block everything. The groups: limits and scope, malformed input, escalation and approval links, holds and vouchers, delegation, idempotency and replay, tokens, the panic button, and the ledger.
+
+The bypass attempts pinned by the test suites, and what happens:
 
 - A second mandate's token trying to void the first mandate's hold → `404` (the row is invisible, not just forbidden).
 - An agent trying to void a card hold, a proxy hold, or a hold whose voucher has been issued → `409`.
@@ -62,6 +64,7 @@ docker compose up          # Postgres + the app on :3000, migrations applied
 # sign in with any email (the link prints to the terminal), then in the browser console:
 #   fetch('/api/dev/seed', {method:'POST'})   → a workspace with agents, mandates, decisions and a pending approval
 npm test && npm run test:integration && npm run build && npm run test:e2e
+npm run redteam            # the adversarial run; prints a table and the tally
 ```
 
 Everything is AGPL-3.0. The policy engine (`lib/policy.ts`) is a pure function of (mandate, request, facts) and can be lifted into another system on its own; the MCP server, the proxy and the SDKs are each independent entry points to the same `authorize()`.

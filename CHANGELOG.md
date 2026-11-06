@@ -4,6 +4,9 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+- `npm run redteam` (`tests/redteam.mjs`): an adversarial agent against a running instance — 55 attempts across limits, scope, malformed input, approval links, holds, vouchers, delegation, replay, tokens and the panic button, each checked for whether a capturable authorisation came out; writes `docs/RED-TEAM.md` with `REDTEAM_WRITE=1`. Runs in CI after the e2e suite. `docs/SAFETY-CASE.md`: the mechanism, the evidence, reproduction, limitations.
+
 ### Fixed
 - The demo seed gave its main mandate a fixed expiry (30 Sept 2026), so from 1 October every seeded decision was `declined: expiry` and the e2e suite failed in CI. The seed now expires it 90 days from when it runs.
 - `/api/health` no longer touches the database on a plain ping. An uptime monitor hitting it every minute kept Neon's scale-to-zero compute awake 24/7 (0.25 CU × 720 h = 180 CU-hours against the free plan's 100), which suspended the database mid-month and took the site down with a server-side exception on every page. `?deep=1` keeps the old behaviour (database check + housekeeping), throttled to once per 15 minutes per instance.
