@@ -5,6 +5,7 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 ## [Unreleased]
 
 ### Added
+- `npm run demo:video` (`scripts/demo-video.mjs`): renders the product demo — a real agent against a real mandate in a real browser, 2560×1440, narrated by a locally run open-weights voice (Kokoro, `scripts/demo-tts.py`) over a generated synth bed (`scripts/demo-music.py`), captions on screen. Output: `public/demo/mandate-demo.mp4` (on the landing page) and `docs/demo/mandate-demo.gif` (in the README).
 - `npm run redteam` (`tests/redteam.mjs`): an adversarial agent against a running instance — 55 attempts across limits, scope, malformed input, approval links, holds, vouchers, delegation, replay, tokens and the panic button, each checked for whether a capturable authorisation came out; writes `docs/RED-TEAM.md` with `REDTEAM_WRITE=1`. Runs in CI after the e2e suite. `docs/SAFETY-CASE.md`: the mechanism, the evidence, reproduction, limitations.
 
 ### Fixed

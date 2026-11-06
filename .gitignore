@@ -12,3 +12,6 @@ sdk/python/dist
 sdk/python/build
 sdk/python/*.egg-info
 __pycache__/
+
+# demo video scratch (recordings, narration cache)
+docs/demo/.work/

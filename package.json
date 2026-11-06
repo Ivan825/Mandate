@@ -14,7 +14,8 @@
     "test:e2e": "node tests/e2e.mjs",
     "preflight": "node scripts/preflight.mjs",
     "screenshots": "node scripts/screenshots.mjs",
-    "redteam": "node tests/redteam.mjs"
+    "redteam": "node tests/redteam.mjs",
+    "demo:video": "node scripts/demo-video.mjs"
   },
   "dependencies": {
     "@better-auth/cimd": "^1.7.5",

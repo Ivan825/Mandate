@@ -19,6 +19,13 @@ export function Landing({ base, goodbye = false }: { base: string; goodbye?: boo
         <p className="faint" style={{ fontSize: 13, marginTop: 10 }}>No passwords. Works with Claude, ChatGPT, Cursor and anything that speaks MCP.</p>
       </section>
 
+      <section className="demo" id="demo">
+        <video controls playsInline preload="metadata" poster="/demo/poster.jpg" aria-label="Two-minute demo of Mandate: a mandate is issued, an agent is approved, declined and made to ask, the owner approves once, freezes everything, revokes a delegation, and the ledger is shown">
+          <source src="/demo/mandate-demo.mp4" type="video/mp4" />
+        </video>
+        <p className="faint">Two minutes, narrated. A real agent against a real mandate: approved as a hold, declined off-list, held for a human, approved once, frozen, delegated, revoked — and all of it in the ledger.</p>
+      </section>
+
       <section className="three" id="how">
         <div>
           <div className="eyebrow">1 · Issue</div>

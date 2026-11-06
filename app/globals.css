@@ -149,6 +149,9 @@ legend{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transfor
 .landing .hero{padding:48px 0 40px;max-width:720px}
 .landing .hero h1{font-size:clamp(34px,5vw,52px);line-height:1.05;margin:10px 0 16px;letter-spacing:-.01em}
 .landing .lede{font-family:var(--serif);font-size:20px;line-height:1.45;max-width:60ch;margin-bottom:22px;color:var(--ink-2)}
+.landing .demo{padding:8px 0 36px}
+.landing .demo video{display:block;width:100%;aspect-ratio:16/9;border-radius:12px;border:1px solid var(--rule);background:#0b0d11;box-shadow:0 18px 60px rgba(0,0,0,.35)}
+.landing .demo p{font-size:13.5px;margin:10px 0 0;text-align:center}
 .landing .three{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;padding:28px 0;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
 .landing .three h3{margin:6px 0 8px}
 .landing .three p{font-size:14.5px;color:var(--ink-2);max-width:none}

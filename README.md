@@ -1,4 +1,9 @@
 <p align="center">
+  <a href="https://mandate-ashen.vercel.app/#demo"><img src="docs/demo/mandate-demo.gif" alt="Two-minute demo: a mandate is issued; an agent is approved as a hold, declined off-list and held for a human; the owner approves once, freezes everything, revokes a delegation; the ledger verifies" width="100%"></a><br>
+  <sub>▶ <a href="https://mandate-ashen.vercel.app/#demo">Watch the narrated 1440p version on the site</a> · re-render it yourself with <code>npm run demo:video</code></sub>
+</p>
+
+<p align="center">
   <img src="docs/images/exposure.png" alt="Mandate — the exposure book: every agent's mandate, sub-mandates and sandboxes, what they may spend and what they have, with the panic button in the top bar" width="100%">
 </p>
 
