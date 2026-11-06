@@ -3,7 +3,7 @@ export default function PrivacyPage() {
   const contact = process.env.LEGAL_CONTACT_EMAIL ?? "the contact address in the page footer";
   return (
     <div className="legal">
-      <div className="eyebrow">Legal</div>
+      <div className="sec-n">Legal</div>
       <h1>Privacy Policy</h1>
       <p>Last updated 5 September 2026. This policy explains what {operator} ("we") collects when you use Mandate and why.</p>
       <h2>What we collect</h2>

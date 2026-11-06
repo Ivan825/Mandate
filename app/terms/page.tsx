@@ -3,7 +3,7 @@ export default function TermsPage() {
   const contact = process.env.LEGAL_CONTACT_EMAIL ?? "the contact address in the page footer";
   return (
     <div className="legal">
-      <div className="eyebrow">Legal</div>
+      <div className="sec-n">Legal</div>
       <h1>Terms of Service</h1>
       <p>Last updated 5 September 2026. These terms govern your use of Mandate as provided by {operator} ("we"). By creating an account you agree to them.</p>
       <h2>What Mandate is</h2>

@@ -4,6 +4,9 @@ All notable changes to Mandate. The format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Changed
+- The signed-out site is redesigned: a public navigation and footer, a landing page structured as claim → live decision board → the problem as a table → nine numbered sections (what it is, how it works, every rail, when it says no, the owner's controls, proof, your machines, get started) → close; a two-column sign-in page; `/docs` is now public with a section nav; legal and anchors pages share the typography. Static assets under `/demo/` and media files pass the sign-in gate.
+
 ### Added
 - `npm run demo:video` (`scripts/demo-video.mjs`): renders the product demo — a real agent against a real mandate in a real browser, 2560×1440, narrated by a locally run open-weights voice (Kokoro, `scripts/demo-tts.py`) over a generated synth bed (`scripts/demo-music.py`), captions on screen. Output: `public/demo/mandate-demo.mp4` (on the landing page) and `docs/demo/mandate-demo.gif` (in the README).
 - `npm run redteam` (`tests/redteam.mjs`): an adversarial agent against a running instance — 55 attempts across limits, scope, malformed input, approval links, holds, vouchers, delegation, replay, tokens and the panic button, each checked for whether a capturable authorisation came out; writes `docs/RED-TEAM.md` with `REDTEAM_WRITE=1`. Runs in CI after the e2e suite. `docs/SAFETY-CASE.md`: the mechanism, the evidence, reproduction, limitations.

@@ -16,8 +16,8 @@ export default async function AnchorsPage({ searchParams }: { searchParams: Prom
   const v = await verifyAnchorsCached();
   const base = appUrl();
   return (
-    <div style={{ maxWidth: 900, margin: "0 auto" }}>
-      <div className="eyebrow">Mandate · public anchors</div>
+    <div className="anchors-page" style={{ maxWidth: 900, margin: "0 auto" }}>
+      <div className="sec-n">Mandate · public anchors</div>
       <h1>Where every ledger stood, signed and published</h1>
       <p className="muted" style={{ margin: "8px 0 16px" }}>Each Mandate workspace keeps a hash-chained ledger of everything its agents were allowed, refused or asked. A chain proves nothing was edited in the middle; these anchors prove the chain was not quietly rebuilt afterwards. Once a day the head of every ledger that moved is signed here, chained to the previous anchor. A workspace appears only as the hash of its id. Anyone holding a receipt can find the anchor that covers it{label ? " — you are looking at one workspace's anchors" : ""}. Key <span className="mono">{keyId()}</span> · <a href={`${base}/.well-known/mandate-receipt-key`}>public key</a> · <a href={`${base}/api/ledger/anchors${label ? `?label=${label}` : ""}`}>JSON</a>.</p>
       <div className={`notice ${v.ok ? "ok" : "bad"}`} style={{ marginBottom: 16 }}>{v.ok ? <><strong>Anchor chain intact.</strong> {v.checked} anchor{v.checked === 1 ? "" : "s"} re-verified just now: every hash, link and signature{v.otherKey > 0 ? ` (${v.otherKey} signed with an earlier key; their hashes still bind them into the chain)` : ""}.</> : <><strong>Anchor chain broken at #{v.brokenAt}.</strong> {v.detail}.</>}</div>

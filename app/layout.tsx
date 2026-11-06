@@ -43,6 +43,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     try { orgs = (await auth.api.listOrganizations({ headers: await headers() })).map((o) => ({ id: o.id, name: o.name })); } catch { /* ignore */ }
   }
   const problems = configProblems();
+  const source = process.env.SOURCE_URL ?? "https://github.com/Ivan825/Mandate";
   const rawTheme = (await cookies()).get("theme")?.value;
   const theme: Theme = rawTheme === "light" || rawTheme === "dark" ? rawTheme : "system";
   return (
@@ -77,14 +78,25 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <form action={signOutAction}><button className="btn secondary sm" type="submit" title={ctx.email}>Sign out</button></form>
               </>
             ) : (
-              <Link href="/sign-in" className="btn secondary sm">Sign in</Link>
+              <>
+                <nav className="nav pubnav" aria-label="Site">
+                  <a href="/#demo">Demo</a>
+                  <a href="/#how">How it works</a>
+                  <a href="/#rails">Rails</a>
+                  <a href="/#proof">Proof</a>
+                  <Link href="/docs">Docs</Link>
+                  <a href={source} rel="noopener">GitHub</a>
+                </nav>
+                <Link href="/sign-in" className="btn secondary sm pub-signin">Sign in</Link>
+                <Link href="/sign-in" className="btn accent sm">Start free</Link>
+              </>
             )}
             <ThemeToggle initial={theme} />
             {ctx && <LiveRefresh />}
             {ctx && <PwaRegister />}
           </div>
         </div>
-        <main className="main">
+        <main className={ctx ? "main" : "main public"}>
           {problems.length > 0 && isOperator(ctx?.email) && <div className="notice bad" style={{ marginBottom: 20 }}><strong>Configuration problem (shown to operators only).</strong> {problems.join(" ")}</div>}
           {ctx && frozen && (
             <div className="notice bad frozen" style={{ marginBottom: 20 }}>
@@ -96,16 +108,31 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           )}
           {children}
         </main>
-        <footer className="sitefoot">
-          <div className="sitefoot-in">
-            <span>Mandate</span>
-            <Link href="/terms">Terms</Link>
-            <Link href="/privacy">Privacy</Link>
-            <Link href="/docs">Connect agents</Link>
-            {process.env.LEGAL_CONTACT_EMAIL && <a href={`mailto:${process.env.LEGAL_CONTACT_EMAIL}`}>Contact</a>}
-            <a href={process.env.SOURCE_URL ?? "https://github.com/Ivan825/Mandate"} rel="noopener">Source</a>
-          </div>
-        </footer>
+        {ctx ? (
+          <footer className="sitefoot">
+            <div className="sitefoot-in">
+              <span>Mandate</span>
+              <Link href="/terms">Terms</Link>
+              <Link href="/privacy">Privacy</Link>
+              <Link href="/docs">Connect agents</Link>
+              {process.env.LEGAL_CONTACT_EMAIL && <a href={`mailto:${process.env.LEGAL_CONTACT_EMAIL}`}>Contact</a>}
+              <a href={source} rel="noopener">Source</a>
+            </div>
+          </footer>
+        ) : (
+          <footer className="pubfoot">
+            <div className="pubfoot-in">
+              <div className="pubfoot-brand">
+                <span className="brand"><span className="mark" aria-hidden /> Mandate</span>
+                <p>Scoped, revocable spending authority for AI agents. Open source under AGPL-3.0; run the hosted beta or your own.</p>
+              </div>
+              <div><div className="eyebrow">Product</div><a href="/#demo">Demo</a><a href="/#how">How it works</a><a href="/#rails">Rails</a><a href="/#controls">Controls</a><Link href="/docs">Docs</Link><Link href="/anchors">Public anchors</Link></div>
+              <div><div className="eyebrow">Trust</div><a href={`${source}/blob/main/docs/SAFETY-CASE.md`} rel="noopener">Safety case</a><a href={`${source}/blob/main/docs/RED-TEAM.md`} rel="noopener">Red-team results</a><a href={`${source}/blob/main/docs/SECURITY-AUDIT.md`} rel="noopener">Security audit</a><a href={`${source}/blob/main/SECURITY.md`} rel="noopener">Report a vulnerability</a></div>
+              <div><div className="eyebrow">Project</div><a href={source} rel="noopener">GitHub</a><a href={`${source}/blob/main/CHANGELOG.md`} rel="noopener">Changelog</a><a href={`${source}/blob/main/DEPLOY.md`} rel="noopener">Deploy your own</a><Link href="/terms">Terms</Link><Link href="/privacy">Privacy</Link>{process.env.LEGAL_CONTACT_EMAIL && <a href={`mailto:${process.env.LEGAL_CONTACT_EMAIL}`}>Contact</a>}</div>
+            </div>
+            <div className="pubfoot-end">© {new Date().getFullYear()} Mandate · AGPL-3.0 · Not a bank, not a card issuer: a control and record-keeping layer in front of the ones you already use.</div>
+          </footer>
+        )}
       </body>
     </html>
   );

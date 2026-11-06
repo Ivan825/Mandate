@@ -1,20 +1,25 @@
-import { requireCtx } from "@/lib/session";
 import { MCP_RESOURCE } from "@/lib/auth";
 import { appUrl } from "@/lib/env";
 import { stripeEnabled } from "@/lib/stripe";
 import Link from "next/link";
 
+export const metadata = { title: "Docs — connect an agent", description: "Four ways an agent spends under a mandate: MCP with OAuth, a REST token or the SDKs, the LLM proxy, and a local MCP server. Plus webhooks and virtual cards." };
+
 export default async function DocsPage() {
-  await requireCtx();
   const base = appUrl();
   return (
-    <div style={{ maxWidth: 780 }}>
-      <div className="eyebrow">Connect agents</div>
-      <h1>Four ways an agent spends under a mandate</h1>
-      <p className="muted" style={{ margin: "8px 0 24px" }}>Whichever way it connects, the agent never sees a card number or your accounts, every purchase is decided by the same policy engine, and every decision lands in your ledger.</p>
+    <div className="pubdoc">
+      <div className="pubdoc-head">
+        <div className="sec-n">Docs · Connect an agent</div>
+        <h1>Four ways an agent spends under a mandate.</h1>
+        <p className="sec-lede">Whichever way it connects, the agent never sees a card number or your accounts, every purchase is decided by the same policy engine, and every decision lands in your ledger. Amounts are integers in minor units everywhere.</p>
+        <nav className="pubdoc-nav" aria-label="On this page">
+          <a href="#mcp">1 · MCP + OAuth</a><a href="#rest">2 · REST + SDKs</a><a href="#proxy">3 · LLM proxy</a><a href="#stdio">4 · Local MCP</a><a href="#webhooks">Webhooks</a><a href="#cards">Cards</a>
+        </nav>
+      </div>
 
       <div className="stack">
-        <div className="card">
+        <div className="card" id="mcp">
           <h3>1. Connect with one click (MCP + OAuth) — Claude, ChatGPT, Cursor, and any MCP client</h3>
           <p className="muted" style={{ marginTop: 8 }}>Mandate is a remote MCP server. Add it in your agent's connectors or MCP settings using this URL; the agent will send you here to sign in and approve, and receives a scoped token automatically. Nothing to copy.</p>
           <pre>{MCP_RESOURCE}</pre>
@@ -25,7 +30,7 @@ claude mcp add --transport http mandate ${MCP_RESOURCE}
 # Cursor / Windsurf / others: add an MCP server of type "http" with the URL above.`}</pre>
         </div>
 
-        <div className="card">
+        <div className="card" id="rest">
           <h3>2. Your own agent: the SDKs or the REST API with a mandate token</h3>
           <p className="muted" style={{ marginTop: 8 }}>For code you run yourself. The token is shown once when you issue a mandate. The <Link href="/connect">connect wizard</Link> fills it into these snippets for you and watches for the first call.</p>
           <pre>{`pip install mandate-agent          # Python: from mandate_agent import Mandate
@@ -48,7 +53,7 @@ GET  ${base}/api/agent/transactions/:id                  # held | captured | voi
 GET  ${base}/api/agent/transactions/:id/voucher          # signed voucher to hand the merchant
 POST ${base}/api/agent/delegate    { "name": "Price checker", "perTxnLimit": 500, "dailyLimit": 2000, "totalLimit": 5000, "allowedMerchants": ["OpenAI"] }
 GET  ${base}/api/agent/mandate                           # limits, what's left, open holds, sub-mandates`}</pre>
-          <p className="muted" style={{ marginTop: 10 }}><strong>Vouchers.</strong> An approved hold's answer includes <code>voucher</code>: a signed token the agent hands to the merchant. The merchant verifies it offline with the key at <code>/.well-known/mandate-receipt-key</code> (or <code>POST /api/vouchers/verify</code>) and redeems it at <code>POST /api/vouchers/redeem</code> for what was actually sold — no account, no card network. A decline with rule <code>frozen</code> means the owner pressed the panic button: stop and tell the user. A decline with rule <code>parent_…</code> means a sub-mandate ran into its parent's terms.</p>
+          <p className="muted" style={{ marginTop: 10 }}><strong>Vouchers.</strong> An approved hold's answer carries <code>voucherUrl</code>; fetching it (<code>GET /api/agent/transactions/:id/voucher</code>, MCP <code>get_voucher</code>, SDK <code>voucher()</code>) returns a signed token the agent hands to the merchant — and from that moment the agent can no longer capture or void the hold itself. The merchant verifies it offline with the key at <code>/.well-known/mandate-receipt-key</code> (or <code>POST /api/vouchers/verify</code>) and redeems it at <code>POST /api/vouchers/redeem</code> for what was actually sold — no account, no card network. A decline with rule <code>frozen</code> means the owner pressed the panic button: stop and tell the user. A decline with rule <code>parent_…</code> means a sub-mandate ran into its parent's terms.</p>
           <pre>{`# merchant side, no account needed
 POST ${base}/api/vouchers/verify   { "voucher": "mv1.…" }                       → valid, redeemable, amount, expiresAt
 POST ${base}/api/vouchers/redeem   { "voucher": "mv1.…", "amount": 1800, "merchant": "Acme", "reference": "INV-42" }
@@ -56,7 +61,7 @@ POST ${base}/api/vouchers/redeem   { "voucher": "mv1.…", "amount": 1800, "merc
           <p className="muted" style={{ marginTop: 10 }}><strong>Sandbox.</strong> A mandate issued as a sandbox has a <code>mnd_test_</code> token; it decides, asks and records exactly like a live one, never touches a card or a real API, and can be reset from its page. Use it in your integration tests.</p>
         </div>
 
-        <div className="card">
+        <div className="card" id="proxy">
           <h3>3. Meter LLM API spend with a proxy key (OpenAI, Anthropic, Gemini) — or govern any API</h3>
           <p className="muted" style={{ marginTop: 8 }}>Store your provider key once on the <Link href="/proxy">API proxy</Link> page and hand the agent a proxy key bound to a USD mandate. Point the SDK's base URL at Mandate and change nothing else: each call is priced from the request, pre-authorised against the mandate, forwarded with the real key, and settled on the tokens the provider reports. The agent never holds the real key, so it cannot spend past the mandate.</p>
           <pre>{`OPENAI_BASE_URL=${base}/api/proxy/openai      OPENAI_API_KEY=mpx_...
@@ -67,7 +72,7 @@ ANTHROPIC_BASE_URL=${base}/api/proxy/anthropic ANTHROPIC_API_KEY=mpx_...
 GET  ${base}/api/proxy/t/<slug>/<path>     Authorization: Bearer mpx_...   # any method`}</pre>
         </div>
 
-        <div className="card">
+        <div className="card" id="stdio">
           <h3>4. Local MCP for Claude Code / Cursor without OAuth</h3>
           <p className="muted" style={{ marginTop: 8 }}>The repo ships <code>mcp/server.mjs</code>, a zero-dependency stdio server that wraps the REST API with a mandate token. Useful offline or for a single machine.</p>
           <pre>{`{
@@ -81,12 +86,12 @@ GET  ${base}/api/proxy/t/<slug>/<path>     Authorization: Bearer mpx_...   # any
 }`}</pre>
         </div>
 
-        <div className="card">
+        <div className="card" id="webhooks">
           <h3>Event webhooks — for the systems around the agent</h3>
           <p className="muted" style={{ marginTop: 8 }}>Every ledger event (decisions, captures, approvals, revocations, member changes) can be pushed as signed JSON to your own endpoints, with retries and ordering per endpoint. Set them up under <Link href="/settings/webhooks">Settings → Event webhooks</Link>; verify <code>Mandate-Signature</code> with the secret shown once.</p>
         </div>
 
-        <div className="card">
+        <div className="card" id="cards">
           <h3>Virtual cards</h3>
           {stripeEnabled() ? (
             <p className="muted" style={{ marginTop: 8 }}>Tick "virtual card" when issuing a mandate and the agent gets a card of its own, paid from your workspace's prepaid <Link href="/balance">balance</Link>. Every card authorisation hits Mandate in real time and is decided by the same terms, so an agent that pays by card and an agent that asks by API are held to identical limits. A pending decision declines the swipe and waits for your approval.</p>
