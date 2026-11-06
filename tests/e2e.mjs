@@ -78,7 +78,14 @@ try {
 
   // 1. landing + sign-in by email link
   await p.goto(BASE + "/", { waitUntil: "networkidle" });
-  check("landing renders", (await p.locator("h1").first().textContent())?.includes("sanction"));
+  check("landing renders", (await p.locator("h1").first().textContent())?.includes("limit") && (await p.locator(".board-rows .row").count()) === 4 && (await p.locator("nav.pubnav a").count()) >= 5);
+  // The public pages need no session: docs, terms, the demo assets.
+  for (const [path, needle] of [["/docs", "Four ways"], ["/terms", "Terms of Service"], ["/privacy", "Privacy Policy"]]) {
+    const r = await fetch(BASE + path, { redirect: "manual" });
+    check(`${path} is public`, r.status === 200 && (await r.text()).includes(needle), String(r.status));
+  }
+  const poster = await fetch(BASE + "/demo/poster.jpg", { redirect: "manual" });
+  check("demo assets are served without a session", poster.status === 200 && (poster.headers.get("content-type") ?? "").startsWith("image/"), String(poster.status));
   const email = `e2e-${Date.now()}@example.com`;
   await p.goto(BASE + "/sign-in", { waitUntil: "networkidle" });
   await p.fill("#email", email); await p.click("form.form button[type=submit]");
