@@ -39,7 +39,7 @@ Agents are starting to buy things: API credits, SaaS seats, groceries, ads. Toda
 
 Mandate replaces the card with a **mandate**: how much per transaction, per day and in total; which merchants; which hours; and the amount above which the agent must ask you first. The agent gets a token that only works inside those terms. You get an approval inbox, a hash-chained ledger with signed receipts, and a revoke button.
 
-> **Does it actually hold?** [`docs/RED-TEAM.md`](docs/RED-TEAM.md) is 55 things a misbehaving agent can try — over its limits, off its merchant list, forging an approval link, replaying an allowance, widening a delegation, settling someone else's hold, editing a voucher — and what happened to each: **55 of 55 stopped**, with the 8 legitimate counterparts going through. Re-run it with `npm run redteam`. [`docs/SAFETY-CASE.md`](docs/SAFETY-CASE.md) is the fuller argument: the mechanism, the 199 tests behind it, reproduction in three commands, and what it does *not* do. The full threat model and audit record is [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
+> **Does it actually hold?** [`docs/RED-TEAM.md`](docs/RED-TEAM.md) is 55 things a misbehaving agent can try — over its limits, off its merchant list, forging an approval link, replaying an allowance, widening a delegation, settling someone else's hold, editing a voucher — and what happened to each: **55 of 55 stopped**, with the 8 legitimate counterparts going through. Re-run it with `npm run redteam`. [`docs/SAFETY-CASE.md`](docs/SAFETY-CASE.md) is the fuller argument: the mechanism, the 199 tests behind it, reproduction in three commands, and what it does *not* do (also summarised under [Limitations](#limitations) below). The irreversible actions it guards are financial transactions and the actions an agent delegates to helpers. The full threat model and audit record is [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 
 ## How agents connect
 
@@ -187,6 +187,17 @@ Also included: a single-server AWS deployment with automatic HTTPS and backups (
 - The panic button is a workspace fact the engine checks first, on every rail, before any mandate is consulted.
 
 Found something? See [`SECURITY.md`](SECURITY.md).
+
+## Limitations
+
+Stated plainly, because a safeguard is only as useful as the edges it admits to:
+
+- **It governs money that flows through it.** A card or key an agent already holds is outside its reach; adoption is the safeguard.
+- **It enforces terms, it does not judge intent.** A purchase within limits, at an allowed merchant, in allowed hours goes through. Anomaly flags (unusual amount, new merchant, decline bursts, rapid repeats) surface oddities; they do not block.
+- **Approvals are only as good as the approver.** A one-tap link can be tapped without reading. Co-signing and passkey signing raise the bar; they do not remove it.
+- **The operator is trusted for confidentiality.** Provider keys are encrypted under a key the operator holds; public anchoring makes a rewritten ledger *detectable*, not impossible. KMS envelope encryption and in-place key rotation are the next step.
+- **Virtual cards need Stripe Issuing approval** on the operator's account; the hosted beta runs without the card rail.
+- **Smaller open items** from the audit: the passkey challenge carries the approver's account id in clear; the rate limiter fails open if Postgres is down; the CSP still allows inline scripts; the LLM price table is hand-maintained (unknown models are priced at the family maximum). Full list: [`docs/SAFETY-CASE.md §6`](docs/SAFETY-CASE.md#6-what-it-does-not-do-limitations).
 
 ## Documentation
 
